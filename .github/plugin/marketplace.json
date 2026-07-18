@@ -3,22 +3,22 @@
   "name": "agent-harbor",
   "owner": { "name": "Guillermo Villarroel" },
   "metadata": {
-    "description": "A minimal, declarative marketplace for composable Copilot agents and trusted skills.",
-    "version": "0.3.1"
+    "description": "A minimal, declarative marketplace for coordinated Copilot agent teams and trusted skills.",
+    "version": "0.4.0"
   },
   "plugins": [
     {
       "name": "agent-foundry",
-      "description": "Compose permanent or one-shot Markdown agents from an explicit trusted-skill catalog.",
-      "version": "0.3.1",
+      "description": "Coordinate permanent and one-shot Markdown agents through a trusted-skill catalog.",
+      "version": "0.4.0",
       "source": "./plugins/agent-foundry",
       "category": "productivity",
-      "tags": ["agents", "skills", "trust", "declarative", "markdown"]
+      "tags": ["agents", "teams", "orchestration", "skills", "trust", "declarative", "markdown"]
     },
     {
       "name": "repo-cartographer",
       "description": "A repository mapping agent mixing a local skill with Markdown sourced from gvillarroel/zx-harness.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "source": "./plugins/repo-cartographer",
       "category": "development",
       "tags": ["repositories", "zx", "external-skill"]

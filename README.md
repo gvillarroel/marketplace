@@ -4,7 +4,7 @@ A minimal GitHub Copilot CLI marketplace. It contains no application, package de
 
 The two plugins are:
 
-- **agent-foundry** — Markdown commands for `join`, `leave`, `agents`, `contract`, and `list-skills`, plus declarative agent and trust-policy skills.
+- **agent-foundry** — Markdown commands for `join`, `leave`, `agents`, `contract`, and `list-skills`, plus `team-lead`, agent design, and trust-policy components.
 - **repo-cartographer** — a repository agent that combines a local mapping skill with an instruction-only Markdown projection from [`gvillarroel/zx-harness`](https://github.com/gvillarroel/zx-harness).
 
 ## Install
@@ -25,6 +25,24 @@ copilot plugin update repo-cartographer
 ```
 
 Start a new interactive `copilot` session after installing or updating. Plugin commands are namespaced as `/agent-foundry:<command>`. Use `/help` to inspect commands, Copilot's built-in `/skills list` to confirm loaded skills, `/agent-foundry:list-skills` to inspect agent-foundry's trusted remote catalog, and `/agent` to inspect agents.
+
+## Team lead
+
+Select `agent-foundry:team-lead` from `/agent`, or start it directly:
+
+```powershell
+copilot --agent agent-foundry:team-lead
+```
+
+The team lead is an orchestration-only agent: it receives only `task`, `list_agents`, `read_agent`, and `write_agent`, so it cannot inspect, edit, execute, browse, or load a domain skill in the parent context. It routes each work unit to the narrowest eligible definition exposed by `task`, uses `repo-cartographer:repo-cartographer` for repository mapping or zx work, and uses `agent-foundry:agent-architect` for rosters, lifecycle, or trusted-skill work. When no permanent specialist fits, it uses the least-capable compatible built-in as a disposable contractor.
+
+Parameterized plugin commands remain explicit user actions because the native `skill` tool does not populate their `$ARGUMENTS`. The team lead therefore returns ready-to-run `/agent-foundry:join`, `/agent-foundry:leave`, `/agent-foundry:contract`, or `/agent-foundry:list-skills` commands when needed instead of pretending it executed them.
+
+Plugin agents and project agents created with `"autoInvoke": true` are eligible for team-lead delegation. Manual-only profiles remain selectable through `/agent` but are intentionally absent from `task` routing. The team lead is itself manual-only to prevent recursive orchestration and inherits the session's selected model.
+
+The bundled domain skills disable automatic model invocation so they cannot replace the routing decision. Their owning specialist can still load them explicitly by exact name before doing its work.
+
+Routing is declarative prompt policy, not an executable dispatcher: Copilot exposes the exact custom IDs to `task`, but the selected model ultimately emits the tool arguments. The team lead's final `actual task.agent_type` table makes a fallback visible instead of attributing built-in work to a custom agent.
 
 ## Trusted remote skills
 
@@ -50,10 +68,10 @@ The original invocation now works without starting a nested SDK client:
 ## Permanent agents
 
 ```text
-/agent-foundry:join {"name":"reviewer","description":"Read-only project reviewer","prompt":"Return only high-confidence findings.","tools":["read","search"],"skills":[{"kind":"installed","name":"agent-blueprints"}]}
+/agent-foundry:join {"name":"reviewer","description":"Read-only project reviewer","prompt":"Return only high-confidence findings.","tools":["read","search"],"skills":[{"kind":"installed","name":"agent-blueprints"}],"autoInvoke":true}
 ```
 
-This creates `.github/agents/reviewer.agent.md`. Skill bodies are embedded with provenance because Copilot CLI agent frontmatter does not dynamically resolve a `skills` array. Start a new session, run `/agent`, and select `reviewer`.
+This creates `.github/agents/reviewer.agent.md`. Skill bodies are embedded with provenance because Copilot CLI agent frontmatter does not dynamically resolve a `skills` array. `autoInvoke: true` makes it eligible for team-lead routing; omit it to keep the safer manual-only default. Start a new session, run `/agent`, and select `reviewer`.
 
 The bundled agents omit `model`, so they inherit Copilot's current selection. Leaving the session on `Auto` lets the account choose an available low-cost model instead of pinning an unavailable model ID.
 
@@ -71,4 +89,4 @@ The bundled agents omit `model`, so they inherit Copilot's current selection. Le
 - Trusted remote scope is declared in the internal `trusted-skill-sources` Markdown skill.
 - Remote skills are instruction-only: sibling scripts and resources are neither fetched nor executed.
 - Contractors use the current Copilot runtime's subagent orchestration. There is no `CopilotClient`, platform package lookup, TypeScript runtime, or experimental extension.
-- Copilot CLI 1.0.71 accepts only its built-in `explore`, `task`, and `general-purpose` values in `task.agent_type`; use `/agent-foundry:join` when a durable agent needs a hard custom `tools` allowlist.
+- One-shot `/agent-foundry:contract` definitions are unregistered and therefore map to built-in `explore`, `task`, or `general-purpose`. Registered custom agents that allow model invocation appear under their exact `task.agent_type`; use `/agent-foundry:join` with `autoInvoke: true` when a durable routed agent needs a hard custom `tools` allowlist.

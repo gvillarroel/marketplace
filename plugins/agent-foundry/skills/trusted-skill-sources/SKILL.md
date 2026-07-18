@@ -2,6 +2,7 @@
 name: trusted-skill-sources
 description: Internal agent-foundry policy defining which pinned GitHub skill paths are trusted. Load only when listing or validating remote skills.
 user-invocable: false
+disable-model-invocation: true
 ---
 
 # Trusted skill sources

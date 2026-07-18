@@ -1,6 +1,7 @@
 ---
 name: repository-map
 description: Produce a compact, evidence-based map of a source repository.
+disable-model-invocation: true
 ---
 
 # Repository map

@@ -1,6 +1,7 @@
 ---
 name: zx-example-author
 description: Author small runnable zx examples from short implementation requests.
+disable-model-invocation: true
 metadata:
   source: https://github.com/gvillarroel/zx-harness/blob/181983bb58138ba3cc9aab25dd78b0557111d2bb/skills/zx-example-author/SKILL.md
   source_commit: 181983bb58138ba3cc9aab25dd78b0557111d2bb

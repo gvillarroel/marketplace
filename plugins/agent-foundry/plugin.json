@@ -1,11 +1,11 @@
 {
   "name": "agent-foundry",
-  "description": "Create, list and run declarative agents with an explicit trusted-skill catalog.",
-  "version": "0.3.1",
+  "description": "Create and coordinate declarative agent teams with an explicit trusted-skill catalog.",
+  "version": "0.4.0",
   "author": { "name": "Guillermo Villarroel" },
   "repository": "https://github.com/gvillarroel/marketplace",
   "license": "MIT",
-  "keywords": ["agents", "contractors", "skills", "trust", "markdown"],
+  "keywords": ["agents", "teams", "orchestration", "contractors", "skills", "trust", "markdown"],
   "commands": "commands/",
   "agents": "agents/",
   "skills": "skills/"

@@ -25,6 +25,6 @@ Parse one JSON object with required `name`, `description`, `prompt`, and `tools`
 6. Write frontmatter using only `name`, `description`, `tools`, optional `model`, `disable-model-invocation` (inverse of `autoInvoke`, default true), and `user-invocable` (default true). Do not write a `skills` field.
 7. After frontmatter add `<!-- agent-foundry:managed -->`, the base prompt, instruction precedence, and embedded skill sections.
 8. Read the file back and verify path, valid delimiters, required fields, exact tools, marker, prompt, and skill sources.
-9. Report the path and tell the user to start a new Copilot CLI session, run `/agent`, and select it.
+9. Report the path and tell the user to start a new Copilot CLI session, run `/agent`, and select it. Also report `team-lead delegation: eligible` when `autoInvoke` is true, otherwise `manual-only`; never imply that manual-only profiles appear in the `task` agent-type catalog.
 
 Use edits only for that Markdown file. Do not run shell commands.
