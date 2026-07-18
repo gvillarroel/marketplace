@@ -1,11 +1,11 @@
 {
   "name": "agent-foundry",
-  "description": "Create, remove, list and run declarative permanent or one-shot virtual agents.",
-  "version": "0.2.1",
+  "description": "Create, list and run declarative agents with an explicit trusted-skill catalog.",
+  "version": "0.3.0",
   "author": { "name": "Guillermo Villarroel" },
   "repository": "https://github.com/gvillarroel/marketplace",
   "license": "MIT",
-  "keywords": ["agents", "contractors", "skills", "markdown"],
+  "keywords": ["agents", "contractors", "skills", "trust", "markdown"],
   "commands": "commands/",
   "agents": "agents/",
   "skills": "skills/"

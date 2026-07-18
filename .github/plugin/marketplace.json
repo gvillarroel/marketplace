@@ -3,17 +3,17 @@
   "name": "agent-harbor",
   "owner": { "name": "Guillermo Villarroel" },
   "metadata": {
-    "description": "A minimal, declarative marketplace for composable Copilot agents and skills.",
-    "version": "0.2.1"
+    "description": "A minimal, declarative marketplace for composable Copilot agents and trusted skills.",
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "agent-foundry",
-      "description": "Welcome permanent Markdown agents to the team or run one-shot contractors with injected skills.",
-      "version": "0.2.1",
+      "description": "Compose permanent or one-shot Markdown agents from an explicit trusted-skill catalog.",
+      "version": "0.3.0",
       "source": "./plugins/agent-foundry",
       "category": "productivity",
-      "tags": ["agents", "skills", "declarative", "markdown"]
+      "tags": ["agents", "skills", "trust", "declarative", "markdown"]
     },
     {
       "name": "repo-cartographer",
