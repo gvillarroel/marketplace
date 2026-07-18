@@ -37,7 +37,7 @@ The same plugin files are designed to run unchanged on macOS, Linux, and Windows
 | `/contract` | Run one synchronous, invocation-scoped subagent without registration. |
 | `/list-skills` | List trusted GitHub skill references; distinct from built-in `/skills`. |
 
-These controls are native user-invocable skills, so they work as bare slash names in Copilot CLI. `agents`, `lineup`, and `leave` are intentionally absent: Copilot provides native `/agent` selection, while `lineup` and `leave` duplicated `bench`.
+These controls are native user-invocable skills, so they work as bare slash names in an interactive Copilot CLI session. In CLI 1.0.71, non-interactive `-p` treats slash text as an ordinary prompt; automation must explicitly ask Copilot to invoke the named plugin skill. `agents`, `lineup`, and `leave` are intentionally absent: Copilot provides native `/agent` selection, while `lineup` and `leave` duplicated `bench`.
 
 Copilot CLI 1.0.71 does not expand an explicit slash skill when `disable-model-invocation: true`, contrary to the documented combination. The five controls therefore remain model-visible in this POC, label themselves user-invoked, and reject any mutating input outside their exact syntax and ownership preflight. Recheck this workaround after a CLI update.
 
