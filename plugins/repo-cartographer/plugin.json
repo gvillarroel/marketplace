@@ -1,0 +1,10 @@
+{
+  "name": "repo-cartographer",
+  "description": "Maps repositories and authors small zx automation examples.",
+  "version": "0.1.0",
+  "author": { "name": "Guillermo Villarroel" },
+  "repository": "https://github.com/gvillarroel/marketplace",
+  "license": "MIT",
+  "agents": "agents/",
+  "skills": "skills/"
+}

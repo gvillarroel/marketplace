@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json.schemastore.org/github-copilot-plugin-marketplace.json",
+  "name": "agent-harbor",
+  "owner": { "name": "Guillermo Villarroel" },
+  "metadata": {
+    "description": "A proof-of-concept marketplace for composable Copilot agents and skills.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "agent-foundry",
+      "description": "Hire permanent agents or run disposable contractors with local and GitHub-hosted skills.",
+      "version": "0.1.0",
+      "source": "./plugins/agent-foundry",
+      "category": "productivity",
+      "tags": ["agents", "skills", "extensions", "sdk"]
+    },
+    {
+      "name": "repo-cartographer",
+      "description": "A repository mapping agent with a vendored skill sourced from gvillarroel/zx-harness.",
+      "version": "0.1.0",
+      "source": "./plugins/repo-cartographer",
+      "category": "development",
+      "tags": ["repositories", "zx", "external-skill"]
+    }
+  ]
+}
