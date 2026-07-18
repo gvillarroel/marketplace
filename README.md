@@ -32,12 +32,15 @@ Contractor format:
 
 The contractor resolves skills into a temporary directory, opens an isolated SDK session with minimal reasoning and no memory, runs one task, destroys the session, and deletes the temporary skills. Permanent agents are written to `.github/agents/NAME.agent.md`.
 
+The extension resolves the runtime injected by its Copilot host explicitly because the injected SDK cannot resolve the optional platform package needed by a nested `CopilotClient`. It prefers `COPILOT_CLI_DIST_DIR/index.js`, then an installed `copilot` executable. For a custom installation, set `AGENT_HARBOR_CLI_PATH` to its absolute path.
+
 ## Validate
 
 ```powershell
 npm test
 npm run build
 npm run test:copilot
+npm run test:contractor
 ```
 
 The last command consumes a small amount of Copilot quota; it installs both plugins and performs a single capped `gpt-5-mini` extension discovery check.

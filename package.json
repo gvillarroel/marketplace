@@ -12,6 +12,7 @@
     "build:extensions": "tsc -p plugins/agent-foundry/extensions/agent-foundry/tsconfig.json",
     "test": "npm run build:extensions && node --test tests/*.test.mjs",
     "test:copilot": "node scripts/copilot-smoke.mjs",
+    "test:contractor": "npm run build:extensions && node scripts/contractor-smoke.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },

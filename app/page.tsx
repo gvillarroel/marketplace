@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 
 const plugins = [
-  { name: "Agent Foundry", id: "agent-foundry", version: "0.1.0", accent: "violet", summary: "Build a workforce inside any repository.", description: "Permanent project agents and disposable contractors, powered by the Copilot SDK and skills from any GitHub repository.", features: ["4 slash commands", "3 agent tools", "Copilot SDK", "Remote skills"], install: "copilot plugin install agent-foundry@agent-harbor", icon: "AF" },
+  { name: "Agent Foundry", id: "agent-foundry", version: "0.1.1", accent: "violet", summary: "Build a workforce inside any repository.", description: "Permanent project agents and disposable contractors, powered by the Copilot SDK and skills from any GitHub repository.", features: ["4 slash commands", "3 agent tools", "Copilot SDK", "Remote skills"], install: "copilot plugin install agent-foundry@agent-harbor", icon: "AF" },
   { name: "Repo Cartographer", id: "repo-cartographer", version: "0.1.0", accent: "mint", summary: "See the shape of a codebase, fast.", description: "A focused repository mapper plus a zx automation skill mixed in from gvillarroel/zx-harness.", features: ["1 custom agent", "2 skills", "Cross-repo source", "No extension"], install: "copilot plugin install repo-cartographer@agent-harbor", icon: "RC" },
 ];
 

@@ -1,49 +1,19 @@
-import { CopilotClient, approveAll } from "@github/copilot-sdk";
 import { joinSession } from "@github/copilot-sdk/extension";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { materializeSkills, parseDefinition, removePermanentAgent, savePermanentAgent, type AgentDefinition } from "./core.js";
+import { parseDefinition, removePermanentAgent, savePermanentAgent, type AgentDefinition } from "./core.js";
+import { runContractor } from "./contractor.js";
 
 async function listAgents(): Promise<string[]> {
   try { return (await readdir(resolve(process.cwd(), ".github", "agents"))).filter((name) => name.endsWith(".md")); }
   catch { return []; }
 }
 
-async function runContractor(definition: AgentDefinition, task: string): Promise<string> {
-  const skills = await materializeSkills(definition.skills ?? []);
-  const client = new CopilotClient({ workingDirectory: process.cwd(), logLevel: "error" });
-  try {
-    await client.start();
-    const session = await client.createSession({
-      model: definition.model ?? process.env.AGENT_HARBOR_MODEL ?? "gpt-5-mini",
-      reasoningEffort: "low",
-      agent: definition.name,
-      customAgents: [{
-        name: definition.name,
-        description: definition.description,
-        prompt: definition.prompt,
-        tools: definition.tools ?? [],
-        skills: skills.names,
-      }],
-      skillDirectories: [skills.root],
-      onPermissionRequest: approveAll,
-      infiniteSessions: { enabled: false },
-      memory: { enabled: false },
-      embeddingCacheStorage: "in-memory",
-    });
-    const response = await session.sendAndWait(task, 120_000);
-    await session.disconnect();
-    return response?.data?.content ?? "Contractor finished without a text response.";
-  } finally {
-    await client.stop().catch(() => undefined);
-    await skills.cleanup();
-  }
+async function log(message: string) {
+  return host.log(message, { level: "info" });
 }
 
-let host: Awaited<ReturnType<typeof joinSession>>;
-const log = (message: string) => host.log(message, { level: "info" });
-
-host = await joinSession({
+const host = await joinSession({
   commands: [
     { name: "agents", description: "List permanent project agents.", handler: async () => log((await listAgents()).join("\n") || "No permanent agents.") },
     { name: "hire", description: "Create a permanent agent from a JSON definition.", handler: async (ctx) => log(`Created ${await savePermanentAgent(parseDefinition(ctx.args ?? ""))}`) },

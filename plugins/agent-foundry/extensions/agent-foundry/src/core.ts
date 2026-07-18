@@ -1,4 +1,6 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
@@ -13,6 +15,36 @@ export interface AgentDefinition {
   tools?: string[];
   skills?: SkillSource[];
   model?: string;
+}
+
+/**
+ * The SDK injected into an extension does not include its optional platform
+ * runtime package. Resolve the already-installed Copilot CLI explicitly so a
+ * contractor can start its own isolated SDK session.
+ */
+export function resolveCopilotCliPath(env: NodeJS.ProcessEnv = process.env): string {
+  for (const candidate of [env.AGENT_HARBOR_CLI_PATH, env.COPILOT_CLI_PATH]) {
+    if (candidate && existsSync(candidate)) return resolve(candidate);
+  }
+
+  if (env.COPILOT_CLI_DIST_DIR) {
+    const bundledRuntime = resolve(env.COPILOT_CLI_DIST_DIR, "index.js");
+    if (existsSync(bundledRuntime)) return bundledRuntime;
+  }
+
+  try {
+    const output = process.platform === "win32"
+      ? execFileSync("where.exe", ["copilot"], { encoding: "utf8", windowsHide: true })
+      : execFileSync("sh", ["-lc", "command -v copilot"], { encoding: "utf8" });
+    const candidate = output.split(/\r?\n/).map((line) => line.trim()).find((line) => line && existsSync(line));
+    if (candidate) return resolve(candidate);
+  } catch {
+    // Fall through to the actionable error below.
+  }
+
+  throw new Error(
+    "Could not locate the GitHub Copilot CLI executable. Set AGENT_HARBOR_CLI_PATH to its absolute path.",
+  );
 }
 
 const safeName = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-|-$/g, "");
