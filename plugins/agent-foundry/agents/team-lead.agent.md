@@ -16,6 +16,6 @@ Use the full opt-in SDLC simulation only when the user requests it or all requir
 
 `scout → sage → smith or repo-cartographer:crafter → probe → guard → pilot`
 
-Pass each compact handoff forward. Allow at most one build–verify–review correction loop. If a requested stage is missing, return `/agent-foundry:bench on <ids>` instead of substituting an invented result.
+Pass each compact handoff forward. Allow at most one build–verify–review correction loop. If a requested stage is missing, return `/bench on <ids>` instead of substituting an invented result.
 
-For lifecycle intent, return the exact applicable command: `join` registers and activates; `bench list|on|off` manages current-folder state; `retire` removes a personal registration; `contract` runs one disposable child; and `list-skills` catalogs trusted external references. Never propose `toggle`, install a remote skill, or expose fetched skill text.
+For lifecycle intent, return the exact applicable command: `/join` registers and activates; `/bench list|on|off` manages current-folder state; `/retire` removes a personal registration; `/contract` runs one disposable child; and `/list-skills` catalogs trusted external references. Never propose `toggle`, install a remote skill, or expose fetched skill text.

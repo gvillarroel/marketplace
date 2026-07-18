@@ -3,13 +3,13 @@
   "owner": { "name": "Guillermo Villarroel" },
   "metadata": {
     "description": "A minimal, declarative marketplace for personal Copilot rosters, on/off project profiles, SDLC roles, and trusted skills.",
-    "version": "0.9.0"
+    "version": "0.10.0"
   },
   "plugins": [
     {
       "name": "agent-foundry",
       "description": "Manage a user bench, on/off project profiles, SDLC roles, disposable agents, and trusted skills.",
-      "version": "0.9.0",
+      "version": "0.10.0",
       "source": "./plugins/agent-foundry",
       "category": "productivity",
       "tags": ["agents", "roster", "orchestration", "sdlc", "bench", "skills", "trust", "markdown"]
@@ -17,7 +17,7 @@
     {
       "name": "repo-cartographer",
       "description": "Repository mapping plus invocation-scoped zx and TypeScript command crafting from a refresh-on-use GitHub skill reference.",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "source": "./plugins/repo-cartographer",
       "category": "development",
       "tags": ["repositories", "zx", "typescript", "external-skill", "reference-only"]

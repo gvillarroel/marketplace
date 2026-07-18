@@ -1,8 +1,9 @@
 ---
-description: List, activate, or bench bundled and personal Copilot players in the current folder.
+name: bench
+description: User-invoked only. Run /bench to list, activate, or bench bundled and personal Copilot players in the current folder; do not select it for another lifecycle command.
 argument-hint: "[list [filter]|on <player...|all>|off <player...|all>]"
-allowed-tools: ["skill", "view", "glob", "create", "edit", "powershell", "bash"]
-disable-model-invocation: true
+allowed-tools: ["skill", "view", "glob", "create", "edit", "shell"]
+user-invocable: true
 ---
 
 # Control the bench

@@ -1,8 +1,9 @@
 ---
-description: Register one recurring Copilot player at user level and activate it in the current folder.
+name: join
+description: User-invoked only. Run /join to register one recurring Copilot player at user level and activate it in the current folder; do not select it for another lifecycle command.
 argument-hint: "{agent-json}"
-allowed-tools: ["skill", "view", "glob", "create", "edit", "powershell", "bash"]
-disable-model-invocation: true
+allowed-tools: ["skill", "view", "glob", "create", "edit", "shell"]
+user-invocable: true
 ---
 
 # Add a recurring player
@@ -14,5 +15,5 @@ Load `harbor-roster` with the native `skill` tool. Ignore only Copilot's outer s
 Example:
 
 ```text
-/agent-foundry:join {"name":"reviewer","description":"Read-only reviewer","prompt":"Review only; never edit.","tools":["read","search"],"skills":[]}
+/join {"name":"reviewer","description":"Read-only reviewer","prompt":"Review only; never edit.","tools":["read","search"],"skills":[]}
 ```

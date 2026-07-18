@@ -1,8 +1,9 @@
 ---
-description: Permanently remove one personal player registration and its managed current-folder profile.
+name: retire
+description: User-invoked only. Run /retire to permanently remove one personal player registration and its managed current-folder profile; do not select it for another lifecycle command.
 argument-hint: "<player>"
-allowed-tools: ["skill", "view", "glob", "create", "powershell", "bash"]
-disable-model-invocation: true
+allowed-tools: ["skill", "view", "glob", "create", "shell"]
+user-invocable: true
 ---
 
 # Retire a personal player

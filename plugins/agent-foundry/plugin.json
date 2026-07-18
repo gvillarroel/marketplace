@@ -1,12 +1,11 @@
 {
   "name": "agent-foundry",
   "description": "Manage a declarative user bench, current-folder profiles, disposable subagents, and trusted skill references.",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "author": { "name": "Guillermo Villarroel" },
   "repository": "https://github.com/gvillarroel/marketplace",
   "license": "MIT",
   "keywords": ["agents", "roster", "orchestration", "sdlc", "bench", "profiles", "skills", "markdown"],
-  "commands": "commands/",
   "agents": "agents/",
   "skills": "skills/"
 }

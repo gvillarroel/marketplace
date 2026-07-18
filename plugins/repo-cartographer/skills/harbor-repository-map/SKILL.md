@@ -1,7 +1,8 @@
 ---
 name: harbor-repository-map
-description: Produce a compact evidence-based repository map before planning or changing unfamiliar code.
-disable-model-invocation: false
+description: Internal repository-mapping guidance loaded only by the repo-cartographer agent.
+user-invocable: false
+disable-model-invocation: true
 ---
 
 <!-- harbor-skill id=harbor-repository-map owner=repo-cartographer revision=1 -->
