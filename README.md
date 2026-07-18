@@ -1,11 +1,13 @@
 # Agent Harbor
 
-A minimal GitHub Copilot CLI marketplace. It contains no application, package dependency, compiled output, extension process, or copied executable. Runtime behavior comes from Copilot's native agents, skills, GitHub MCP integration, and `task` delegation.
+Agent Harbor is a minimal GitHub Copilot CLI marketplace made only of Markdown with YAML frontmatter and JSON manifests. There is no application runtime, npm package, copied executable, SDK client, platform-specific package, or generated code in either plugin.
 
-The two plugins are:
+It contains:
 
-- **agent-foundry** — Markdown commands for `join`, `lineup`, `leave`, `retire`, `agents`, `contract`, and `list-skills`, plus `team-lead`, personal benches, a parked SDLC roster, agent design, and trust-policy components.
-- **repo-cartographer** — a repository agent that combines a local mapping skill with an instruction-only Markdown projection from [`gvillarroel/zx-harness`](https://github.com/gvillarroel/zx-harness).
+- **agent-foundry**: personal bench and project-lineup lifecycle, one-shot contractors, a parked SDLC team, a team lead, and a tracked GitHub-skill trust catalog.
+- **repo-cartographer**: a repository-mapping agent and a dedicated `crafter` agent for zx or TypeScript command examples. `crafter` refreshes an external skill reference on every invocation without installing or copying that skill into the marketplace.
+
+The five bundled skills are `harbor-agent-blueprints`, `harbor-sdlc-bench`, `harbor-trusted-skill-sources`, `harbor-repository-map`, and the reference-only `harbor-zx-author-ref`. The last item contains source coordinates and bootstrap rules, never the upstream body.
 
 ## Install
 
@@ -24,115 +26,157 @@ copilot plugin update agent-foundry
 copilot plugin update repo-cartographer
 ```
 
-Start a new interactive `copilot` session after installing or updating. Plugin commands are namespaced as `/agent-foundry:<command>`. Use `/help` to inspect commands, Copilot's built-in `/skills list` to confirm loaded skills, `/agent-foundry:list-skills` to inspect agent-foundry's trusted remote catalog, and `/agent` to inspect agents.
+Start a new `copilot` session after installing, updating, joining, leaving, or changing a lineup. Use `/help` for plugin commands, Copilot's `/skills list` for installed skills, `/agent-foundry:list-skills` for trusted GitHub references, and `/agent` for selectable agents.
 
-## Personal roster and project lineup
+## Short team vocabulary
 
-Adding a recurring player always creates two Markdown profiles:
+The lifecycle avoids employment metaphors:
+
+| Command | Meaning |
+| --- | --- |
+| `/agent-foundry:join` | Add a recurring player to the user bench and activate it here. |
+| `/agent-foundry:lineup` | List the bench or activate existing players here. |
+| `/agent-foundry:leave` | Return one active player to the bench in this folder. |
+| `/agent-foundry:retire` | Permanently remove one personal registration. |
+| `/agent-foundry:contract` | Run one invocation-scoped specialist and forget it. |
+| `/agent-foundry:agents` | List configured project and personal players. |
+| `/agent-foundry:list-skills` | List trusted external skill references; distinct from `/skills`. |
+
+## Personal bench and project lineup
+
+Joining creates two Markdown profiles:
 
 ```text
-/agent-foundry:join {"name":"reviewer","description":"Read-only project reviewer","prompt":"Return only high-confidence findings.","tools":["read","search"],"skills":[{"kind":"installed","name":"harbor-agent-blueprints"}]}
+/agent-foundry:join {"name":"reviewer","description":"Focused project reviewer","prompt":"Return only evidence-backed findings.","tools":["read","search"],"skills":[{"kind":"installed","name":"harbor-agent-blueprints"}]}
 ```
 
-- `<copilot-home>/agents/af-bench--reviewer.agent.md` is the persistent personal registration. It has `tools: []` and both normal invocation paths disabled, so it cannot inspect, edit, execute, or be selected through normal model routing or slash completion outside a project lineup. Copilot CLI still permits a developer to force the technical ID explicitly with `--agent af-bench--reviewer`; in that override, the no-tools boundary is enforced while the final bench guard remains prompt policy.
-- `<cwd>/.github/agents/reviewer.agent.md` is the active copy for the folder where it joined. It has the requested tools and is immediately eligible for `team-lead` after Copilot restarts.
+- `<copilot-home>/agents/af-bench--reviewer.agent.md` is the persistent user-level bench registration. It has `tools: []`, disables normal invocation, and stores the canonical active definition as inert data.
+- `<cwd>/.github/agents/reviewer.agent.md` is the active current-folder copy. It has the requested tool allowlist and is eligible for delegation after restart.
 
-The technical personal ID is intentionally different from the active ID. GitHub's CLI references disagree about whether personal or project agents win a same-ID collision, so this avoids depending on precedence. The personal registration is local to this developer machine; it is not synchronized through the GitHub account.
+The technical personal ID is deliberately prefixed because custom-agent precedence has changed across CLI releases. A user can still force that ID with `--agent`, so the empty tools plus mandatory bench guard are defense in depth, not a process sandbox.
 
-Copilot's programmatic `--agent` resolver can still resolve the technical personal ID even when it is not user-selectable. Its empty tool list and final mandatory bench guard keep it parked, and `team-lead` explicitly refuses every `af-bench--*` ID; this is defense-in-depth prompt policy rather than a process sandbox.
-
-From another project, list or activate the registered player:
+From another project:
 
 ```text
 /agent-foundry:lineup
 /agent-foundry:lineup reviewer
 ```
 
-Lifecycle commands stay short and team-themed:
+Revision-1 registrations contained frozen skill bodies. They are now reported as `upgrade-required`; repeat the desired `join` definition with `"replace":true` to migrate to revision 2.
+
+## External skills are references, not copies
+
+A recurring player can refer to a GitHub skill without installing it:
 
 ```text
-/agent-foundry:agents
-/agent-foundry:leave reviewer
-/agent-foundry:retire reviewer
+/agent-foundry:join {"name":"zx-maker","description":"Creates small zx and TypeScript command examples","prompt":"Make the smallest runnable example and validate it.","tools":["read","search","edit","execute"],"skills":[{"kind":"github","name":"zx-example-author","repo":"gvillarroel/zx-harness","path":"skills/zx-example-author/SKILL.md","track":"refs/heads/main"}]}
 ```
 
-`leave` removes only the active copy in the current folder, returning the player to the personal bench. `retire` permanently removes the personal registration and the managed active copy in the current folder; it cannot discover copies already activated in other projects. Skill instructions remain frozen as embedded Markdown until the player is joined again with `replace: true`.
+The personal registration and active project profile store only:
 
-## SDLC bench
-
-Six bundled agent templates ship on the bench outside the plugin's registered `agents/` directory. They also have `tools: []` plus both invocation flags disabled, so Copilot CLI cannot route or select them as plugin agents. Put only the roles needed for the current folder into the active lineup:
-
-```text
-/agent-foundry:lineup
-/agent-foundry:lineup scout sage smith probe guard
-/agent-foundry:lineup all
+```json
+{"kind":"github","name":"zx-example-author","repo":"gvillarroel/zx-harness","path":"skills/zx-example-author/SKILL.md","track":"refs/heads/main"}
 ```
 
-`lineup` combines the bundled SDLC roster with valid personal `af-bench--*` registrations and writes only `.github/agents/*.agent.md` below the current working directory. `all` intentionally means only the complete bundled SDLC team; personal players must be named. Shell is limited to creating the literal active directory when absent and deleting an exact newly created target during rollback; profile contents always use Copilot's native `create`/`edit` tools. Existing conflicts are never overwritten. Multi-role activation preflights and prepares the full set, verifies every write, and attempts rollback on failure. Start a new Copilot session from that folder or one of its descendants; a session started above the folder does not search downward for agents.
+They also store one narrowed trust grant and the bootstrap protocol. They never store the remote body, resolved commit, blob SHA, timestamp, URL, clone, or cache. `ref`, fixed SHAs, URLs, and inferred default branches are rejected. `execute` must be requested explicitly because the agent uses the developer's installed `gh`; the command never adds shell access silently.
 
-| ID | SDLC stage | Responsibility | Embedded skills | Direct edit tool |
-| --- | --- | --- | --- | --- |
-| `scout` | Discover | Repository map, constraints, acceptance criteria | `harbor-repository-map` | No |
-| `sage` | Design | Bounded design, slices, test strategy | `harbor-repository-map` | No |
-| `smith` | Build | Smallest approved code and test changes | `harbor-repository-map`, `harbor-zx-author` | Yes |
-| `probe` | Verify | Focused tests and reproducible evidence | `harbor-repository-map` | No |
-| `guard` | Review | Correctness, security, scope and provenance gate | `harbor-repository-map`, `harbor-trusted-skill-sources` | No |
-| `pilot` | Deliver | Release readiness and human-controlled handoff | `harbor-repository-map` | No |
+On every invocation, before repository inspection or domain work, the agent must make these three read-only requests in order:
 
-Every marketplace-owned skill uses a collision-resistant `harbor-*` ID and an exact revision marker in its injected Markdown body because project and personal skills outrank plugin skills. `harbor-zx-author` is the instruction-only projection sourced from `gvillarroel/zx-harness`; it deliberately does not reuse the upstream `zx-example-author` name. Canonical commands fail closed when the ID or body marker does not match. The marker prevents accidental shadowing but is compatibility identity, not cryptographic provenance.
+1. Resolve the configured tracking branch to a commit.
+2. Resolve the exact `SKILL.md` path at that immutable commit to a bounded blob.
+3. Fetch only that blob as raw Markdown.
 
-The handoff chain is `ScoutBrief → SagePlan → SmithChangeSet → ProbeReport → GuardGate → PilotReleasePacket`. `pilot` runs only for delivery work; a failed gate permits at most one bounded `smith → probe → guard` correction loop. Return a role to the packaged bench from the same folder with `/agent-foundry:leave <id>`.
+The agent validates commit and blob SHAs, exact path, type, size up to 18,000 bytes, UTF-8, NUL absence, YAML frontmatter, and upstream skill name. It then uses the frontmatter-stripped body only for that invocation. The next invocation resolves the tracking branch again, so it sees the newest trusted branch state while keeping one internally consistent snapshot per run.
 
-Only `smith` receives Copilot's direct `edit` tool. `probe`, `guard`, and `pilot` retain `execute` for tests and read-only diagnostics, so their no-mutation boundary is explicit prompt policy: they reject formatters, installers, fix modes, generators, migrations, destructive commands, and any command expected to rewrite tracked source.
+No sibling script, hook, package, binary, example, directory, or resource is fetched or executed. If the upstream Markdown depends on a sibling file, that portion of the skill is unavailable. A failure returns `external-skill-bootstrap: blocked` before domain work and never falls back to an old or installed copy.
 
-## Team lead
+This is logical per-agent isolation, not a secret store or filesystem ACL. Agent Harbor does not write the fetched body to a project, agent, skill directory, temporary file, plugin-data path, or cache, and the agent must not forward it to another agent or response. Copilot CLI may retain normal tool output in its own session history; a Markdown-only plugin cannot disable that product behavior.
 
-Select `agent-foundry:team-lead` from `/agent`, or start it directly:
+Copilot CLI 1.0.71 also accepts but does not inject a custom agent's `skills:` frontmatter. Agent Harbor therefore does not depend on that field: reference, narrowed grant, and bootstrap live directly in the designated agent prompt, while the upstream body remains remote until that agent's first `gh` call.
 
-```powershell
-copilot --agent agent-foundry:team-lead
-```
-
-The team lead is an orchestration-only agent: it receives only `task`, `list_agents`, `read_agent`, and `write_agent`, so it cannot inspect, edit, execute, browse, or load a domain skill in the parent context. It routes software work through active bare IDs from the SDLC lineup, passes compact handoffs between dependent stages, uses `repo-cartographer:repo-cartographer` for repository or zx work without a better active stage role, and uses `agent-foundry:agent-architect` for rosters, lifecycle, or trusted-skill work. When no permanent specialist fits, it uses the least-capable compatible built-in as a disposable contractor.
-
-Parameterized plugin commands remain explicit user actions because the native `skill` tool does not populate their `$ARGUMENTS`. The team lead therefore returns ready-to-run `/agent-foundry:lineup`, `/agent-foundry:join`, `/agent-foundry:leave`, `/agent-foundry:retire`, `/agent-foundry:contract`, or `/agent-foundry:list-skills` commands when needed instead of pretending it executed them.
-
-Active project copies created by `join` or `lineup` are eligible for team-lead delegation. Technical personal-bench profiles use `disable-model-invocation: true`, `user-invocable: false`, and `tools: []`, and must never be routed. The team lead is itself manual-only to prevent recursive orchestration and inherits the session's selected model.
-
-The bundled domain skills are model-discoverable because Copilot CLI 1.0.71 omits `disable-model-invocation: true` skills from the native skill tool's advertised catalog, even though its exact-name resolver can technically still reach them. Narrow descriptions and the exact Harbor body markers keep each skill scoped; the orchestration-only `team-lead` has no skill tool, so skill discovery cannot replace its routing decision. Skills with `user-invocable: false` remain absent from direct slash completion.
-
-Routing is declarative prompt policy, not an executable dispatcher: Copilot exposes the exact custom IDs to `task`, but the selected model ultimately emits the tool arguments. The team lead's final `actual task.agent_type` table makes a fallback visible instead of attributing built-in work to a custom agent.
-
-## Trusted remote skills
+## Trusted catalog
 
 ```text
 /agent-foundry:list-skills
 /agent-foundry:list-skills zx
 ```
 
-`/agent-foundry:list-skills` loads the plugin's internal `harbor-trusted-skill-sources` Markdown policy and uses its preapproved native shell tool only for the command's read-only `gh api --method GET` tree request. This restriction is declarative prompt policy, and the command validates the injected body marker plus every interpolated catalog value first. It lists paths without downloading skill bodies or executing repository content. The active example trusts only `skills/zx-example-author/SKILL.md` from `gvillarroel/zx-harness` at commit `181983bb58138ba3cc9aab25dd78b0557111d2bb`.
+The command resolves tracking refs and lists path-derived IDs, repo, path, current commit, and blob SHA without downloading any body. The policy supports:
 
-The policy supports three scopes: an entire pinned repository, every `SKILL.md` below one pinned subfolder, or one or more exact pinned `SKILL.md` paths. GitHub references used by `/agent-foundry:join` and `/agent-foundry:contract` must be covered by this policy.
+- every `SKILL.md` in a tracked repository;
+- every `SKILL.md` below one tracked subfolder;
+- one or more exact `SKILL.md` paths.
+
+The bundled active rule trusts only `skills/zx-example-author/SKILL.md` on `refs/heads/main` in `gvillarroel/zx-harness`. Tracking a branch intentionally trusts future commits to that branch; each invocation reports the immutable commit and blob it actually used.
+
+## Dedicated zx/TypeScript crafter
+
+Select or delegate to:
+
+```powershell
+copilot --agent repo-cartographer:crafter
+```
+
+The `crafter` profile itself contains only the external reference, narrowed trust rule, and validation protocol. Its first tool call must be the branch-resolution `gh api` request. It returns a `SmithChangeSet`-compatible handoff, so the team lead can place it in the SDLC build stage. `repo-cartographer:repo-cartographer` remains a separate maps-only agent and never receives the upstream zx instructions.
 
 ## Disposable contractor
 
-An equivalent pinned invocation works without starting a nested SDK client:
+The same reference works for a temporary specialist:
 
 ```text
-/agent-foundry:contract {"name":"reviewer","description":"Read-only reviewer","prompt":"Review only; never edit.","tools":["read"],"skills":[{"kind":"github","repo":"gvillarroel/zx-harness","path":"skills/zx-example-author/SKILL.md","ref":"181983bb58138ba3cc9aab25dd78b0557111d2bb"}]} :: review src and return three findings
+/agent-foundry:contract {"name":"zx-drafter","description":"Drafts a minimal zx command","prompt":"Inspect only what the task requires and do not edit.","tools":["read","search","execute"],"skills":[{"kind":"github","name":"zx-example-author","repo":"gvillarroel/zx-harness","path":"skills/zx-example-author/SKILL.md","track":"refs/heads/main"}]} :: inspect the CLI entrypoint and propose one zx command
 ```
 
-`/agent-foundry:contract` verifies the GitHub reference against the trusted catalog, loads only the referenced `SKILL.md`, injects its Markdown into one synchronous native `task` call, returns the result, and retains no agent ID or skill file. Copilot's native `explore` subagent provides a hard read-only boundary for the example above. Execute-only tasks use native `task`; tasks requesting edits use `general-purpose`. In those two modes the requested tool list is prompt policy, not a dynamic runtime allowlist.
+The parent validates only the reference and trust coverage. The native child makes the three `gh` calls and is instructed to return only its final result and provenance, never the body; that non-disclosure is prompt policy, not a deterministic output filter. No agent definition is registered. Because external refresh requires `execute`, this is prompt-restricted shell access, not a hard read-only sandbox. A contractor without an external reference can use Copilot's native `explore` profile for a hard read-only tool boundary.
 
-Joined and bundled agents omit `model` unless explicitly configured, so they inherit Copilot's current selection. Leaving the session on `Auto` lets the account choose an available low-cost model instead of pinning an unavailable model ID.
+This path uses native `task`; it never creates `CopilotClient`, launches another Copilot process, or resolves `@github/copilot-win32-x64`, so it avoids the platform-package error produced by the old SDK-client POC.
+
+## Parked SDLC team
+
+Six inert templates ship under `bench/`, outside the plugin's registered `agents/` directory. Activate only what this project needs:
+
+```text
+/agent-foundry:lineup scout sage smith probe guard
+/agent-foundry:lineup all
+```
+
+| ID | Stage | Output | Edit tool |
+| --- | --- | --- | --- |
+| `scout` | Discover | `ScoutBrief` | No |
+| `sage` | Design | `SagePlan` | No |
+| `smith` | Build | `SmithChangeSet` | Yes |
+| `probe` | Verify | `ProbeReport` | No |
+| `guard` | Review | `GuardGate` | No |
+| `pilot` | Deliver | `PilotReleasePacket` | No |
+
+The normal chain is `scout → sage → smith → probe → guard → pilot`. For zx or TypeScript command authoring, `repo-cartographer:crafter` replaces `smith` for that build unit and emits the same handoff. A failed gate permits at most one bounded build–verify–review correction loop.
+
+`probe`, `guard`, and `pilot` have `execute` for tests or diagnostics but are prompt-restricted against commands expected to rewrite source. `pilot` never publishes. Lineup writes only managed `.github/agents/*.agent.md` files, preflights the whole selection, refuses conflicts, verifies every write, and attempts rollback on failure.
+
+## Team lead
+
+```powershell
+copilot --agent agent-foundry:team-lead
+```
+
+`team-lead` is orchestration-only: it has `task`, `list_agents`, `read_agent`, and `write_agent`, but cannot inspect, edit, execute, browse, or load domain skills itself. Its mandatory routes are:
+
+- zx or TypeScript command authoring → `repo-cartographer:crafter`;
+- repository maps → `repo-cartographer:repo-cartographer`;
+- agent, roster, lifecycle, or trust design → `agent-foundry:agent-architect`;
+- active SDLC stages → their exact bare IDs;
+- otherwise the least-privileged compatible built-in.
+
+Parameterized slash commands remain explicit user actions because Copilot's skill tool cannot populate `$ARGUMENTS`; the lead returns ready-to-run commands instead of claiming it executed them. It inherits the session model, so leaving Copilot on `Auto` avoids pinning an unavailable or unnecessarily expensive model.
 
 ## Declarative boundary
 
-- Standalone JSON is used only for the required marketplace and plugin manifests. Personal registrations keep one validated active-profile JSON payload inside Markdown.
-- Every behavior-bearing component is Markdown with YAML frontmatter.
-- Bundled SDLC templates are inert Markdown under `bench/`, outside the registered plugin agent directory; `lineup` creates only managed `.agent.md` copies in the current folder.
-- Recurring players use an inert prefixed personal `.agent.md` registration plus an eligible bare-ID project `.agent.md`; no executable registry or database is introduced.
-- Trusted remote scope is declared in the internal `harbor-trusted-skill-sources` Markdown skill.
-- Remote skills are instruction-only: sibling scripts and resources are neither fetched nor executed.
-- Contractors use the current Copilot runtime's subagent orchestration. There is no `CopilotClient`, platform package lookup, TypeScript runtime, or experimental extension.
-- One-shot `/agent-foundry:contract` definitions are unregistered and therefore map to built-in `explore`, `task`, or `general-purpose`. Active custom project profiles appear under their exact `task.agent_type`; use `/agent-foundry:join` when a durable routed player needs a hard custom `tools` allowlist.
+- Plugin behavior is Markdown with YAML frontmatter; JSON is limited to manifests and inert payloads inside Markdown.
+- The plugin directories contain only `.md` and `.json` files.
+- There are no hooks, executables, scripts, packages, dependencies, MCP servers, copied upstream files, or SDK clients.
+- Installed and local Markdown skills may be stored in a generated self-contained player. External GitHub bodies never are; only references and narrowed grants are stored.
+- Runtime capabilities come from Copilot's native agents, tools, skills, and task delegation.
+
+Marketplace-owned skill markers are collision-resistant compatibility checks, not cryptographic provenance. Copilot's normal skill precedence can let a same-named project or personal skill shadow a plugin skill; a copied marker could therefore spoof the trust catalog seen by `join`, `contract`, or `list-skills`. The active agents persist only narrowed grants, and every external body is still constrained to the exact stored repo, branch, path, size, frontmatter name, and fresh immutable blob, but this Markdown-only POC cannot prove which local skill file supplied the catalog. Inspect `/skills list` and remove same-name overrides when that distinction matters.
+
+See GitHub's official [Copilot CLI plugin reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-plugin-reference), [Copilot CLI command reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference), and [custom agent configuration](https://docs.github.com/en/copilot/reference/custom-agents-configuration).

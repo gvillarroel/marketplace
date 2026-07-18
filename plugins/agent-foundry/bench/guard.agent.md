@@ -7,9 +7,9 @@ user-invocable: false
 metadata:
   roster: sdlc-bench
   stage: review
-  revision: "1"
+  revision: "2"
 ---
 
 # Guard — parked
 
-This bundled template is outside the plugin's registered `agents/` directory and has no tools. If a client loads it directly, stop and return only `/agent-foundry:lineup guard`. That command creates the active folder-scoped profile with its canonical `harbor-sdlc-bench`, `harbor-repository-map`, and `harbor-trusted-skill-sources` instructions.
+This bundled template is outside the plugin's registered `agents/` directory and has no tools. If loaded directly, stop and return only `/agent-foundry:lineup guard`. That command creates the active folder profile with canonical revision-2 SDLC instructions plus the local repository-map and trust-policy skills.

@@ -4,24 +4,24 @@
   "owner": { "name": "Guillermo Villarroel" },
   "metadata": {
     "description": "A minimal, declarative marketplace for personal Copilot rosters, project lineups, SDLC roles, and trusted skills.",
-    "version": "0.6.0"
+    "version": "0.7.0"
   },
   "plugins": [
     {
       "name": "agent-foundry",
       "description": "Coordinate personal benches, active project lineups, SDLC roles, and one-shot Markdown agents.",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "source": "./plugins/agent-foundry",
       "category": "productivity",
       "tags": ["agents", "teams", "roster", "lineup", "orchestration", "sdlc", "bench", "skills", "trust", "declarative", "markdown"]
     },
     {
       "name": "repo-cartographer",
-      "description": "A repository mapping agent mixing a local skill with Markdown sourced from gvillarroel/zx-harness.",
-      "version": "0.3.0",
+      "description": "Repository mapping plus invocation-scoped zx and TypeScript command crafting from a refresh-on-use GitHub skill reference.",
+      "version": "0.4.0",
       "source": "./plugins/repo-cartographer",
       "category": "development",
-      "tags": ["repositories", "zx", "external-skill"]
+      "tags": ["repositories", "zx", "typescript", "external-skill", "reference-only"]
     }
   ]
 }
