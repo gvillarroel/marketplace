@@ -6,17 +6,15 @@ import { basename, join, resolve } from "node:path";
 /**
  * The SDK injected into an extension does not include its optional platform
  * runtime package. Resolve the already-installed Copilot CLI explicitly so a
- * contractor can start its own isolated SDK session.
+ * contractor can start its own isolated SDK session. The extension host's
+ * `COPILOT_CLI_DIST_DIR/index.js` is intentionally not used: extensions run
+ * under the native Copilot executable, which would parse that JavaScript path
+ * as a CLI argument instead of executing it with Node.
  */
 export function resolveCopilotCliPath(env = process.env) {
     for (const candidate of [env.AGENT_HARBOR_CLI_PATH, env.COPILOT_CLI_PATH]) {
         if (candidate && existsSync(candidate))
             return resolve(candidate);
-    }
-    if (env.COPILOT_CLI_DIST_DIR) {
-        const bundledRuntime = resolve(env.COPILOT_CLI_DIST_DIR, "index.js");
-        if (existsSync(bundledRuntime))
-            return bundledRuntime;
     }
     try {
         const output = process.platform === "win32"

@@ -10,7 +10,7 @@
     {
       "name": "agent-foundry",
       "description": "Hire permanent agents or run disposable contractors with local and GitHub-hosted skills.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "source": "./plugins/agent-foundry",
       "category": "productivity",
       "tags": ["agents", "skills", "extensions", "sdk"]

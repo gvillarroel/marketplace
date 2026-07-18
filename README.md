@@ -1,6 +1,6 @@
 # Agent Harbor
 
-A working proof-of-concept marketplace for GitHub Copilot CLI plugins. It contains two installable plugins:
+A focused GitHub Copilot CLI plugin marketplace containing two installable plugins:
 
 - **agent-foundry** — agents, a local skill, and a TypeScript-authored Copilot CLI extension for hiring permanent agents, firing them, listing them, and executing disposable contractors through `@github/copilot-sdk`.
 - **repo-cartographer** — a repository agent that mixes a local mapping skill with a skill sourced from [`gvillarroel/zx-harness`](https://github.com/gvillarroel/zx-harness).
@@ -32,7 +32,7 @@ Contractor format:
 
 The contractor resolves skills into a temporary directory, opens an isolated SDK session with minimal reasoning and no memory, runs one task, destroys the session, and deletes the temporary skills. Permanent agents are written to `.github/agents/NAME.agent.md`.
 
-The extension resolves the runtime injected by its Copilot host explicitly because the injected SDK cannot resolve the optional platform package needed by a nested `CopilotClient`. It prefers `COPILOT_CLI_DIST_DIR/index.js`, then an installed `copilot` executable. For a custom installation, set `AGENT_HARBOR_CLI_PATH` to its absolute path.
+The extension resolves the installed native `copilot` executable explicitly because the injected SDK cannot resolve the optional platform package needed by a nested `CopilotClient`. For a custom installation that is not on `PATH`, set `AGENT_HARBOR_CLI_PATH` to its absolute path.
 
 ## Validate
 

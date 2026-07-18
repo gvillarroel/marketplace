@@ -30,11 +30,7 @@ test("nested SDK sessions resolve the installed Copilot CLI", () => {
   assert.match(path, /copilot(?:\.exe)?$/i);
 });
 
-test("prefers the runtime distribution injected by the extension host", async () => {
-  const root = await mkdtemp(join(tmpdir(), "agent-harbor-runtime-"));
-  try {
-    const runtime = join(root, "index.js");
-    await import("node:fs/promises").then(({ writeFile }) => writeFile(runtime, "// fixture\n", "utf8"));
-    assert.equal(resolveCopilotCliPath({ COPILOT_CLI_DIST_DIR: root }), runtime);
-  } finally { await rm(root, { recursive: true, force: true }); }
+test("honors an explicit native Copilot CLI override", () => {
+  const installed = resolveCopilotCliPath();
+  assert.equal(resolveCopilotCliPath({ AGENT_HARBOR_CLI_PATH: installed }), installed);
 });
