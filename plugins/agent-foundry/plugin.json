@@ -1,11 +1,11 @@
 {
   "name": "agent-foundry",
-  "description": "Create and coordinate declarative personal rosters, easy on/off project profiles, and trusted-skill agent teams.",
-  "version": "0.8.0",
+  "description": "Manage a declarative user bench, current-folder profiles, disposable subagents, and trusted skill references.",
+  "version": "0.9.0",
   "author": { "name": "Guillermo Villarroel" },
   "repository": "https://github.com/gvillarroel/marketplace",
   "license": "MIT",
-  "keywords": ["agents", "teams", "roster", "lineup", "orchestration", "sdlc", "bench", "profiles", "contractors", "skills", "trust", "markdown"],
+  "keywords": ["agents", "roster", "orchestration", "sdlc", "bench", "profiles", "skills", "markdown"],
   "commands": "commands/",
   "agents": "agents/",
   "skills": "skills/"
