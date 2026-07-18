@@ -1,8 +1,13 @@
 ---
-name: repository-map
+name: harbor-repository-map
 description: Produce a compact, evidence-based map of a source repository.
-disable-model-invocation: true
+disable-model-invocation: false
+metadata:
+  harbor_owner: repo-cartographer
+  harbor_revision: "1"
 ---
+
+<!-- harbor-skill id=harbor-repository-map owner=repo-cartographer revision=1 -->
 
 # Repository map
 

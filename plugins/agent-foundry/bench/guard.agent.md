@@ -12,4 +12,4 @@ metadata:
 
 # Guard — parked
 
-This bundled template is outside the plugin's registered `agents/` directory and has no tools. If a client loads it directly, stop and return only `/agent-foundry:lineup guard`. That command creates the active folder-scoped profile with its canonical `sdlc-bench`, `repository-map`, and `trusted-skill-sources` instructions.
+This bundled template is outside the plugin's registered `agents/` directory and has no tools. If a client loads it directly, stop and return only `/agent-foundry:lineup guard`. That command creates the active folder-scoped profile with its canonical `harbor-sdlc-bench`, `harbor-repository-map`, and `harbor-trusted-skill-sources` instructions.

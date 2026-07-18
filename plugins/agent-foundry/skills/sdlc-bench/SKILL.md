@@ -1,9 +1,14 @@
 ---
-name: sdlc-bench
+name: harbor-sdlc-bench
 description: Canonical catalog and handoff contracts for agent-foundry's parked SDLC agent roster.
 user-invocable: false
-disable-model-invocation: true
+disable-model-invocation: false
+metadata:
+  harbor_owner: agent-foundry
+  harbor_revision: "1"
 ---
+
+<!-- harbor-skill id=harbor-sdlc-bench owner=agent-foundry revision=1 -->
 
 # SDLC bench
 
@@ -19,37 +24,37 @@ agents:
     artifact: ScoutBrief
     description: SDLC discovery specialist that maps the repository, clarifies the request, and defines acceptance criteria.
     tools: [read, search]
-    skills: [repository-map]
+    skills: [harbor-repository-map]
   - id: sage
     stage: design
     artifact: SagePlan
     description: SDLC design specialist that turns an approved brief into a bounded implementation and test plan.
     tools: [read, search]
-    skills: [repository-map]
+    skills: [harbor-repository-map]
   - id: smith
     stage: build
     artifact: SmithChangeSet
     description: SDLC implementation specialist that makes the smallest approved code and test changes.
     tools: [read, search, edit, execute]
-    skills: [repository-map, zx-example-author]
+    skills: [harbor-repository-map, harbor-zx-author]
   - id: probe
     stage: verify
     artifact: ProbeReport
     description: SDLC verification specialist that runs focused validation and reports reproducible evidence without editing.
     tools: [read, search, execute]
-    skills: [repository-map]
+    skills: [harbor-repository-map]
   - id: guard
     stage: review
     artifact: GuardGate
     description: SDLC review gate that checks correctness, security, scope, and trusted-skill provenance without editing.
     tools: [read, search, execute]
-    skills: [repository-map, trusted-skill-sources]
+    skills: [harbor-repository-map, harbor-trusted-skill-sources]
   - id: pilot
     stage: deliver
     artifact: PilotReleasePacket
     description: SDLC release-readiness specialist that verifies delivery evidence and produces the final handoff without publishing.
     tools: [read, search, execute]
-    skills: [repository-map]
+    skills: [harbor-repository-map]
 ```
 
 ## Shared handoff contract
@@ -78,7 +83,7 @@ Produce `SagePlan`. Validate the supplied brief against repository evidence. Def
 
 ## Role: smith
 
-Produce `SmithChangeSet`. Implement only the approved slice, including focused tests when appropriate. Preserve unrelated work, follow repository instructions, and run the shortest relevant validation after editing. The embedded `zx-example-author` instructions apply only when the task explicitly requests zx or command automation; otherwise ignore that skill's language and implementation conventions. Do not publish, push, tag, or broaden scope.
+Produce `SmithChangeSet`. Implement only the approved slice, including focused tests when appropriate. Preserve unrelated work, follow repository instructions, and run the shortest relevant validation after editing. The embedded `harbor-zx-author` instructions apply only when the task explicitly requests zx or command automation; otherwise ignore that skill's language and implementation conventions. Do not publish, push, tag, or broaden scope.
 
 ## Role: probe
 

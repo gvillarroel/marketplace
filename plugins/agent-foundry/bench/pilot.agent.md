@@ -12,4 +12,4 @@ metadata:
 
 # Pilot — parked
 
-This bundled template is outside the plugin's registered `agents/` directory and has no tools. If a client loads it directly, stop and return only `/agent-foundry:lineup pilot`. That command creates the active folder-scoped profile with its canonical `sdlc-bench` prompt and embedded `repository-map` instructions.
+This bundled template is outside the plugin's registered `agents/` directory and has no tools. If a client loads it directly, stop and return only `/agent-foundry:lineup pilot`. That command creates the active folder-scoped profile with its canonical `harbor-sdlc-bench` prompt and embedded `harbor-repository-map` instructions.

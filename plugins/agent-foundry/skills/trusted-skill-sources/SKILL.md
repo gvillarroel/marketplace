@@ -1,9 +1,14 @@
 ---
-name: trusted-skill-sources
+name: harbor-trusted-skill-sources
 description: Internal agent-foundry policy defining which pinned GitHub skill paths are trusted. Load only when listing or validating remote skills.
 user-invocable: false
-disable-model-invocation: true
+disable-model-invocation: false
+metadata:
+  harbor_owner: agent-foundry
+  harbor_revision: "1"
 ---
+
+<!-- harbor-skill id=harbor-trusted-skill-sources owner=agent-foundry revision=1 -->
 
 # Trusted skill sources
 

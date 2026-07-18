@@ -1,11 +1,11 @@
 {
   "name": "agent-foundry",
-  "description": "Create and coordinate declarative agent teams with an SDLC bench and trusted-skill catalog.",
-  "version": "0.5.0",
+  "description": "Create and coordinate declarative personal rosters, project lineups, and trusted-skill agent teams.",
+  "version": "0.6.0",
   "author": { "name": "Guillermo Villarroel" },
   "repository": "https://github.com/gvillarroel/marketplace",
   "license": "MIT",
-  "keywords": ["agents", "teams", "orchestration", "sdlc", "bench", "contractors", "skills", "trust", "markdown"],
+  "keywords": ["agents", "teams", "roster", "lineup", "orchestration", "sdlc", "bench", "contractors", "skills", "trust", "markdown"],
   "commands": "commands/",
   "agents": "agents/",
   "skills": "skills/"
