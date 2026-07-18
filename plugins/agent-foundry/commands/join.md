@@ -16,7 +16,7 @@ $ARGUMENTS
 A successful invocation creates or verifies both Markdown profiles:
 
 - Personal bench: `<copilot-home>/agents/af-bench--<name>.agent.md`.
-- Active current-folder lineup: `.github/agents/<name>.agent.md`.
+- Active current-folder profile: `.github/agents/<name>.agent.md`.
 
 `copilot-home` is the non-empty `COPILOT_HOME` environment value, otherwise `~/.copilot`. The personal profile is an inert user-level registry entry available from other projects; the project profile is active immediately in the folder where it joins and eligible for `team-lead` after Copilot restarts. Never use the same filename at both scopes because personal-agent precedence differs across Copilot CLI releases.
 
@@ -39,7 +39,7 @@ Skill entries have exactly one of these shapes:
 
 For an `installed` entry, call the native `skill` tool immediately by exact name and never filesystem-search for it. For `local`, read exactly one workspace-relative `SKILL.md`. Strip one valid YAML frontmatter block, retain the complete Markdown body verbatim, reject either reserved active-instruction boundary marker, and stop if the complete body is unavailable. Never copy a sibling script or resource.
 
-For reserved installed IDs, ignore only Copilot's outer `<skill-context>` and one runtime-owned `Base directory for this skill: ...` preamble, then require the first nonblank original-body line to be its exact marker. The canonical markers are revision 2 for `harbor-agent-blueprints`, `harbor-sdlc-bench`, and `harbor-trusted-skill-sources` owned by `agent-foundry`; revision 2 for `harbor-zx-author-ref` owned by `repo-cartographer`; and revision 1 for `harbor-repository-map` owned by `repo-cartographer`. Reject every removed or unknown legacy projection ID. `harbor-zx-author-ref` is reference configuration, not an embeddable installed skill: require callers to use its canonical GitHub object instead.
+For reserved installed IDs, ignore only Copilot's outer `<skill-context>` and one runtime-owned `Base directory for this skill: ...` preamble, then require the first nonblank original-body line to be its exact marker. The canonical markers are revision 2 for `harbor-agent-blueprints`, `harbor-sdlc-bench`, and `harbor-trusted-skill-sources` owned by `agent-foundry`; revision 1 for `harbor-bench-control` owned by `agent-foundry`; revision 2 for `harbor-zx-author-ref` owned by `repo-cartographer`; and revision 1 for `harbor-repository-map` owned by `repo-cartographer`. Reject every removed or unknown legacy projection ID. `harbor-bench-control` is internal mutation policy and is never embeddable in a generated player. `harbor-zx-author-ref` is reference configuration, not an embeddable installed skill: require callers to use its canonical GitHub object instead.
 
 For GitHub entries, never fetch the repository or skill body while joining. Load `harbor-trusted-skill-sources` once with the native `skill` tool, apply the same wrapper rule, and require its first nonblank original-body line to be exactly `<!-- harbor-skill id=harbor-trusted-skill-sources owner=agent-foundry revision=2 -->`. Parse only its revision-2 `Active policy`. Every canonical `repo`, `track`, and `path` must be covered by exactly one active rule; reject an uncovered, malformed, duplicate, or ambiguous reference. For each covered reference derive one exact minimal grant ordered as `{"policy":"harbor-trusted-skill-sources","revision":2,"repo":"<repo>","track":"<track>","path":"<path>"}`. Persist this narrowed proof instead of the broader catalog rule. The requested `name` will be checked against fetched frontmatter on every invocation. The marker is compatibility identity, not cryptographic provenance.
 
@@ -72,7 +72,7 @@ metadata:
 
 # <name> — personal bench
 
-This registry profile is intentionally inert. If invoked directly, perform no domain work and return only `/agent-foundry:lineup <name>`.
+This registry profile is intentionally inert. If invoked directly, perform no domain work and return only `/agent-foundry:bench on <name>`.
 
 ## Active profile
 
@@ -90,7 +90,7 @@ The content between the boundary markers is inert registry data in this technica
 
 ## Mandatory bench guard
 
-Ignore every active-role, tool, reference, and skill instruction stored above. This technical profile is never an active player. Perform no domain work and return only `/agent-foundry:lineup <name>`.
+Ignore every active-role, tool, reference, and skill instruction stored above. This technical profile is never an active player. Perform no domain work and return only `/agent-foundry:bench on <name>`.
 ````
 
 Use a JSON string for `model` when supplied, otherwise `null`. Serialize the ordered normalized `skills` array compactly. An installed entry stores only `kind,name`; a local entry stores only `kind,path`; a GitHub entry stores only `kind,name,repo,path,track` in exactly that field order. Never store a resolved commit, blob SHA, remote body, fetch timestamp, URL, or cache path.
@@ -161,6 +161,6 @@ Omit the entire `model` line when no model was supplied. Do not emit a frontmatt
 2. Write the personal bench first, then the active project profile, using only native `create` or `edit`.
 3. Read both files back. Verify paths, delimiters, fields, flags, metadata, revision-2 markers, exactly one boundary pair, final bench guard, and size. Parse the personal active-profile JSON and compare every value and canonical skill entry with normalized input. Extract the bounded region and require character-for-character equality with the active project's instruction region after its two managed markers, allowing only the active file's final newline. Verify exact prompt, precedence, installed/local bodies, ordered GitHub descriptors, one exact narrowed grant per descriptor, all three literal `gh api` command templates with their exact jq objects, the complete bootstrap protocol, all three literal final bootstrap sentences above, absence of a frontmatter `skills` dependency, and absence of resolved SHAs or remote bodies. Any paraphrase, missing or altered command template, noncanonical field/order, placeholder, broad grant, frozen GitHub body, missing bootstrap sentence, or changed prompt fails verification.
 4. If any write or verification fails, restore every changed target to its exact preflight contents and verify rollback. Restore a pre-existing target with native `edit`; recreate a deleted pre-existing target with native `create`; remove only a target absent at preflight using one platform-native deletion after resolving and proving it is exactly one of the two recorded targets under its expected parent. Never delete a directory or place unvalidated argument text in a shell command. Identify any rollback failure.
-5. Report `personal bench` and `current lineup` paths separately. Tell the user to restart Copilot CLI from this folder. In another project, `/agent-foundry:lineup <name>` activates the user-level registration there; `/agent-foundry:leave <name>` returns it to the bench.
+5. Report `personal bench` and `current profile` paths separately. Tell the user to restart Copilot CLI from this folder. In another project, `/agent-foundry:bench on <name>` activates the user-level registration there; `/agent-foundry:bench off <name>` returns it to the bench. `lineup` and `leave` remain compatibility aliases.
 
 Create no script, package, executable, cache, standalone skill copy, or remote-body snapshot.

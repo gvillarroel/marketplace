@@ -1,5 +1,5 @@
 ---
-description: List the current project lineup and agent-foundry personal bench registrations.
+description: List current project profile state and agent-foundry personal bench registrations.
 argument-hint: '"[optional-name-filter]"'
 allowed-tools: ["skill", "view", "glob", "list_agents"]
 disable-model-invocation: true
@@ -28,7 +28,7 @@ A revision-2 personal registration is `ready` only when it has:
 
 For a current managed personal profile, require matching revision-2 roster/player metadata and marker. Require frontmatter `skills` to be absent because revision-2 profiles are self-contained and Copilot CLI 1.0.71 ignores that field for custom agents. Compare its description, tools, and optional model with the payload, then require its complete body after the two ownership markers to equal the bench registration's bounded active-instruction region character-for-character, allowing only one final newline. Any mismatch is `stale`, never `active` or `eligible`.
 
-For a current managed bundled profile, load `harbor-sdlc-bench` once with the native `skill` tool, require its exact owner/revision-2 marker, and reconstruct the selected role from its active roster, matching role section, shared handoff, and assigned reserved skill bodies exactly as `/agent-foundry:lineup` does. Require exact canonical frontmatter, ownership markers, and body equality. If a required component or marker cannot be validated, classify it `unverified`; never infer active status from frontmatter alone and never fetch an external body.
+For a current managed bundled profile, load `harbor-bench-control` and `harbor-sdlc-bench` once with the native `skill` tool. Require the exact first-body markers `<!-- harbor-skill id=harbor-bench-control owner=agent-foundry revision=1 -->` and `<!-- harbor-skill id=harbor-sdlc-bench owner=agent-foundry revision=2 -->`, then reconstruct the selected role from the active roster, matching role section, shared handoff, and assigned reserved skill bodies exactly as `/agent-foundry:bench on` does. Require exact canonical frontmatter, ownership markers, and body equality. If a required component or marker cannot be validated, classify it `unverified`; never infer active status from frontmatter alone and never fetch an external body.
 
 Recognize an otherwise valid, securely owned revision-1 user-bench or user-lineup profile by its exact revision-1 roster metadata, matching logical ID, managed marker, and expected roster marker. Recognize a revision-1 bundled profile only for one exact canonical ID/stage pair (`scout/discover`, `sage/design`, `smith/build`, `probe/verify`, `guard/review`, or `pilot/deliver`) with matching roster and bench marker. Classify either as `upgrade-required`; never treat it as active, ready, stale, external, or broken merely because it uses the frozen-body schema. Do not infer ownership from filename or one marker alone.
 
@@ -47,6 +47,6 @@ Use `conflict` when either exact bare-ID personal path or a same-ID local `.md` 
 
 Match user registrations by marker logical ID, never by technical `af-bench--` ID. Report an exact colliding path without reading or exposing its prompt. Apply a supplied filter case-insensitively only to logical ID and description. Distinguish configured profiles from active child executions returned by `list_agents`; the latter is not a definition catalog.
 
-For every `upgrade-required` row, append one concise action: personal registrations require rerunning the desired `/agent-foundry:join` definition with `"replace":true`; a bundled current profile requires `/agent-foundry:leave <id>` followed by `/agent-foundry:lineup <id>`. Never reconstruct or print a join command from a stored prompt.
+For every `upgrade-required` row, append one concise action: personal registrations require rerunning the desired `/agent-foundry:join` definition with `"replace":true`; a bundled current profile requires `/agent-foundry:bench off <id>` followed by `/agent-foundry:bench on <id>`. Never reconstruct or print a join command from a stored prompt.
 
 Never fetch, resolve, cache, create, repair, activate, deactivate, or delete anything.

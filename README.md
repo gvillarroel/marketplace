@@ -4,10 +4,10 @@ Agent Harbor is a minimal GitHub Copilot CLI marketplace made only of Markdown w
 
 It contains:
 
-- **agent-foundry**: personal bench and project-lineup lifecycle, one-shot contractors, a parked SDLC team, a team lead, and a tracked GitHub-skill trust catalog.
+- **agent-foundry**: personal bench and project-profile lifecycle, one-shot contractors, a parked SDLC team, a team lead, and a tracked GitHub-skill trust catalog.
 - **repo-cartographer**: a repository-mapping agent and a dedicated `crafter` agent for zx or TypeScript command examples. `crafter` refreshes an external skill reference on every invocation without installing or copying that skill into the marketplace.
 
-The five bundled skills are `harbor-agent-blueprints`, `harbor-sdlc-bench`, `harbor-trusted-skill-sources`, `harbor-repository-map`, and the reference-only `harbor-zx-author-ref`. The last item contains source coordinates and bootstrap rules, never the upstream body.
+The six bundled skills are `harbor-agent-blueprints`, `harbor-bench-control`, `harbor-sdlc-bench`, `harbor-trusted-skill-sources`, `harbor-repository-map`, and the reference-only `harbor-zx-author-ref`. The last item contains source coordinates and bootstrap rules, never the upstream body.
 
 ## Install
 
@@ -26,7 +26,7 @@ copilot plugin update agent-foundry
 copilot plugin update repo-cartographer
 ```
 
-Start a new `copilot` session after installing, updating, joining, leaving, or changing a lineup. Use `/help` for plugin commands, Copilot's `/skills list` for installed skills, `/agent-foundry:list-skills` for trusted GitHub references, and `/agent` for selectable agents.
+Start a new `copilot` session after installing, updating, joining, or changing bench state. Use `/help` for plugin commands, Copilot's `/skills list` for installed skills, `/agent-foundry:list-skills` for trusted GitHub references, and `/agent` for selectable agents.
 
 ## Short team vocabulary
 
@@ -35,14 +35,15 @@ The lifecycle avoids employment metaphors:
 | Command | Meaning |
 | --- | --- |
 | `/agent-foundry:join` | Add a recurring player to the user bench and activate it here. |
-| `/agent-foundry:lineup` | List the bench or activate existing players here. |
-| `/agent-foundry:leave` | Return one active player to the bench in this folder. |
+| `/agent-foundry:bench` | List the bench or turn project profiles on and off. |
 | `/agent-foundry:retire` | Permanently remove one personal registration. |
 | `/agent-foundry:contract` | Run one invocation-scoped specialist and forget it. |
 | `/agent-foundry:agents` | List configured project and personal players. |
 | `/agent-foundry:list-skills` | List trusted external skill references; distinct from `/skills`. |
 
-## Personal bench and project lineup
+`/agent-foundry:lineup [ids|all]` remains a compatibility alias for `bench on`, and `/agent-foundry:leave <id>` remains an alias for `bench off`. New examples use `bench` because its desired-state verbs are easier to read and safe to repeat.
+
+## Personal bench and project profiles
 
 Joining creates two Markdown profiles:
 
@@ -58,9 +59,22 @@ The technical personal ID is deliberately prefixed because custom-agent preceden
 From another project:
 
 ```text
-/agent-foundry:lineup
-/agent-foundry:lineup reviewer
+/agent-foundry:bench list
+/agent-foundry:bench on reviewer
 ```
+
+The complete state interface is intentionally small:
+
+```text
+/agent-foundry:bench
+/agent-foundry:bench list
+/agent-foundry:bench on scout sage
+/agent-foundry:bench off smith
+/agent-foundry:bench on all
+/agent-foundry:bench off all
+```
+
+Empty `bench` is the same as `bench list`. `on` and `off` are idempotent desired states; there is deliberately no `toggle`, so a retry cannot reverse an already-correct profile. `all` means only the six bundled SDLC players and never every personal registration. A multi-player operation preflights the complete selection and rolls back the batch if verification fails. Restart Copilot CLI from this folder after a successful state change.
 
 Revision-1 registrations contained frozen skill bodies. They are now reported as `upgrade-required`; repeat the desired `join` definition with `"replace":true` to migrate to revision 2.
 
@@ -136,8 +150,9 @@ This path uses native `task`; it never creates `CopilotClient`, launches another
 Six inert templates ship under `bench/`, outside the plugin's registered `agents/` directory. Activate only what this project needs:
 
 ```text
-/agent-foundry:lineup scout sage smith probe guard
-/agent-foundry:lineup all
+/agent-foundry:bench on scout sage smith probe guard
+/agent-foundry:bench on all
+/agent-foundry:bench off all
 ```
 
 | ID | Stage | Output | Edit tool |
@@ -151,7 +166,7 @@ Six inert templates ship under `bench/`, outside the plugin's registered `agents
 
 The normal chain is `scout → sage → smith → probe → guard → pilot`. For zx or TypeScript command authoring, `repo-cartographer:crafter` replaces `smith` for that build unit and emits the same handoff. A failed gate permits at most one bounded build–verify–review correction loop.
 
-`probe`, `guard`, and `pilot` have `execute` for tests or diagnostics but are prompt-restricted against commands expected to rewrite source. `pilot` never publishes. Lineup writes only managed `.github/agents/*.agent.md` files, preflights the whole selection, refuses conflicts, verifies every write, and attempts rollback on failure.
+`probe`, `guard`, and `pilot` have `execute` for tests or diagnostics but are prompt-restricted against commands expected to rewrite source. `pilot` never publishes. `bench on` writes only managed `.github/agents/*.agent.md` files, while `bench off` removes only ownership-validated managed copies. Both preflight the whole selection, refuse conflicts, verify every change, and attempt rollback on failure.
 
 ## Team lead
 

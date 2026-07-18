@@ -3,14 +3,14 @@
   "name": "agent-harbor",
   "owner": { "name": "Guillermo Villarroel" },
   "metadata": {
-    "description": "A minimal, declarative marketplace for personal Copilot rosters, project lineups, SDLC roles, and trusted skills.",
-    "version": "0.7.0"
+    "description": "A minimal, declarative marketplace for personal Copilot rosters, on/off project profiles, SDLC roles, and trusted skills.",
+    "version": "0.8.0"
   },
   "plugins": [
     {
       "name": "agent-foundry",
-      "description": "Coordinate personal benches, active project lineups, SDLC roles, and one-shot Markdown agents.",
-      "version": "0.7.0",
+      "description": "Coordinate personal benches, easy on/off project profiles, SDLC roles, and one-shot Markdown agents.",
+      "version": "0.8.0",
       "source": "./plugins/agent-foundry",
       "category": "productivity",
       "tags": ["agents", "teams", "roster", "lineup", "orchestration", "sdlc", "bench", "skills", "trust", "declarative", "markdown"]

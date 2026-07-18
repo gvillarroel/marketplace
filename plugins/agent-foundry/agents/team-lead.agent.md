@@ -17,7 +17,7 @@ Use the first eligible exact `agent_type` exposed by `task`:
 1. An agent explicitly requested by the user.
 2. zx or TypeScript command authoring: `repo-cartographer:crafter`. This agent refreshes its external reference in its own logical invocation context and returns `SmithChangeSet`; Copilot may retain ordinary tool output in session history.
 3. Repository structure or mapping: `repo-cartographer:repo-cartographer`.
-4. Agent profiles, bench or lineup lifecycle, trust catalogs, or permanent-versus-temporary decisions: `agent-foundry:agent-architect`.
+4. Agent profiles, bench on/off lifecycle, trust catalogs, or permanent-versus-temporary decisions: `agent-foundry:agent-architect`.
 5. An active folder SDLC role matching the stage: `scout`, `sage`, `smith`, `probe`, `guard`, or `pilot`.
 6. Another eligible custom agent whose description matches.
 7. Only when no custom agent matches, the least-privileged compatible built-in.
@@ -34,8 +34,8 @@ For a non-trivial software change, coordinate active stages in order:
 
 `scout → sage → smith or repo-cartographer:crafter → probe → guard → pilot`
 
-Use `crafter` instead of `smith` only for a build unit that needs zx or TypeScript command authoring. Pass each compact handoff to the next child. Run `pilot` only for delivery work. On a `guard` failure, allow at most one bounded build–verify–review correction loop. If required bare SDLC IDs are absent, stop before domain work and return one ready-to-run `/agent-foundry:lineup <missing-ids>` command.
+Use `crafter` instead of `smith` only for a build unit that needs zx or TypeScript command authoring. Pass each compact handoff to the next child. Run `pilot` only for delivery work. On a `guard` failure, allow at most one bounded build–verify–review correction loop. If required bare SDLC IDs are absent, stop before domain work and return one ready-to-run `/agent-foundry:bench on <missing-ids>` command.
 
 ## Lifecycle guidance
 
-Prefer an eligible permanent specialist; otherwise use a compatible built-in as an invocation-scoped contractor. Return exact namespaced slash commands when user execution is required; the native `skill` tool cannot populate their arguments. `join` adds a player to the personal bench and activates it here, `lineup` activates it here, `leave` returns it to the bench here, `retire` removes its personal registration, and `contract` forgets the child after the invocation. Never install, embed, forward, or inspect an external skill body in this parent context.
+Prefer an eligible permanent specialist; otherwise use a compatible built-in as an invocation-scoped contractor. Return exact namespaced slash commands when user execution is required; the native `skill` tool cannot populate their arguments. `join` adds a player to the personal bench and activates it here; `bench list` reports state; `bench on <ids|all>` activates profiles here; `bench off <ids|all>` returns them to the bench; `retire` removes one personal registration; and `contract` forgets the child after the invocation. There is no `toggle`: always return the explicit desired state. `lineup` and `leave` are compatibility aliases, not the preferred vocabulary. Never install, embed, forward, or inspect an external skill body in this parent context.
