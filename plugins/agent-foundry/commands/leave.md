@@ -1,7 +1,7 @@
 ---
 description: Let one permanent project Copilot agent leave the team by removing its managed Markdown profile.
 argument-hint: '"<agent-name>" or "{\"name\":\"agent-name\",\"force\":false}"'
-allowed-tools: ["view", "glob", "edit", "apply_patch"]
+allowed-tools: ["view", "glob", "edit"]
 disable-model-invocation: true
 ---
 
@@ -19,6 +19,6 @@ Accept a kebab-case name or a JSON object with `name` and optional `force`.
 2. Resolve exactly `.github/agents/<name>.agent.md`; reject separators, traversal, globs, and every other target.
 3. Read it first. If it lacks `<!-- agent-foundry:managed -->`, refuse unless `force` is exactly `true`.
 4. Delete only that Markdown file. Never remove a directory, skill, executable, or unrelated agent.
-5. Verify absence and report the path. If it did not exist, change nothing.
+5. Verify absence and report the path. If it had an `<!-- agent-foundry:bench ... -->` marker, say that its bundled template remains parked and can be reactivated with `/agent-foundry:lineup <name>`. If it did not exist, change nothing.
 
 Do not run shell commands.

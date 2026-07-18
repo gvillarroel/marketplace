@@ -16,3 +16,4 @@ disable-model-invocation: true
 7. Never fetch, install, copy, or execute sibling scripts and resources for a remote skill in this marketplace.
 8. For unregistered one-shot contractors, only the native `explore` profile is a hard read-only boundary. Treat narrower tools on `task` or `general-purpose` as prompt policy and say so explicitly. Registered eligible custom agents remain directly invocable by their exposed `task.agent_type`.
 9. A permanent profile is eligible for `team-lead` delegation only when `disable-model-invocation` is not true (`autoInvoke: true` in `/agent-foundry:join`). Keep the safer manual-only default unless the user wants orchestration.
+10. Do not recreate a role already present in `sdlc-bench`; activate bundled roles with `/agent-foundry:lineup` so their tool boundaries, skills, and handoff contracts remain canonical.

@@ -3,17 +3,17 @@
   "name": "agent-harbor",
   "owner": { "name": "Guillermo Villarroel" },
   "metadata": {
-    "description": "A minimal, declarative marketplace for coordinated Copilot agent teams and trusted skills.",
-    "version": "0.4.0"
+    "description": "A minimal, declarative marketplace for coordinated Copilot agent teams, SDLC roles, and trusted skills.",
+    "version": "0.5.0"
   },
   "plugins": [
     {
       "name": "agent-foundry",
-      "description": "Coordinate permanent and one-shot Markdown agents through a trusted-skill catalog.",
-      "version": "0.4.0",
+      "description": "Coordinate parked SDLC roles and one-shot Markdown agents through a trusted-skill catalog.",
+      "version": "0.5.0",
       "source": "./plugins/agent-foundry",
       "category": "productivity",
-      "tags": ["agents", "teams", "orchestration", "skills", "trust", "declarative", "markdown"]
+      "tags": ["agents", "teams", "orchestration", "sdlc", "bench", "skills", "trust", "declarative", "markdown"]
     },
     {
       "name": "repo-cartographer",

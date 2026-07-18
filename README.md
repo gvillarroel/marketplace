@@ -4,7 +4,7 @@ A minimal GitHub Copilot CLI marketplace. It contains no application, package de
 
 The two plugins are:
 
-- **agent-foundry** — Markdown commands for `join`, `leave`, `agents`, `contract`, and `list-skills`, plus `team-lead`, agent design, and trust-policy components.
+- **agent-foundry** — Markdown commands for `lineup`, `join`, `leave`, `agents`, `contract`, and `list-skills`, plus `team-lead`, a parked SDLC roster, agent design, and trust-policy components.
 - **repo-cartographer** — a repository agent that combines a local mapping skill with an instruction-only Markdown projection from [`gvillarroel/zx-harness`](https://github.com/gvillarroel/zx-harness).
 
 ## Install
@@ -26,6 +26,31 @@ copilot plugin update repo-cartographer
 
 Start a new interactive `copilot` session after installing or updating. Plugin commands are namespaced as `/agent-foundry:<command>`. Use `/help` to inspect commands, Copilot's built-in `/skills list` to confirm loaded skills, `/agent-foundry:list-skills` to inspect agent-foundry's trusted remote catalog, and `/agent` to inspect agents.
 
+## SDLC bench
+
+Six bundled agent templates ship on the bench outside the plugin's registered `agents/` directory. They also have `tools: []` plus both invocation flags disabled, so Copilot CLI cannot route or select them as plugin agents. Put only the roles needed for the current folder into the active lineup:
+
+```text
+/agent-foundry:lineup
+/agent-foundry:lineup scout sage smith probe guard
+/agent-foundry:lineup all
+```
+
+`lineup` writes only `.github/agents/*.agent.md` below the current working directory. Its sole shell action is creating that literal directory when absent; profile contents always use Copilot's native `create`/`edit` tools. It embeds the Markdown bodies of the assigned installed skills, never their sibling scripts or resources. Existing files without the exact managed bench marker are conflicts and are never overwritten. For a multi-role activation it preflights and prepares the full set first, verifies every file write, and attempts to restore target files to their preflight state if a later write fails, reporting any rollback failure explicitly. Start a new Copilot session from that folder or one of its descendants after activation; a session started above the folder does not search downward for agents.
+
+| ID | SDLC stage | Responsibility | Embedded skills | Direct edit tool |
+| --- | --- | --- | --- | --- |
+| `scout` | Discover | Repository map, constraints, acceptance criteria | `repository-map` | No |
+| `sage` | Design | Bounded design, slices, test strategy | `repository-map` | No |
+| `smith` | Build | Smallest approved code and test changes | `repository-map`, `zx-example-author` | Yes |
+| `probe` | Verify | Focused tests and reproducible evidence | `repository-map` | No |
+| `guard` | Review | Correctness, security, scope and provenance gate | `repository-map`, `trusted-skill-sources` | No |
+| `pilot` | Deliver | Release readiness and human-controlled handoff | `repository-map` | No |
+
+The handoff chain is `ScoutBrief → SagePlan → SmithChangeSet → ProbeReport → GuardGate → PilotReleasePacket`. `pilot` runs only for delivery work; a failed gate permits at most one bounded `smith → probe → guard` correction loop. Return a role to the packaged bench from the same folder with `/agent-foundry:leave <id>`.
+
+Only `smith` receives Copilot's direct `edit` tool. `probe`, `guard`, and `pilot` retain `execute` for tests and read-only diagnostics, so their no-mutation boundary is explicit prompt policy: they reject formatters, installers, fix modes, generators, migrations, destructive commands, and any command expected to rewrite tracked source.
+
 ## Team lead
 
 Select `agent-foundry:team-lead` from `/agent`, or start it directly:
@@ -34,9 +59,9 @@ Select `agent-foundry:team-lead` from `/agent`, or start it directly:
 copilot --agent agent-foundry:team-lead
 ```
 
-The team lead is an orchestration-only agent: it receives only `task`, `list_agents`, `read_agent`, and `write_agent`, so it cannot inspect, edit, execute, browse, or load a domain skill in the parent context. It routes each work unit to the narrowest eligible definition exposed by `task`, uses `repo-cartographer:repo-cartographer` for repository mapping or zx work, and uses `agent-foundry:agent-architect` for rosters, lifecycle, or trusted-skill work. When no permanent specialist fits, it uses the least-capable compatible built-in as a disposable contractor.
+The team lead is an orchestration-only agent: it receives only `task`, `list_agents`, `read_agent`, and `write_agent`, so it cannot inspect, edit, execute, browse, or load a domain skill in the parent context. It routes software work through active bare IDs from the SDLC lineup, passes compact handoffs between dependent stages, uses `repo-cartographer:repo-cartographer` for repository or zx work without a better active stage role, and uses `agent-foundry:agent-architect` for rosters, lifecycle, or trusted-skill work. When no permanent specialist fits, it uses the least-capable compatible built-in as a disposable contractor.
 
-Parameterized plugin commands remain explicit user actions because the native `skill` tool does not populate their `$ARGUMENTS`. The team lead therefore returns ready-to-run `/agent-foundry:join`, `/agent-foundry:leave`, `/agent-foundry:contract`, or `/agent-foundry:list-skills` commands when needed instead of pretending it executed them.
+Parameterized plugin commands remain explicit user actions because the native `skill` tool does not populate their `$ARGUMENTS`. The team lead therefore returns ready-to-run `/agent-foundry:lineup`, `/agent-foundry:join`, `/agent-foundry:leave`, `/agent-foundry:contract`, or `/agent-foundry:list-skills` commands when needed instead of pretending it executed them.
 
 Plugin agents and project agents created with `"autoInvoke": true` are eligible for team-lead delegation. Manual-only profiles remain selectable through `/agent` but are intentionally absent from `task` routing. The team lead is itself manual-only to prevent recursive orchestration and inherits the session's selected model.
 
@@ -86,6 +111,7 @@ The bundled agents omit `model`, so they inherit Copilot's current selection. Le
 
 - JSON is used only for the required marketplace and plugin manifests.
 - Every behavior-bearing component is Markdown with YAML frontmatter.
+- Bundled SDLC templates are inert Markdown under `bench/`, outside the registered plugin agent directory; `lineup` creates only managed `.agent.md` copies in the current folder.
 - Trusted remote scope is declared in the internal `trusted-skill-sources` Markdown skill.
 - Remote skills are instruction-only: sibling scripts and resources are neither fetched nor executed.
 - Contractors use the current Copilot runtime's subagent orchestration. There is no `CopilotClient`, platform package lookup, TypeScript runtime, or experimental extension.
