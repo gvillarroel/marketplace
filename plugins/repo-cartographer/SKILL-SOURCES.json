@@ -1,9 +1,0 @@
-{
-  "zx-example-author": {
-    "repository": "gvillarroel/zx-harness",
-    "path": "skills/zx-example-author/SKILL.md",
-    "ref": "main",
-    "license": "repository license",
-    "note": "Vendored and intentionally condensed for this POC. Runtime agents can also fetch the source directly."
-  }
-}

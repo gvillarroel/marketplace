@@ -1,10 +1,11 @@
 {
   "name": "repo-cartographer",
-  "description": "Maps repositories and authors small zx automation examples.",
-  "version": "0.1.0",
+  "description": "Maps repositories and authors small zx automation examples from Markdown-only skills.",
+  "version": "0.2.0",
   "author": { "name": "Guillermo Villarroel" },
   "repository": "https://github.com/gvillarroel/marketplace",
   "license": "MIT",
+  "keywords": ["repository", "mapping", "zx", "skills"],
   "agents": "agents/",
   "skills": "skills/"
 }

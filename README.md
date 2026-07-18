@@ -1,11 +1,13 @@
 # Agent Harbor
 
-A focused GitHub Copilot CLI plugin marketplace containing two installable plugins:
+A minimal GitHub Copilot CLI marketplace. It contains no application, package dependency, compiled output, extension process, or copied executable. Runtime behavior comes from Copilot's native agents, skills, GitHub MCP integration, and `task` delegation.
 
-- **agent-foundry** — agents, a local skill, and a TypeScript-authored Copilot CLI extension for hiring permanent agents, firing them, listing them, and executing disposable contractors through `@github/copilot-sdk`.
-- **repo-cartographer** — a repository agent that mixes a local mapping skill with a skill sourced from [`gvillarroel/zx-harness`](https://github.com/gvillarroel/zx-harness).
+The two plugins are:
 
-## Install from the marketplace
+- **agent-foundry** — Markdown commands for `/hire`, `/fire`, `/agents`, and `/contract`, plus one design agent and skill.
+- **repo-cartographer** — a repository agent that combines a local mapping skill with an instruction-only Markdown projection from [`gvillarroel/zx-harness`](https://github.com/gvillarroel/zx-harness).
+
+## Install
 
 ```powershell
 copilot plugin marketplace add gvillarroel/marketplace
@@ -14,33 +16,47 @@ copilot plugin install agent-foundry@agent-harbor
 copilot plugin install repo-cartographer@agent-harbor
 ```
 
-For local development, replace `gvillarroel/marketplace` with this repository's absolute path.
-
-Extensions are experimental in Copilot CLI. Start with:
+To refresh an existing installation:
 
 ```powershell
-copilot --experimental --plugin-dir ./plugins/agent-foundry
+copilot plugin marketplace update agent-harbor
+copilot plugin update agent-foundry
+copilot plugin update repo-cartographer
 ```
 
-Available extension commands are `/agents`, `/hire`, `/fire`, and `/contract`. The equivalent model-callable tools are `agent_hire`, `agent_fire`, and `agent_contract`.
+Start a new interactive `copilot` session after installing or updating. Use `/help` to inspect commands, `/skills list` to confirm skills, and `/agent` to inspect agents.
 
-Contractor format:
+## Disposable contractor
+
+The original invocation now works without starting a nested SDK client:
 
 ```text
 /contract {"name":"reviewer","description":"Read-only reviewer","prompt":"Review only; never edit.","tools":["read"],"skills":[{"kind":"github","repo":"gvillarroel/zx-harness","path":"skills/zx-example-author/SKILL.md","ref":"main"}]} :: review src and return three findings
 ```
 
-The contractor resolves skills into a temporary directory, opens an isolated SDK session with minimal reasoning and no memory, runs one task, destroys the session, and deletes the temporary skills. Permanent agents are written to `.github/agents/NAME.agent.md`.
+`/contract` loads only the referenced `SKILL.md`, injects its Markdown into one synchronous native `task` call, returns the result, and retains no agent ID or skill file. Prefer a full commit SHA instead of `main` for reproducible runs. Copilot's native `explore` subagent provides a hard read-only boundary for the example above. Execute-only tasks use native `task`; tasks requesting edits use `general-purpose`. In those two modes the requested tool list is prompt policy, not a dynamic runtime allowlist.
 
-The extension resolves the installed native `copilot` executable explicitly because the injected SDK cannot resolve the optional platform package needed by a nested `CopilotClient`. For a custom installation that is not on `PATH`, set `AGENT_HARBOR_CLI_PATH` to its absolute path.
+## Permanent agents
 
-## Validate
-
-```powershell
-npm test
-npm run build
-npm run test:copilot
-npm run test:contractor
+```text
+/hire {"name":"reviewer","description":"Read-only project reviewer","prompt":"Return only high-confidence findings.","tools":["read","search"],"skills":[{"kind":"installed","name":"agent-blueprints"}]}
 ```
 
-The last command consumes a small amount of Copilot quota; it installs both plugins and performs a single capped `gpt-5-mini` extension discovery check.
+This creates `.github/agents/reviewer.agent.md`. Skill bodies are embedded with provenance because Copilot CLI agent frontmatter does not dynamically resolve a `skills` array. Start a new session, run `/agent`, and select `reviewer`.
+
+The bundled agents omit `model`, so they inherit Copilot's current selection. Leaving the session on `Auto` lets the account choose an available low-cost model instead of pinning an unavailable model ID.
+
+```text
+/agents
+/fire reviewer
+```
+
+`/fire` removes only a managed agent Markdown file unless `force: true` is explicit.
+
+## Declarative boundary
+
+- JSON is used only for the required marketplace and plugin manifests.
+- Every behavior-bearing component is Markdown with YAML frontmatter.
+- Remote skills are instruction-only: sibling scripts and resources are neither fetched nor executed.
+- Contractors use the current Copilot runtime's subagent orchestration. There is no `CopilotClient`, platform package lookup, TypeScript runtime, or experimental extension.
+- Copilot CLI 1.0.71 accepts only its built-in `explore`, `task`, and `general-purpose` values in `task.agent_type`; use `/hire` when a durable agent needs a hard custom `tools` allowlist.
