@@ -4,13 +4,13 @@
   "owner": { "name": "Guillermo Villarroel" },
   "metadata": {
     "description": "A minimal, declarative marketplace for composable Copilot agents and skills.",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {
       "name": "agent-foundry",
-      "description": "Hire permanent Markdown agents or run one-shot contractors with injected skills.",
-      "version": "0.2.0",
+      "description": "Welcome permanent Markdown agents to the team or run one-shot contractors with injected skills.",
+      "version": "0.2.1",
       "source": "./plugins/agent-foundry",
       "category": "productivity",
       "tags": ["agents", "skills", "declarative", "markdown"]

@@ -1,11 +1,11 @@
 ---
-description: Remove one permanent project agent previously created by agent-foundry.
+description: Let one permanent project Copilot agent leave the team by removing its managed Markdown profile.
 argument-hint: '"<agent-name>" or "{\"name\":\"agent-name\",\"force\":false}"'
 allowed-tools: ["view", "glob", "edit", "apply_patch"]
 disable-model-invocation: true
 ---
 
-# Remove a permanent agent
+# Let a permanent agent leave the team
 
 The literal invocation arguments are:
 

@@ -1,7 +1,7 @@
 {
   "name": "agent-foundry",
   "description": "Create, remove, list and run declarative permanent or one-shot virtual agents.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": { "name": "Guillermo Villarroel" },
   "repository": "https://github.com/gvillarroel/marketplace",
   "license": "MIT",

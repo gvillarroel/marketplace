@@ -1,11 +1,11 @@
 ---
-description: Create one permanent project Copilot agent as a Markdown profile with optional embedded skill instructions.
+description: Welcome one permanent Copilot agent to the project team as a Markdown profile with optional embedded skill instructions.
 argument-hint: '"{agent-json}"'
 allowed-tools: ["skill", "view", "glob", "create", "edit", "apply_patch", "github-mcp-server-get_file_contents", "web_fetch"]
 disable-model-invocation: true
 ---
 
-# Hire a permanent agent
+# Welcome a permanent agent to the team
 
 The literal invocation arguments are:
 

@@ -36,4 +36,4 @@ Skill references are:
 7. Call `task` exactly once with the validated name and description, selected native `agent_type`, `mode: "sync"`, and composed prompt. Do not do the contractor task in the parent and never use background mode.
 8. Return the contractor result with a short footer naming the profile and skill sources. Retain no agent identifier or contractor state.
 
-Never claim that prompt policy is a hard sandbox. If a non-read-only request requires exact runtime enforcement, stop and recommend `/hire` so a permanent `.agent.md` can declare an exact `tools` allowlist.
+Never claim that prompt policy is a hard sandbox. If a non-read-only request requires exact runtime enforcement, stop and recommend `/join` so a permanent `.agent.md` can declare an exact `tools` allowlist.

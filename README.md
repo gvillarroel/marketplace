@@ -4,7 +4,7 @@ A minimal GitHub Copilot CLI marketplace. It contains no application, package de
 
 The two plugins are:
 
-- **agent-foundry** — Markdown commands for `/hire`, `/fire`, `/agents`, and `/contract`, plus one design agent and skill.
+- **agent-foundry** — Markdown commands for `/join`, `/leave`, `/agents`, and `/contract`, plus one design agent and skill.
 - **repo-cartographer** — a repository agent that combines a local mapping skill with an instruction-only Markdown projection from [`gvillarroel/zx-harness`](https://github.com/gvillarroel/zx-harness).
 
 ## Install
@@ -39,7 +39,7 @@ The original invocation now works without starting a nested SDK client:
 ## Permanent agents
 
 ```text
-/hire {"name":"reviewer","description":"Read-only project reviewer","prompt":"Return only high-confidence findings.","tools":["read","search"],"skills":[{"kind":"installed","name":"agent-blueprints"}]}
+/join {"name":"reviewer","description":"Read-only project reviewer","prompt":"Return only high-confidence findings.","tools":["read","search"],"skills":[{"kind":"installed","name":"agent-blueprints"}]}
 ```
 
 This creates `.github/agents/reviewer.agent.md`. Skill bodies are embedded with provenance because Copilot CLI agent frontmatter does not dynamically resolve a `skills` array. Start a new session, run `/agent`, and select `reviewer`.
@@ -48,10 +48,10 @@ The bundled agents omit `model`, so they inherit Copilot's current selection. Le
 
 ```text
 /agents
-/fire reviewer
+/leave reviewer
 ```
 
-`/fire` removes only a managed agent Markdown file unless `force: true` is explicit.
+`/leave` lets an agent leave the project team by removing only its managed Markdown profile unless `force: true` is explicit.
 
 ## Declarative boundary
 
@@ -59,4 +59,4 @@ The bundled agents omit `model`, so they inherit Copilot's current selection. Le
 - Every behavior-bearing component is Markdown with YAML frontmatter.
 - Remote skills are instruction-only: sibling scripts and resources are neither fetched nor executed.
 - Contractors use the current Copilot runtime's subagent orchestration. There is no `CopilotClient`, platform package lookup, TypeScript runtime, or experimental extension.
-- Copilot CLI 1.0.71 accepts only its built-in `explore`, `task`, and `general-purpose` values in `task.agent_type`; use `/hire` when a durable agent needs a hard custom `tools` allowlist.
+- Copilot CLI 1.0.71 accepts only its built-in `explore`, `task`, and `general-purpose` values in `task.agent_type`; use `/join` when a durable agent needs a hard custom `tools` allowlist.
