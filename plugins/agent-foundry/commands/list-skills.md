@@ -1,6 +1,7 @@
 ---
 description: List GitHub skills covered by agent-foundry's explicit trusted-source policy using the installed gh CLI.
 argument-hint: "[optional text filter]"
+allowed-tools: ["skill"]
 disable-model-invocation: true
 ---
 
@@ -14,7 +15,7 @@ $ARGUMENTS
 
 List remote skills covered by the plugin's active trust policy. This is distinct from Copilot's built-in `/skills`, which manages loaded skills.
 
-1. Load `trusted-skill-sources` with the native `skill` tool. Parse only its `Active policy` YAML block as configuration; schema examples grant no trust.
+1. Load `trusted-skill-sources` with the native `skill` tool. Parse only its `Active policy` YAML block as configuration; schema examples grant no trust. If the native tool cannot load it, stop. Never locate or read the policy through shell or filesystem discovery.
 2. Validate every source exactly as that policy requires before making a network call. Stop on an invalid source rather than guessing.
 3. Use the developer's installed `gh` executable through the current shell. For each unique trusted repo and ref, run exactly one read-only request shaped as:
 
