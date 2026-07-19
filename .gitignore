@@ -1,5 +1,7 @@
 /node_modules/
 /work/
+__pycache__/
+*.pyc
 .tmp-opencode-test/
 .tmp-pi-test/
 .tmp-accept-opencode/

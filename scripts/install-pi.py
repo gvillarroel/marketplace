@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
-"""Install Agent Harbor into an isolated Pi coding-agent directory."""
+"""Build and optionally install Agent Harbor as a native Pi package."""
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGINS = ROOT / "plugins"
 PUBLIC_COMMANDS = {"bench", "join", "retire", "contract", "list-skills"}
+PACKAGE_NAME = "agent-harbor-pi"
+PACKAGE_VERSION = "0.10.0"
 
 spec = importlib.util.spec_from_file_location("agent_harbor_opencode", Path(__file__).with_name("install-opencode.py"))
 common = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
+sys.dont_write_bytecode = True
 spec.loader.exec_module(common)
 
 
@@ -57,6 +63,14 @@ def adapt(text: str) -> str:
     )
     text = text.replace("with the native `task` tool", "with one synchronous `pi --no-session -p` child process")
     text = text.replace(
+        "load by exact name with the native `skill` tool; never search the filesystem",
+        "read only the exact `<pi-home>/skills/<name>/SKILL.md`; never search the filesystem",
+    )
+    text = text.replace(
+        "load `harbor-trusted-skill-sources`, ignore only Pi's outer wrapper",
+        "apply the embedded `harbor-trusted-skill-sources` contract, ignore only its outer wrapper",
+    )
+    text = text.replace(
         'tools: ["<tool>"]\nmodel: "<model>"\ndisable-model-invocation: false\nuser-invocable: true',
         'tools: <comma-separated-mapped-tools>\nmodel: "<model>"',
     )
@@ -74,20 +88,22 @@ def adapt(text: str) -> str:
 def composed_body(source: Path) -> str:
     values, body = common.frontmatter(source.read_text(encoding="utf-8"))
     result = adapt(body)
-    dependency = None
+    dependencies = []
     if values["name"] in {"bench", "join", "retire"}:
-        dependency = PLUGINS / "agent-foundry" / "skills" / "harbor-roster" / "SKILL.md"
+        dependencies.append(PLUGINS / "agent-foundry" / "skills" / "harbor-roster" / "SKILL.md")
         result = result.replace(
             "Load `harbor-roster` with the native `skill` tool.",
             "Apply the embedded `harbor-roster` contract below.",
         )
     elif values["name"] == "list-skills":
-        dependency = PLUGINS / "agent-foundry" / "skills" / "harbor-trusted-skill-sources" / "SKILL.md"
+        dependencies.append(PLUGINS / "agent-foundry" / "skills" / "harbor-trusted-skill-sources" / "SKILL.md")
         result = result.replace(
             "Load `harbor-trusted-skill-sources`;",
             "Apply the embedded `harbor-trusted-skill-sources` contract below;",
         )
-    if dependency:
+    if values["name"] == "join":
+        dependencies.append(PLUGINS / "agent-foundry" / "skills" / "harbor-trusted-skill-sources" / "SKILL.md")
+    for dependency in dependencies:
         _, dependency_body = common.frontmatter(dependency.read_text(encoding="utf-8"))
         result += "\n\n## Embedded internal contract\n\n" + adapt(dependency_body)
     return result
@@ -162,16 +178,44 @@ def install(target: Path, force: bool) -> None:
             write_agent(agent, target / "agents")
         for agent in (plugin / "bench").glob("*.agent.md"):
             write_agent(agent, target / "agent-foundry" / "bench")
+    manifest = {
+        "name": PACKAGE_NAME,
+        "version": PACKAGE_VERSION,
+        "private": True,
+        "description": "Agent Harbor commands, skills, and agent profiles for Pi.",
+        "keywords": ["pi-package", "agents", "skills", "orchestration"],
+        "pi": {
+            "skills": ["./skills"],
+            "prompts": ["./prompts", "./agents"],
+        },
+    }
+    (target / "package.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     marker.write_text("managed-by=agent-harbor\n", encoding="utf-8")
-    print(f"Installed Agent Harbor for Pi in {target}")
+    print(f"Built Agent Harbor Pi package in {target}")
+
+
+def install_package(target: Path, local: bool) -> None:
+    executable = shutil.which("pi")
+    if not executable:
+        raise SystemExit("Pi CLI is not installed or is not on PATH")
+    command = [executable, "install", str(target.resolve())]
+    if local:
+        command.append("--local")
+    result = subprocess.run(command)
+    if result.returncode:
+        raise SystemExit(result.returncode)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("target", type=Path, help="Pi config directory (for example ~/.pi/agent/agent-harbor)")
+    parser.add_argument("target", type=Path, help="output directory for the generated Pi package")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--install", action="store_true", help="install the generated package with `pi install`")
+    parser.add_argument("--local", action="store_true", help="with --install, install into project-local Pi settings")
     args = parser.parse_args()
     install(args.target, args.force)
+    if args.install:
+        install_package(args.target, args.local)
 
 
 if __name__ == "__main__":

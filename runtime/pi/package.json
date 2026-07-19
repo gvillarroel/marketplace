@@ -1,0 +1,21 @@
+{
+  "name": "agent-harbor-pi",
+  "version": "0.10.0",
+  "private": true,
+  "description": "Agent Harbor commands, skills, and agent profiles for Pi.",
+  "keywords": [
+    "pi-package",
+    "agents",
+    "skills",
+    "orchestration"
+  ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts",
+      "./agents"
+    ]
+  }
+}

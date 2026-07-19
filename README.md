@@ -1,6 +1,6 @@
 # Agent Harbor
 
-Agent Harbor is a Markdown-first agent bundle for GitHub Copilot CLI and OpenCode. Copilot consumes the original plugin manifests directly; OpenCode uses generated native agents, commands, and skills from the same canonical sources.
+Agent Harbor is a Markdown-first agent bundle for GitHub Copilot CLI, OpenCode, and Pi. Copilot consumes the original plugin manifests directly; the generated OpenCode and Pi packages adapt the same canonical agents, commands, and skills to each runtime's native installation model.
 
 It contains two plugins:
 
@@ -27,34 +27,43 @@ Start a new Copilot CLI session after installing, updating, or changing project 
 
 ### OpenCode
 
-Install both bundles into an isolated OpenCode config directory:
+Install the package containing both repository plugins directly from this repository's GitHub tarball:
 
 ```shell
-python scripts/install-opencode.py ~/.config/opencode/agent-harbor
+opencode plugin https://github.com/gvillarroel/marketplace/archive/refs/heads/main.tar.gz --global
 ```
 
-Then load that directory when starting OpenCode:
+For a project-only installation, omit `--global`:
 
 ```shell
-OPENCODE_CONFIG_DIR=~/.config/opencode/agent-harbor opencode
+opencode plugin https://github.com/gvillarroel/marketplace/archive/refs/heads/main.tar.gz
 ```
 
-On PowerShell, use `$env:OPENCODE_CONFIG_DIR="$HOME/.config/opencode/agent-harbor"` before running `opencode`. Re-run the installer after an Agent Harbor update and start a new OpenCode session. The installer owns only its target directory, refuses unmanaged `agents`, `commands`, or `skills` content unless `--force` is explicit, and never edits the Copilot plugin sources.
+OpenCode does not accept Pi's `git:github.com/…` shorthand, but its current package installer accepts the repository archive URL. Re-run the command with `--force` after updates. The equivalent npm-ready command is `opencode plugin @gvillarroel/agent-harbor --global` once that package is published; for local development use `opencode plugin file:. --global`. The package registers commands and agents from both `agent-foundry` and `repo-cartographer` through OpenCode's plugin configuration hook.
 
-OpenCode exposes the same five slash controls and named subagents using its native [command](https://opencode.ai/docs/commands), [agent](https://opencode.ai/docs/agents), and [skill](https://opencode.ai/docs/skills) directories. Player activation targets `.opencode/agents/` in the current project; user registrations live below the isolated OpenCode config directory. `OPENCODE_CONFIG_DIR` must remain set for lifecycle commands so the user-level bench resolves consistently.
+OpenCode exposes the same five slash controls and named subagents through its native plugin, [command](https://opencode.ai/docs/commands), and [agent](https://opencode.ai/docs/agents) configuration. Player activation targets `.opencode/agents/` in the current project; user registrations use the standard OpenCode configuration directory.
 
 ### Pi
 
-Generate native Pi skills, prompt templates, and agent profiles into an isolated configuration directory:
+Install both repository plugins directly from GitHub through Pi's package manager:
 
 ```shell
-python scripts/install-pi.py ~/.pi/agent/agent-harbor
-PI_CODING_AGENT_DIR=~/.pi/agent/agent-harbor pi
+pi install git:github.com/gvillarroel/marketplace
 ```
 
-On PowerShell, set `$env:PI_CODING_AGENT_DIR="$HOME/.pi/agent/agent-harbor"` before starting `pi`. Re-run the installer after updates and use `/reload` or start a new session. Pi exposes the five controls as native [prompt templates](https://pi.dev/docs/latest/prompt-templates) backed by [skills](https://pi.dev/docs/latest/skills). Because Pi intentionally has no built-in subagent tool, `/contract` and delegated agent work use one synchronous, ephemeral `pi --no-session -p` child with a mapped `--tools` allowlist. Active player profiles live in the current project's `.pi/agents/`; registrations and bundled templates stay under the isolated Pi configuration directory.
+Use `pi install --local git:github.com/gvillarroel/marketplace` for project settings. The root `package.json` declares the Pi-native skills and prompts generated from both plugins, including the three named agent profiles as invocable prompts. Use `pi update --extensions` after repository updates, then `/reload` or a new session. Because Pi intentionally has no built-in subagent tool, `/contract` and delegated agent work use one synchronous, ephemeral `pi --no-session -p` child with a mapped `--tools` allowlist. Active player profiles still live in the current project's `.pi/agents/`.
 
 The canonical Copilot plugin files remain unchanged and are designed to run on macOS, Linux, and Windows. Agent profiles use Copilot's portable `execute` alias, while the OpenCode installer translates it to native `bash` permission. User-level storage resolves from the runtime-specific absolute config directory or the current user's home directory. Nothing assumes a shell family, path separator, platform package, or system-specific executable. The only external command used by a plugin is the cross-platform `gh` CLI expected on `PATH`.
+
+## Tests
+
+Run the complete, credential-free compatibility suite with Python's standard library:
+
+```shell
+python -m unittest discover -s tests -v
+```
+
+The single test module validates canonical Copilot manifests, generates isolated OpenCode and Pi bundles, checks their complete resource contracts, verifies idempotency and overwrite protection, confirms Copilot/OpenCode discovery, and installs the Pi package into a temporary Pi home when those executables are available. Missing CLIs skip only their runtime assertion; no model call, API key, Docker service, third-party package download, or network access is required.
 
 ## Commands
 
