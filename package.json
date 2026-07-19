@@ -1,12 +1,34 @@
 {
   "name": "@gvillarroel/agent-harbor",
-  "version": "0.10.0",
-  "description": "Agent Harbor plugins for GitHub Copilot CLI, OpenCode, and Pi",
+  "version": "0.12.0",
+  "description": "Shared, token-free Agent Harbor controls for GitHub Copilot CLI, OpenCode, and Pi",
   "type": "module",
-  "main": "./runtime/opencode/index.js",
+  "main": "./runtime/opencode/server.js",
+  "exports": {
+    ".": "./runtime/opencode/server.js",
+    "./server": "./runtime/opencode/server.js",
+    "./tui": "./runtime/opencode/tui.js"
+  },
+  "bin": {
+    "agent-harbor": "./runtime/opencode/cli.mjs"
+  },
   "files": [
     "runtime/"
   ],
+  "scripts": {
+    "build:runtimes": "python scripts/install-opencode.py runtime/opencode && python scripts/install-pi.py runtime/pi",
+    "test:core": "node --test tests/*.test.mjs",
+    "test:compat": "python -m unittest discover -s tests -v",
+    "test:harbor": "uvx --from harbor==0.20.0 harbor exec --config evals/harbor/conformance.yaml",
+    "test": "npm run test:core && npm run test:compat"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.3"
+  },
+  "engines": {
+    "node": ">=22",
+    "opencode": ">=1.18.3"
+  },
   "keywords": [
     "opencode",
     "opencode-plugin",
@@ -20,8 +42,10 @@
   },
   "license": "MIT",
   "pi": {
+    "extensions": [
+      "./runtime/pi/extensions"
+    ],
     "prompts": [
-      "./runtime/pi/prompts",
       "./runtime/pi/agents"
     ]
   }

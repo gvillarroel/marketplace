@@ -1,0 +1,14 @@
+{
+  "trustedSources": [
+    {
+      "repo": "gvillarroel/zx-harness",
+      "track": "refs/heads/main",
+      "scope": {
+        "kind": "skills",
+        "paths": [
+          "skills/zx-example-author/SKILL.md"
+        ]
+      }
+    }
+  ]
+}

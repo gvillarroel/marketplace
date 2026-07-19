@@ -1,17 +1,24 @@
 {
   "name": "agent-harbor-pi",
-  "version": "0.10.0",
+  "version": "0.12.0",
   "private": true,
-  "description": "Agent Harbor commands and agent profiles for Pi.",
+  "type": "module",
+  "bin": {
+    "agent-harbor": "./cli.mjs"
+  },
+  "description": "Token-free Agent Harbor controls and agent profiles for Pi.",
   "keywords": [
     "pi-package",
     "agents",
-    "skills",
-    "orchestration"
+    "commands",
+    "orchestration",
+    "zero-token"
   ],
   "pi": {
+    "extensions": [
+      "./extensions"
+    ],
     "prompts": [
-      "./prompts",
       "./agents"
     ]
   }

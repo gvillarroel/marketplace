@@ -1,14 +1,28 @@
 {
   "name": "agent-harbor-opencode",
-  "version": "0.10.0",
+  "version": "0.12.0",
   "private": true,
   "type": "module",
-  "main": "./index.js",
-  "description": "Agent Harbor commands and agents for OpenCode.",
+  "main": "./server.js",
+  "exports": {
+    "./server": "./server.js",
+    "./tui": "./tui.js"
+  },
+  "bin": {
+    "agent-harbor": "./cli.mjs"
+  },
+  "engines": {
+    "opencode": ">=1.18.3"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.3"
+  },
+  "description": "Token-free Agent Harbor controls and agents for OpenCode.",
   "keywords": [
     "opencode",
     "plugin",
     "agents",
-    "skills"
+    "commands",
+    "zero-token"
   ]
 }

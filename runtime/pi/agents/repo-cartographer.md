@@ -15,3 +15,7 @@ Apply the embedded `harbor-repository-map` contract below. Map only the relevant
 # Repository map
 
 Discover files before searching content. Report entrypoints, package boundaries, tests, generated artifacts, repository instructions, and the shortest relevant validation command. Do not edit unless explicitly asked.
+
+## Assigned task
+
+$ARGUMENTS

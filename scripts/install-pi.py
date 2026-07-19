@@ -15,9 +15,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGINS = ROOT / "plugins"
-PUBLIC_COMMANDS = {"bench", "join", "retire", "contract", "list-skills"}
 PACKAGE_NAME = "agent-harbor-pi"
 PACKAGE_VERSION = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
+FOUNDRY_RUNTIME = PLUGINS / "agent-foundry" / "runtime"
 
 spec = importlib.util.spec_from_file_location("agent_harbor_opencode", Path(__file__).with_name("install-opencode.py"))
 common = importlib.util.module_from_spec(spec)
@@ -32,7 +32,7 @@ def adapt(text: str) -> str:
         ("<copilot-home>", "<pi-home>"),
         ("copilot-home", "pi-home"),
         ("home directory plus `.copilot`", "home directory plus `.pi/agent`"),
-        (".github/agents/", ".pi/agents/"),
+        (".github/agents/", ".pi/prompts/"),
         ("`../../bench/<id>.agent.md`", "`../../agent-foundry/bench/<id>.md`"),
         (".agent.md", ".md"),
         ("Copilot's outer skill-context wrapper", "Pi's outer skill-context wrapper"),
@@ -85,53 +85,23 @@ def adapt(text: str) -> str:
     return text
 
 
-def composed_body(source: Path) -> str:
-    values, body = common.frontmatter(source.read_text(encoding="utf-8"))
-    result = adapt(body)
-    dependencies = []
-    if values["name"] in {"bench", "join", "retire"}:
-        dependencies.append(PLUGINS / "agent-foundry" / "skills" / "harbor-roster" / "SKILL.md")
-        result = result.replace(
-            "Load `harbor-roster` with the native `skill` tool.",
-            "Apply the embedded `harbor-roster` contract below.",
-        )
-    elif values["name"] == "list-skills":
-        dependencies.append(PLUGINS / "agent-foundry" / "skills" / "harbor-trusted-skill-sources" / "SKILL.md")
-        result = result.replace(
-            "Load `harbor-trusted-skill-sources`;",
-            "Apply the embedded `harbor-trusted-skill-sources` contract below;",
-        )
-    if values["name"] == "join":
-        dependencies.append(PLUGINS / "agent-foundry" / "skills" / "harbor-trusted-skill-sources" / "SKILL.md")
-    for dependency in dependencies:
-        _, dependency_body = common.frontmatter(dependency.read_text(encoding="utf-8"))
-        result += "\n\n## Embedded internal contract\n\n" + adapt(dependency_body)
-    if values["name"] == "bench":
-        result = result.replace(
-            "Bundled templates live at `../../agent-foundry/bench/<id>.md`, relative to this skill's runtime base directory.",
-            "Bundled templates are the exact Markdown documents in this command's `Embedded bundled profiles` appendix.",
-        )
-        result += bundled_profiles()
-    return result
-
-
-def write_prompt(source: Path, root: Path) -> None:
-    values, _ = common.frontmatter(source.read_text(encoding="utf-8"))
-    hint = values.get("argument-hint")
-    lines = ["---", f"description: {adapt(values['description'])}"]
-    if hint:
-        lines.append(f"argument-hint: {hint}")
-    lines += ["---", "", f"Apply the following `{values['name']}` control exactly once.", "", composed_body(source), ""]
-    root.mkdir(parents=True, exist_ok=True)
-    root.joinpath(f"{values['name']}.md").write_text("\n".join(lines), encoding="utf-8", newline="\n")
-
-
 def render_agent(source: Path) -> str:
     document = source.read_text(encoding="utf-8")
     values, body = common.frontmatter(document)
     name = values.get("name", source.name.removesuffix(".agent.md"))
     tools = re.findall(r'"([A-Za-z0-9_-]+)', values.get("tools", ""))
-    mapping = {"read": "read", "search": "grep", "edit": "edit", "execute": "bash", "skill": "read", "task": "bash", "list_agents": "read"}
+    mapping = {
+        "read": "read",
+        "search": "grep",
+        "edit": "edit",
+        "execute": "bash",
+        "skill": "read",
+        "task": "bash",
+        "list_agents": "read",
+        "harbor_list_skills": "harbor_list_skills",
+        "harbor_contract": "harbor_contract",
+        "harbor_join": "harbor_join",
+    }
     mapped = sorted({mapping[x] for x in tools if x in mapping})
     raw_header = re.match(r"\A---\r?\n(.*?)\r?\n---", document, re.S).group(1)
     kept = []
@@ -152,7 +122,7 @@ def render_agent(source: Path) -> str:
             "Apply the embedded `harbor-repository-map` contract below.",
         )
         adapted_body += "\n\n## Embedded internal contract\n\n" + adapt(internal_body)
-    return "\n".join(lines) + adapted_body
+    return "\n".join(lines) + adapted_body.rstrip() + "\n\n## Assigned task\n\n$ARGUMENTS\n"
 
 
 def source_name(source: Path) -> str:
@@ -160,20 +130,13 @@ def source_name(source: Path) -> str:
     return values.get("name", source.name.removesuffix(".agent.md"))
 
 
-def bundled_profiles() -> str:
-    profiles = []
-    for source in sorted((PLUGINS / "agent-foundry" / "bench").glob("*.agent.md")):
-        name = source.name.removesuffix(".agent.md")
-        profiles.append(f"### {name}\n\n```markdown\n{render_agent(source).rstrip()}\n```")
-    return "\n\n## Embedded bundled profiles\n\n" + "\n\n".join(profiles)
-
-
 def install(target: Path, force: bool) -> None:
     target = target.expanduser().resolve()
     marker = target / ".agent-harbor-pi"
     generated = (
         target / "agents", target / "prompts", target / "skills", target / "agent-foundry",
-        target / "package.json",
+        target / "extensions", target / "bench", target / "commands.mjs", target / "cli.mjs",
+        target / "trusted-sources.json", target / "package.json",
     )
     manifest = target / "package.json"
     owned = marker.exists()
@@ -189,9 +152,6 @@ def install(target: Path, force: bool) -> None:
             shutil.rmtree(path) if path.is_dir() else path.unlink()
     target.mkdir(parents=True, exist_ok=True)
     for plugin in PLUGINS.iterdir():
-        for skill in (plugin / "skills").glob("*/SKILL.md"):
-            if skill.parent.name in PUBLIC_COMMANDS:
-                write_prompt(skill, target / "prompts")
         for agent in (plugin / "agents").glob("*.agent.md"):
             target.joinpath("agents").mkdir(parents=True, exist_ok=True)
             target.joinpath("agents", f"{source_name(agent)}.md").write_text(
@@ -201,13 +161,25 @@ def install(target: Path, force: bool) -> None:
         "name": PACKAGE_NAME,
         "version": PACKAGE_VERSION,
         "private": True,
-        "description": "Agent Harbor commands and agent profiles for Pi.",
-        "keywords": ["pi-package", "agents", "skills", "orchestration"],
-        "pi": {"prompts": ["./prompts", "./agents"]},
+        "type": "module",
+        "bin": {"agent-harbor": "./cli.mjs"},
+        "description": "Token-free Agent Harbor controls and agent profiles for Pi.",
+        "keywords": ["pi-package", "agents", "commands", "orchestration", "zero-token"],
+        "pi": {"extensions": ["./extensions"], "prompts": ["./agents"]},
     }
     (target / "package.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n"
     )
+    target.joinpath("extensions").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(FOUNDRY_RUNTIME / "commands.mjs", target / "commands.mjs")
+    extension = (FOUNDRY_RUNTIME / "pi-extension.mjs").read_text(encoding="utf-8")
+    extension = extension.replace('from "./commands.mjs"', 'from "../commands.mjs"')
+    (target / "extensions" / "agent-harbor.js").write_text(extension, encoding="utf-8", newline="\n")
+    shutil.copyfile(FOUNDRY_RUNTIME / "cli.mjs", target / "cli.mjs")
+    policy = FOUNDRY_RUNTIME / "trusted-sources.json"
+    if policy.exists():
+        shutil.copyfile(policy, target / policy.name)
+    shutil.copytree(PLUGINS / "agent-foundry" / "bench", target / "bench")
     if marker.exists():
         marker.unlink()
     print(f"Built Agent Harbor Pi package in {target}")

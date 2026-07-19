@@ -13,9 +13,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGINS = ROOT / "plugins"
-PUBLIC_COMMANDS = {"bench", "join", "retire", "contract", "list-skills"}
 PACKAGE_NAME = "agent-harbor-opencode"
 PACKAGE_VERSION = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
+FOUNDRY_RUNTIME = PLUGINS / "agent-foundry" / "runtime"
 TOOL_PERMISSIONS = {
     "read": "read",
     "view": "read",
@@ -28,6 +28,9 @@ TOOL_PERMISSIONS = {
     "task": "task",
     "list_agents": "task",
     "skill": "skill",
+    "harbor_list_skills": "harbor_list_skills",
+    "harbor_contract": "harbor_contract",
+    "harbor_join": "harbor_join",
 }
 
 
@@ -103,58 +106,14 @@ def render_agent(source: Path) -> str:
             continue
         kept.append(adapt_text(line))
     header = ["---", *kept, "mode: subagent"]
-    if allowed:
-        header.extend(["permission:", *[f"  {item}: allow" for item in allowed]])
+    header.extend(["permission:", '  "*": deny', *[f"  {item}: allow" for item in allowed]])
     header.extend(["---", ""])
     return "\n".join(header) + adapt_text(body)
 
 
-def bundled_profiles() -> str:
-    profiles = []
-    for source in sorted((PLUGINS / "agent-foundry" / "bench").glob("*.agent.md")):
-        name = source.name.removesuffix(".agent.md")
-        profiles.append(f"### {name}\n\n```markdown\n{render_agent(source).rstrip()}\n```")
-    return "\n\n## Embedded bundled profiles\n\n" + "\n\n".join(profiles)
-
-
-def embedded_command(skill: Path) -> str:
-    values, body = frontmatter(skill.read_text(encoding="utf-8"))
-    result = adapt_text(body)
-    dependencies = []
-    if values["name"] in {"bench", "join", "retire"}:
-        dependencies.append(PLUGINS / "agent-foundry" / "skills" / "harbor-roster" / "SKILL.md")
-        result = result.replace(
-            "Load `harbor-roster` with the native `skill` tool.",
-            "Apply the embedded `harbor-roster` contract below.",
-        )
-    elif values["name"] == "list-skills":
-        dependencies.append(PLUGINS / "agent-foundry" / "skills" / "harbor-trusted-skill-sources" / "SKILL.md")
-        result = result.replace("Load `harbor-trusted-skill-sources`;", "Apply the embedded trust contract below;")
-    if values["name"] == "join":
-        dependencies.append(PLUGINS / "agent-foundry" / "skills" / "harbor-trusted-skill-sources" / "SKILL.md")
-    for dependency in dependencies:
-        _, dependency_body = frontmatter(dependency.read_text(encoding="utf-8"))
-        result += "\n\n## Embedded internal contract\n\n" + adapt_text(dependency_body)
-    if values["name"] == "bench":
-        result = result.replace(
-            "Bundled templates live at `../../agent-foundry/bench/<id>.md`, relative to this skill's runtime base directory.",
-            "Bundled templates are the exact Markdown documents in this command's `Embedded bundled profiles` appendix.",
-        )
-        result += bundled_profiles()
-    return result
-
-
 def write_package(target: Path) -> None:
-    commands = {}
     agents = {}
     for plugin in PLUGINS.iterdir():
-        for skill in (plugin / "skills").glob("*/SKILL.md"):
-            values, _ = frontmatter(skill.read_text(encoding="utf-8"))
-            if values["name"] in PUBLIC_COMMANDS:
-                commands[values["name"]] = {
-                    "description": adapt_text(values["description"]),
-                    "template": embedded_command(skill),
-                }
         for source in (plugin / "agents").glob("*.agent.md"):
             values, body = frontmatter(source.read_text(encoding="utf-8"))
             name = values["name"]
@@ -170,29 +129,45 @@ def write_package(target: Path) -> None:
                 "description": adapt_text(values["description"]),
                 "mode": "subagent",
                 "prompt": prompt,
-                "permission": {item: "allow" for item in permissions(values.get("tools", ""))},
+                "permission": {
+                    "*": "deny",
+                    **{item: "allow" for item in permissions(values.get("tools", ""))},
+                },
             }
     manifest = {
         "name": PACKAGE_NAME,
         "version": PACKAGE_VERSION,
         "private": True,
         "type": "module",
-        "main": "./index.js",
-        "description": "Agent Harbor commands and agents for OpenCode.",
-        "keywords": ["opencode", "plugin", "agents", "skills"],
+        "main": "./server.js",
+        "exports": {
+            "./server": "./server.js",
+            "./tui": "./tui.js",
+        },
+        "bin": {"agent-harbor": "./cli.mjs"},
+        "engines": {"opencode": ">=1.18.3"},
+        "dependencies": {"@opencode-ai/plugin": "1.18.3"},
+        "description": "Token-free Agent Harbor controls and agents for OpenCode.",
+        "keywords": ["opencode", "plugin", "agents", "commands", "zero-token"],
     }
     (target / "package.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
     source = (
-        "const commands = " + json.dumps(commands, indent=2) + ";\n"
+        'import { createAgentHarborServer } from "./opencode-server.mjs";\n\n'
         "const agents = " + json.dumps(agents, indent=2) + ";\n\n"
-        "export const AgentHarborPlugin = async () => ({\n"
-        "  config: async (config) => {\n"
-        "    config.command = { ...(config.command ?? {}), ...commands };\n"
-        "    config.agent = { ...(config.agent ?? {}), ...agents };\n"
-        "  },\n"
-        "});\n\nexport default AgentHarborPlugin;\n"
+        "export const AgentHarborServer = createAgentHarborServer(agents);\n\n"
+        "export default { id: \"agent-harbor\", server: AgentHarborServer };\n"
     )
-    (target / "index.js").write_text(source, encoding="utf-8", newline="\n")
+    (target / "server.js").write_text(source, encoding="utf-8", newline="\n")
+
+    shutil.copyfile(FOUNDRY_RUNTIME / "commands.mjs", target / "commands.mjs")
+    shutil.copyfile(FOUNDRY_RUNTIME / "opencode-server.mjs", target / "opencode-server.mjs")
+    shutil.copyfile(FOUNDRY_RUNTIME / "opencode-manager-run.mjs", target / "opencode-manager-run.mjs")
+    shutil.copyfile(FOUNDRY_RUNTIME / "opencode-tui.mjs", target / "tui.js")
+    shutil.copyfile(FOUNDRY_RUNTIME / "cli.mjs", target / "cli.mjs")
+    policy = FOUNDRY_RUNTIME / "trusted-sources.json"
+    if policy.exists():
+        shutil.copyfile(policy, target / policy.name)
+    shutil.copytree(PLUGINS / "agent-foundry" / "bench", target / "bench")
 
 
 def install_package(target: Path, global_install: bool) -> None:
@@ -211,8 +186,9 @@ def install(target: Path, force: bool) -> None:
     target = target.expanduser().resolve()
     marker = target / ".agent-harbor-opencode"
     generated = (
-        target / "agents", target / "commands", target / "skills", target / "agent-foundry",
-        target / "index.js", target / "package.json",
+        target / "agents", target / "commands", target / "skills", target / "agent-foundry", target / "bench",
+        target / "index.js", target / "server.js", target / "opencode-server.mjs", target / "opencode-manager-run.mjs", target / "tui.js", target / "commands.mjs",
+        target / "cli.mjs", target / "trusted-sources.json", target / "package.json",
     )
     manifest = target / "package.json"
     owned = marker.exists()
@@ -236,7 +212,7 @@ def install(target: Path, force: bool) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", type=Path, help="output directory for the generated OpenCode plugin package")
-    parser.add_argument("--force", action="store_true", help="replace pre-existing unmanaged agents, commands, and skills")
+    parser.add_argument("--force", action="store_true", help="replace a pre-existing unmanaged output package")
     parser.add_argument("--install", action="store_true", help="install the generated package with `opencode plugin`")
     parser.add_argument("--global", dest="global_install", action="store_true", help="with --install, update global OpenCode config")
     args = parser.parse_args()

@@ -1,0 +1,43 @@
+schema_version: "1.0"
+
+map:
+  compile:
+    dataset_name: agent-harbor-conformance
+    task_name_prefix: agent-harbor-conformance
+    output_dir: .harbor/tasks/agent-harbor-conformance
+    instructions:
+      - text: >-
+          Run Agent Harbor's deterministic conformance suite. The nop agent
+          intentionally makes no changes; the verifier is the source of truth.
+    environments:
+      - paths:
+          - package.json
+          - plugins
+          - runtime
+          - scripts
+          - tests
+          - evals/harbor/Dockerfile
+        docker_image: node:24.4.0-bookworm
+        workdir: /app
+    verifiers:
+      - path: evals/harbor/verifier
+
+  job:
+    job_name: agent-harbor-conformance
+    jobs_dir: .harbor/jobs/agent-harbor-conformance
+    n_attempts: 1
+    n_concurrent_trials: 1
+    quiet: false
+    retry:
+      max_retries: 0
+    environment:
+      type: docker
+      force_build: true
+      delete: true
+    verifier:
+      override_timeout_sec: 600
+      max_timeout_sec: 900
+      include_logs:
+        - conformance.log
+    agents:
+      - name: nop
