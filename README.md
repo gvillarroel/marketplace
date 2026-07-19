@@ -1,6 +1,6 @@
 # Agent Harbor
 
-Agent Harbor is a small GitHub Copilot CLI marketplace made only of Markdown with YAML frontmatter and JSON manifests. It ships no runtime, package, executable, or copied external skill.
+Agent Harbor is a Markdown-first agent bundle for GitHub Copilot CLI and OpenCode. Copilot consumes the original plugin manifests directly; OpenCode uses generated native agents, commands, and skills from the same canonical sources.
 
 It contains two plugins:
 
@@ -25,7 +25,36 @@ copilot plugin update repo-cartographer
 
 Start a new Copilot CLI session after installing, updating, or changing project agents.
 
-The same plugin files are designed to run unchanged on macOS, Linux, and Windows. Agent profiles use Copilot's portable `execute` alias, while skill actions request Copilot's portable shell permission. User-level storage resolves from an absolute `COPILOT_HOME` or the current user's home directory. Nothing assumes a shell family, path separator, platform package, or system-specific executable. The only external command used by a plugin is the cross-platform `gh` CLI expected on `PATH`.
+### OpenCode
+
+Install both bundles into an isolated OpenCode config directory:
+
+```shell
+python scripts/install-opencode.py ~/.config/opencode/agent-harbor
+```
+
+Then load that directory when starting OpenCode:
+
+```shell
+OPENCODE_CONFIG_DIR=~/.config/opencode/agent-harbor opencode
+```
+
+On PowerShell, use `$env:OPENCODE_CONFIG_DIR="$HOME/.config/opencode/agent-harbor"` before running `opencode`. Re-run the installer after an Agent Harbor update and start a new OpenCode session. The installer owns only its target directory, refuses unmanaged `agents`, `commands`, or `skills` content unless `--force` is explicit, and never edits the Copilot plugin sources.
+
+OpenCode exposes the same five slash controls and named subagents using its native [command](https://opencode.ai/docs/commands), [agent](https://opencode.ai/docs/agents), and [skill](https://opencode.ai/docs/skills) directories. Player activation targets `.opencode/agents/` in the current project; user registrations live below the isolated OpenCode config directory. `OPENCODE_CONFIG_DIR` must remain set for lifecycle commands so the user-level bench resolves consistently.
+
+### Pi
+
+Generate native Pi skills, prompt templates, and agent profiles into an isolated configuration directory:
+
+```shell
+python scripts/install-pi.py ~/.pi/agent/agent-harbor
+PI_CODING_AGENT_DIR=~/.pi/agent/agent-harbor pi
+```
+
+On PowerShell, set `$env:PI_CODING_AGENT_DIR="$HOME/.pi/agent/agent-harbor"` before starting `pi`. Re-run the installer after updates and use `/reload` or start a new session. Pi exposes the five controls as native [prompt templates](https://pi.dev/docs/latest/prompt-templates) backed by [skills](https://pi.dev/docs/latest/skills). Because Pi intentionally has no built-in subagent tool, `/contract` and delegated agent work use one synchronous, ephemeral `pi --no-session -p` child with a mapped `--tools` allowlist. Active player profiles live in the current project's `.pi/agents/`; registrations and bundled templates stay under the isolated Pi configuration directory.
+
+The canonical Copilot plugin files remain unchanged and are designed to run on macOS, Linux, and Windows. Agent profiles use Copilot's portable `execute` alias, while the OpenCode installer translates it to native `bash` permission. User-level storage resolves from the runtime-specific absolute config directory or the current user's home directory. Nothing assumes a shell family, path separator, platform package, or system-specific executable. The only external command used by a plugin is the cross-platform `gh` CLI expected on `PATH`.
 
 ## Commands
 

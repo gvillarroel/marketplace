@@ -1,2 +1,6 @@
 /node_modules/
 /work/
+.tmp-opencode-test/
+.tmp-pi-test/
+.tmp-accept-opencode/
+.tmp-accept-pi/
