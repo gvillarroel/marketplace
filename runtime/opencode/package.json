@@ -1,0 +1,14 @@
+{
+  "name": "agent-harbor-opencode",
+  "version": "0.10.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.js",
+  "description": "Agent Harbor commands and agents for OpenCode.",
+  "keywords": [
+    "opencode",
+    "plugin",
+    "agents",
+    "skills"
+  ]
+}

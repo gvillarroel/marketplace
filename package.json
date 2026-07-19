@@ -1,0 +1,28 @@
+{
+  "name": "@gvillarroel/agent-harbor",
+  "version": "0.10.0",
+  "description": "Agent Harbor plugins for GitHub Copilot CLI, OpenCode, and Pi",
+  "type": "module",
+  "main": "./runtime/opencode/index.js",
+  "files": [
+    "runtime/"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "pi-package",
+    "agents",
+    "skills"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gvillarroel/marketplace.git"
+  },
+  "license": "MIT",
+  "pi": {
+    "prompts": [
+      "./runtime/pi/prompts",
+      "./runtime/pi/agents"
+    ]
+  }
+}

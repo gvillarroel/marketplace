@@ -1,6 +1,6 @@
 # Agent Harbor
 
-Agent Harbor is a small GitHub Copilot CLI marketplace made only of Markdown with YAML frontmatter and JSON manifests. It ships no runtime, package, executable, or copied external skill.
+Agent Harbor is a Markdown-first agent bundle for GitHub Copilot CLI, OpenCode, and Pi. Copilot consumes the original plugin manifests directly; the generated OpenCode and Pi packages adapt the same canonical agents, commands, and skills to each runtime's native installation model.
 
 It contains two plugins:
 
@@ -9,13 +9,18 @@ It contains two plugins:
 
 ## Install
 
+<details>
+<summary><strong>GitHub Copilot CLI</strong></summary>
+
+### Install
+
 ```shell
 copilot plugin marketplace add gvillarroel/marketplace
 copilot plugin install agent-foundry@agent-harbor
 copilot plugin install repo-cartographer@agent-harbor
 ```
 
-Update an existing installation:
+### Update
 
 ```shell
 copilot plugin marketplace update agent-harbor
@@ -23,9 +28,111 @@ copilot plugin update agent-foundry
 copilot plugin update repo-cartographer
 ```
 
-Start a new Copilot CLI session after installing, updating, or changing project agents.
+### Use
 
-The same plugin files are designed to run unchanged on macOS, Linux, and Windows. Agent profiles use Copilot's portable `execute` alias, while skill actions request Copilot's portable shell permission. User-level storage resolves from an absolute `COPILOT_HOME` or the current user's home directory. Nothing assumes a shell family, path separator, platform package, or system-specific executable. The only external command used by a plugin is the cross-platform `gh` CLI expected on `PATH`.
+Start a new Copilot CLI session, then invoke `/bench`, `/join`, `/retire`, `/contract`, or `/list-skills`. Use Copilot's native `/agent` selector for `team-lead`, `repo-cartographer`, `crafter`, or players activated through `/bench`.
+
+Start a new session after installing, updating, or changing project agents.
+
+</details>
+
+<details>
+<summary><strong>OpenCode</strong></summary>
+
+### Install
+
+Install the package containing both repository plugins directly from this repository's GitHub tarball:
+
+```shell
+opencode plugin https://github.com/gvillarroel/marketplace/archive/refs/heads/main.tar.gz --global
+```
+
+For a project-only installation, omit `--global`:
+
+```shell
+opencode plugin https://github.com/gvillarroel/marketplace/archive/refs/heads/main.tar.gz
+```
+
+For local development from this checkout, use `opencode plugin file:. --global`.
+
+### Update
+
+Re-run the installation command with `--force`, then start a new OpenCode session.
+
+### Use
+
+Invoke `/bench`, `/join`, `/retire`, `/contract`, or `/list-skills`. Select `team-lead`, `repo-cartographer`, `crafter`, or an activated player through OpenCode's native agent interface.
+
+OpenCode does not accept Pi's `git:github.com/…` shorthand, but its current package installer accepts the repository archive URL. The equivalent npm-ready command is `opencode plugin @gvillarroel/agent-harbor --global` once that package is published. The package registers commands and agents from both `agent-foundry` and `repo-cartographer` through OpenCode's plugin configuration hook.
+
+OpenCode exposes the same five slash controls and named subagents through its native plugin, [command](https://opencode.ai/docs/commands), and [agent](https://opencode.ai/docs/agents) configuration. Player activation targets `.opencode/agents/` in the current project; user registrations use the standard OpenCode configuration directory.
+
+</details>
+
+<details>
+<summary><strong>Pi</strong></summary>
+
+### Install
+
+Install a published revision that contains the root `package.json` and `runtime/pi/` package resources:
+
+```shell
+pi install git:github.com/gvillarroel/marketplace
+```
+
+For a project-only installation:
+
+```shell
+pi install --local git:github.com/gvillarroel/marketplace
+```
+
+The GitHub revision must already include the package files in this repository. `pi list` only confirms that Pi registered a source; it does not prove that the checked-out revision contains prompts. If the package is listed but `/bench` is absent, inspect the installed checkout shown by `pi list`: it must contain `package.json` and `runtime/pi/prompts/`.
+
+### Local development before publication
+
+Use the current checkout directly until its changes have been pushed to the GitHub revision being installed:
+
+```shell
+cd path/to/marketplace
+pi install .
+```
+
+For a project-only local installation:
+
+```shell
+cd path/to/marketplace
+pi install --local .
+```
+
+Remove an older GitHub-only registration first if you do not want both sources loaded:
+
+```shell
+pi remove git:github.com/gvillarroel/marketplace
+```
+
+### Update
+
+After publishing a new Git revision, install that revision again (or run `pi install git:github.com/gvillarroel/marketplace@<tag-or-commit>`), followed by `/reload` or a new Pi session. `pi update --extensions` reconciles an existing pinned revision; it does not move it to a newer commit.
+
+### Use
+
+Invoke `/bench`, `/join`, `/retire`, `/contract`, or `/list-skills`. The named profiles are Pi prompt templates, so invoke `/team-lead`, `/repo-cartographer`, or `/crafter` directly.
+
+The root `package.json` declares the Pi-native command and agent prompts generated from both plugins. Each command embeds only the internal contracts it needs. Because Pi intentionally has no built-in subagent tool, `/contract` and delegated agent work use one synchronous, ephemeral `pi --no-session -p` child with a mapped `--tools` allowlist. Active player profiles still live in the current project's `.pi/agents/`.
+
+</details>
+
+The canonical Copilot plugin files remain unchanged and are designed to run on macOS, Linux, and Windows. Agent profiles use Copilot's portable `execute` alias, while the OpenCode installer translates it to native `bash` permission. User-level storage resolves from the runtime-specific absolute config directory or the current user's home directory. Nothing assumes a shell family, path separator, platform package, or system-specific executable. The only external command used by a plugin is the cross-platform `gh` CLI expected on `PATH`.
+
+## Tests
+
+Run the complete, credential-free compatibility suite with Python's standard library:
+
+```shell
+python -m unittest discover -s tests -v
+```
+
+The single test module validates canonical Copilot manifests, regenerates the compact OpenCode and Pi packages, evaluates all five command contracts across the three runtimes, verifies bundled-profile ownership, idempotency, and overwrite protection, confirms Copilot/OpenCode discovery, and installs the Pi package into a temporary Pi home when those executables are available. Missing CLIs skip only their runtime assertion; no model call, API key, Docker service, third-party package download, or network access is required.
 
 ## Commands
 
