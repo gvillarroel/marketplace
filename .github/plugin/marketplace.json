@@ -1,6 +1,6 @@
 {
   "name": "agent-harbor",
-  "owner": { "name": "Guillermo Villarroel" },
+  "owner": { "name": "Gerardo Villarroel" },
   "metadata": {
     "description": "A minimal, declarative marketplace for personal Copilot rosters, on/off project profiles, SDLC roles, and trusted skills.",
     "version": "0.10.0"

@@ -2,7 +2,7 @@
   "name": "repo-cartographer",
   "description": "Maps repositories and crafts zx or TypeScript examples through an invocation-scoped, refresh-on-use GitHub skill reference.",
   "version": "0.5.1",
-  "author": { "name": "Guillermo Villarroel" },
+  "author": { "name": "Gerardo Villarroel" },
   "repository": "https://github.com/gvillarroel/marketplace",
   "license": "MIT",
   "keywords": ["repository", "mapping", "zx", "typescript", "agents", "external-skills", "github"],
