@@ -74,7 +74,7 @@ OpenCode exposes the same five slash controls and named subagents through its na
 
 ### Install
 
-Install both repository plugins directly from GitHub through Pi's package manager:
+Install a published revision that contains the root `package.json` and `runtime/pi/` package resources:
 
 ```shell
 pi install git:github.com/gvillarroel/marketplace
@@ -86,9 +86,33 @@ For a project-only installation:
 pi install --local git:github.com/gvillarroel/marketplace
 ```
 
+The GitHub revision must already include the package files in this repository. `pi list` only confirms that Pi registered a source; it does not prove that the checked-out revision contains prompts. If the package is listed but `/bench` is absent, inspect the installed checkout shown by `pi list`: it must contain `package.json` and `runtime/pi/prompts/`.
+
+### Local development before publication
+
+Use the current checkout directly until its changes have been pushed to the GitHub revision being installed:
+
+```shell
+cd path/to/marketplace
+pi install .
+```
+
+For a project-only local installation:
+
+```shell
+cd path/to/marketplace
+pi install --local .
+```
+
+Remove an older GitHub-only registration first if you do not want both sources loaded:
+
+```shell
+pi remove git:github.com/gvillarroel/marketplace
+```
+
 ### Update
 
-Run `pi update --extensions`, followed by `/reload` or a new Pi session.
+After publishing a new Git revision, install that revision again (or run `pi install git:github.com/gvillarroel/marketplace@<tag-or-commit>`), followed by `/reload` or a new Pi session. `pi update --extensions` reconciles an existing pinned revision; it does not move it to a newer commit.
 
 ### Use
 
