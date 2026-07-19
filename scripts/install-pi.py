@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGINS = ROOT / "plugins"
 PUBLIC_COMMANDS = {"bench", "join", "retire", "contract", "list-skills"}
 PACKAGE_NAME = "agent-harbor-pi"
-PACKAGE_VERSION = "0.10.0"
+PACKAGE_VERSION = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
 
 spec = importlib.util.spec_from_file_location("agent_harbor_opencode", Path(__file__).with_name("install-opencode.py"))
 common = importlib.util.module_from_spec(spec)
@@ -106,17 +106,13 @@ def composed_body(source: Path) -> str:
     for dependency in dependencies:
         _, dependency_body = common.frontmatter(dependency.read_text(encoding="utf-8"))
         result += "\n\n## Embedded internal contract\n\n" + adapt(dependency_body)
+    if values["name"] == "bench":
+        result = result.replace(
+            "Bundled templates live at `../../agent-foundry/bench/<id>.md`, relative to this skill's runtime base directory.",
+            "Bundled templates are the exact Markdown documents in this command's `Embedded bundled profiles` appendix.",
+        )
+        result += bundled_profiles()
     return result
-
-
-def write_skill(source: Path, root: Path) -> None:
-    values, _ = common.frontmatter(source.read_text(encoding="utf-8"))
-    target = root / values["name"]
-    target.mkdir(parents=True, exist_ok=True)
-    target.joinpath("SKILL.md").write_text(
-        f"---\nname: {values['name']}\ndescription: {adapt(values['description'])}\ncompatibility: pi\n---\n" + composed_body(source),
-        encoding="utf-8",
-    )
 
 
 def write_prompt(source: Path, root: Path) -> None:
@@ -127,10 +123,10 @@ def write_prompt(source: Path, root: Path) -> None:
         lines.append(f"argument-hint: {hint}")
     lines += ["---", "", f"Apply the following `{values['name']}` control exactly once.", "", composed_body(source), ""]
     root.mkdir(parents=True, exist_ok=True)
-    root.joinpath(f"{values['name']}.md").write_text("\n".join(lines), encoding="utf-8")
+    root.joinpath(f"{values['name']}.md").write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
-def write_agent(source: Path, root: Path) -> None:
+def render_agent(source: Path) -> str:
     document = source.read_text(encoding="utf-8")
     values, body = common.frontmatter(document)
     name = values.get("name", source.name.removesuffix(".agent.md"))
@@ -147,7 +143,6 @@ def write_agent(source: Path, root: Path) -> None:
     if mapped:
         lines.append(f"tools: {','.join(mapped)}")
     lines += ["---", ""]
-    root.mkdir(parents=True, exist_ok=True)
     adapted_body = adapt(body)
     if name == "repo-cartographer":
         internal = PLUGINS / "repo-cartographer" / "skills" / "harbor-repository-map" / "SKILL.md"
@@ -157,40 +152,64 @@ def write_agent(source: Path, root: Path) -> None:
             "Apply the embedded `harbor-repository-map` contract below.",
         )
         adapted_body += "\n\n## Embedded internal contract\n\n" + adapt(internal_body)
-    root.joinpath(f"{name}.md").write_text("\n".join(lines) + adapted_body, encoding="utf-8")
+    return "\n".join(lines) + adapted_body
+
+
+def source_name(source: Path) -> str:
+    values, _ = common.frontmatter(source.read_text(encoding="utf-8"))
+    return values.get("name", source.name.removesuffix(".agent.md"))
+
+
+def bundled_profiles() -> str:
+    profiles = []
+    for source in sorted((PLUGINS / "agent-foundry" / "bench").glob("*.agent.md")):
+        name = source.name.removesuffix(".agent.md")
+        profiles.append(f"### {name}\n\n```markdown\n{render_agent(source).rstrip()}\n```")
+    return "\n\n## Embedded bundled profiles\n\n" + "\n\n".join(profiles)
 
 
 def install(target: Path, force: bool) -> None:
     target = target.expanduser().resolve()
     marker = target / ".agent-harbor-pi"
-    managed = (target / "agents", target / "prompts", target / "skills", target / "agent-foundry" / "bench")
-    if any(path.exists() for path in managed) and not marker.exists() and not force:
-        raise SystemExit(f"Refusing to overwrite unmanaged Pi content in {target}; use --force explicitly")
-    for path in managed:
+    generated = (
+        target / "agents", target / "prompts", target / "skills", target / "agent-foundry",
+        target / "package.json",
+    )
+    manifest = target / "package.json"
+    owned = marker.exists()
+    if manifest.exists():
+        try:
+            owned = owned or json.loads(manifest.read_text(encoding="utf-8")).get("name") == PACKAGE_NAME
+        except (json.JSONDecodeError, OSError):
+            pass
+    if target.exists() and any(target.iterdir()) and not owned and not force:
+        raise SystemExit(f"Refusing to overwrite non-empty directory {target}; use --force explicitly")
+    for path in generated:
         if path.exists():
-            shutil.rmtree(path)
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+    target.mkdir(parents=True, exist_ok=True)
     for plugin in PLUGINS.iterdir():
         for skill in (plugin / "skills").glob("*/SKILL.md"):
-            write_skill(skill, target / "skills")
             if skill.parent.name in PUBLIC_COMMANDS:
                 write_prompt(skill, target / "prompts")
         for agent in (plugin / "agents").glob("*.agent.md"):
-            write_agent(agent, target / "agents")
-        for agent in (plugin / "bench").glob("*.agent.md"):
-            write_agent(agent, target / "agent-foundry" / "bench")
+            target.joinpath("agents").mkdir(parents=True, exist_ok=True)
+            target.joinpath("agents", f"{source_name(agent)}.md").write_text(
+                render_agent(agent), encoding="utf-8", newline="\n"
+            )
     manifest = {
         "name": PACKAGE_NAME,
         "version": PACKAGE_VERSION,
         "private": True,
-        "description": "Agent Harbor commands, skills, and agent profiles for Pi.",
+        "description": "Agent Harbor commands and agent profiles for Pi.",
         "keywords": ["pi-package", "agents", "skills", "orchestration"],
-        "pi": {
-            "skills": ["./skills"],
-            "prompts": ["./prompts", "./agents"],
-        },
+        "pi": {"prompts": ["./prompts", "./agents"]},
     }
-    (target / "package.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    marker.write_text("managed-by=agent-harbor\n", encoding="utf-8")
+    (target / "package.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
+    if marker.exists():
+        marker.unlink()
     print(f"Built Agent Harbor Pi package in {target}")
 
 

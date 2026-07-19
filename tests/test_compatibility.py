@@ -17,6 +17,13 @@ RUNTIME = ROOT / "runtime"
 PUBLIC = {"bench", "join", "retire", "contract", "list-skills"}
 AGENTS = {"team-lead", "repo-cartographer", "crafter"}
 BUNDLED = {"scout", "sage", "smith", "probe", "guard", "pilot"}
+COMMAND_MARKERS = {
+    "bench": ("$ARGUMENTS", "Operation: bench", "Embedded bundled profiles"),
+    "join": ("$ARGUMENTS", "Operation: join", "harbor-trusted-skill-sources"),
+    "retire": ("$ARGUMENTS", "Operation: retire"),
+    "contract": ("$ARGUMENTS", "Run a one-shot player"),
+    "list-skills": ("$ARGUMENTS", "harbor-trusted-skill-sources"),
+}
 
 
 def run_installer(name: str, target: Path, *extra: str) -> subprocess.CompletedProcess[str]:
@@ -52,6 +59,15 @@ def digest_tree(root: Path) -> str:
     return digest.hexdigest()
 
 
+def load_opencode_plugin(target: Path) -> dict:
+    source = (target / "index.js").read_text(encoding="utf-8")
+    decoder = json.JSONDecoder()
+    commands, _ = decoder.raw_decode(source, source.index("{") )
+    agent_start = source.index("const agents = ") + len("const agents = ")
+    agents, _ = decoder.raw_decode(source, agent_start)
+    return {"command": commands, "agent": agents}
+
+
 class CompatibilityTests(unittest.TestCase):
     maxDiff = None
 
@@ -79,7 +95,8 @@ class CompatibilityTests(unittest.TestCase):
         manifest = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], "@gvillarroel/agent-harbor")
         self.assertEqual(manifest["main"], "./runtime/opencode/index.js")
-        self.assertEqual(manifest["pi"]["skills"], ["./runtime/pi/skills"])
+        self.assertNotIn("skills", manifest["pi"])
+        self.assertEqual(manifest["pi"]["prompts"], ["./runtime/pi/prompts", "./runtime/pi/agents"])
         with tempfile.TemporaryDirectory() as directory:
             for runtime in ("opencode", "pi"):
                 generated = Path(directory) / runtime
@@ -87,29 +104,48 @@ class CompatibilityTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(digest_tree(generated), digest_tree(RUNTIME / runtime), runtime)
 
+    def test_every_command_has_complete_cross_runtime_contract(self):
+        opencode = load_opencode_plugin(RUNTIME / "opencode")["command"]
+        for name, markers in COMMAND_MARKERS.items():
+            canonical_values, canonical_body = frontmatter(
+                PLUGINS / "agent-foundry" / "skills" / name / "SKILL.md"
+            )
+            pi_values, pi_body = frontmatter(RUNTIME / "pi" / "prompts" / f"{name}.md")
+            self.assertEqual(canonical_values["name"], name)
+            self.assertEqual(canonical_values["user-invocable"], "true")
+            self.assertEqual(pi_values.get("argument-hint"), canonical_values.get("argument-hint"), name)
+            self.assertIn(name, opencode)
+            for marker in markers:
+                self.assertIn(marker, canonical_body if marker == "$ARGUMENTS" else opencode[name]["template"], name)
+                self.assertIn(marker, pi_body, name)
+
     def test_opencode_bundle_contract_and_real_discovery(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "opencode"
             result = run_installer("opencode", target)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual({p.stem for p in (target / "commands").glob("*.md")}, PUBLIC)
-            self.assertEqual({p.stem for p in (target / "agents").glob("*.md")}, AGENTS)
-            self.assertEqual({p.stem for p in (target / "agent-foundry" / "bench").glob("*.md")}, BUNDLED)
+            self.assertEqual({p.name for p in target.iterdir()}, {"index.js", "package.json"})
             manifest = json.loads((target / "package.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["name"], "agent-harbor-opencode")
             self.assertEqual(manifest["main"], "./index.js")
-            plugin_source = (target / "index.js").read_text(encoding="utf-8")
-            self.assertIn("AgentHarborPlugin", plugin_source)
-            self.assertIn("config.command", plugin_source)
-            self.assertIn("config.agent", plugin_source)
-
-            roster = (target / "skills" / "harbor-roster" / "SKILL.md").read_text(encoding="utf-8")
-            self.assertIn("OPENCODE_CONFIG_DIR", roster)
-            self.assertIn("../../agent-foundry/bench/<id>.md", roster)
-            self.assertNotRegex(roster, r"COPILOT_HOME|\.github/agents|\.agent\.md")
-            for path in (target / "agents").glob("*.md"):
-                values, _ = frontmatter(path)
-                self.assertEqual(values["mode"], "subagent")
+            config = load_opencode_plugin(target)
+            self.assertEqual(set(config["command"]), PUBLIC)
+            self.assertEqual(set(config["agent"]), AGENTS)
+            for name, command in config["command"].items():
+                self.assertTrue(command["description"], name)
+                self.assertNotRegex(command["template"], r"COPILOT_HOME|\.github/agents|\.agent\.md")
+            bench = config["command"]["bench"]["template"]
+            self.assertIn("OPENCODE_CONFIG_DIR", bench)
+            self.assertIn("Embedded bundled profiles", bench)
+            self.assertNotIn("../../agent-foundry/bench/<id>.md", bench)
+            for name in BUNDLED:
+                self.assertIn(f"### {name}", bench)
+                self.assertIn(f"name: {name}", bench)
+                self.assertIn(f"player: {name}", bench)
+            self.assertIn("harbor-trusted-skill-sources owner=agent-foundry revision=3", config["command"]["join"]["template"])
+            self.assertIn("Operation: retire", config["command"]["retire"]["template"])
+            self.assertIn("task", config["command"]["contract"]["template"])
+            self.assertIn("harbor-trusted-skill-sources", config["command"]["list-skills"]["template"])
 
             executable = shutil.which("opencode")
             if executable:
@@ -135,26 +171,31 @@ class CompatibilityTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual({p.stem for p in (target / "prompts").glob("*.md")}, PUBLIC)
             self.assertEqual({p.stem for p in (target / "agents").glob("*.md")}, AGENTS)
-            self.assertEqual({p.stem for p in (target / "agent-foundry" / "bench").glob("*.md")}, BUNDLED)
+            self.assertEqual({p.name for p in target.iterdir()}, {"agents", "prompts", "package.json"})
             manifest = json.loads((target / "package.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["name"], "agent-harbor-pi")
             self.assertIn("pi-package", manifest["keywords"])
-            self.assertEqual(manifest["pi"]["skills"], ["./skills"])
             self.assertEqual(manifest["pi"]["prompts"], ["./prompts", "./agents"])
 
-            roster = (target / "skills" / "harbor-roster" / "SKILL.md").read_text(encoding="utf-8")
             bench = (target / "prompts" / "bench.md").read_text(encoding="utf-8")
             contract = (target / "prompts" / "contract.md").read_text(encoding="utf-8")
             join = (target / "prompts" / "join.md").read_text(encoding="utf-8")
             cartographer = (target / "agents" / "repo-cartographer.md").read_text(encoding="utf-8")
-            self.assertIn("PI_CODING_AGENT_DIR", roster)
-            self.assertIn("../../agent-foundry/bench/<id>.md", roster)
+            self.assertIn("PI_CODING_AGENT_DIR", bench)
+            self.assertIn("Embedded bundled profiles", bench)
+            self.assertNotIn("../../agent-foundry/bench/<id>.md", bench)
+            for name in BUNDLED:
+                self.assertIn(f"### {name}", bench)
+                self.assertIn(f"name: {name}", bench)
+                self.assertIn(f"player: {name}", bench)
             self.assertIn("Embedded internal contract", bench)
             self.assertIn("Embedded internal contract", cartographer)
             self.assertIn("pi --no-session -p", contract)
             self.assertNotIn("native `skill` tool", join)
             self.assertIn("harbor-trusted-skill-sources owner=agent-foundry revision=3", join)
-            self.assertNotRegex(roster, r"COPILOT_HOME|\.github/agents|\.agent\.md")
+            for path in (target / "prompts").glob("*.md"):
+                body = path.read_text(encoding="utf-8")
+                self.assertNotRegex(body, r"COPILOT_HOME|\.github/agents|\.agent\.md")
             for path in (target / "agents").glob("*.md"):
                 values, _ = frontmatter(path)
                 self.assertIn("tools", values)

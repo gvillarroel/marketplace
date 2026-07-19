@@ -94,7 +94,7 @@ Run `pi update --extensions`, followed by `/reload` or a new Pi session.
 
 Invoke `/bench`, `/join`, `/retire`, `/contract`, or `/list-skills`. The named profiles are Pi prompt templates, so invoke `/team-lead`, `/repo-cartographer`, or `/crafter` directly.
 
-The root `package.json` declares the Pi-native skills and prompts generated from both plugins. Because Pi intentionally has no built-in subagent tool, `/contract` and delegated agent work use one synchronous, ephemeral `pi --no-session -p` child with a mapped `--tools` allowlist. Active player profiles still live in the current project's `.pi/agents/`.
+The root `package.json` declares the Pi-native command and agent prompts generated from both plugins. Each command embeds only the internal contracts it needs. Because Pi intentionally has no built-in subagent tool, `/contract` and delegated agent work use one synchronous, ephemeral `pi --no-session -p` child with a mapped `--tools` allowlist. Active player profiles still live in the current project's `.pi/agents/`.
 
 </details>
 
@@ -108,7 +108,7 @@ Run the complete, credential-free compatibility suite with Python's standard lib
 python -m unittest discover -s tests -v
 ```
 
-The single test module validates canonical Copilot manifests, generates isolated OpenCode and Pi bundles, checks their complete resource contracts, verifies idempotency and overwrite protection, confirms Copilot/OpenCode discovery, and installs the Pi package into a temporary Pi home when those executables are available. Missing CLIs skip only their runtime assertion; no model call, API key, Docker service, third-party package download, or network access is required.
+The single test module validates canonical Copilot manifests, regenerates the compact OpenCode and Pi packages, evaluates all five command contracts across the three runtimes, verifies bundled-profile ownership, idempotency, and overwrite protection, confirms Copilot/OpenCode discovery, and installs the Pi package into a temporary Pi home when those executables are available. Missing CLIs skip only their runtime assertion; no model call, API key, Docker service, third-party package download, or network access is required.
 
 ## Commands
 

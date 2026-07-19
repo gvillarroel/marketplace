@@ -20,9 +20,6 @@
   },
   "license": "MIT",
   "pi": {
-    "skills": [
-      "./runtime/pi/skills"
-    ],
     "prompts": [
       "./runtime/pi/prompts",
       "./runtime/pi/agents"

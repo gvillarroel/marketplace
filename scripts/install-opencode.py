@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGINS = ROOT / "plugins"
 PUBLIC_COMMANDS = {"bench", "join", "retire", "contract", "list-skills"}
 PACKAGE_NAME = "agent-harbor-opencode"
-PACKAGE_VERSION = "0.10.0"
+PACKAGE_VERSION = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
 TOOL_PERMISSIONS = {
     "read": "read",
     "view": "read",
@@ -40,7 +40,8 @@ def frontmatter(document: str) -> tuple[dict[str, str], str]:
         if ":" in line and not line.startswith((" ", "\t")):
             key, value = line.split(":", 1)
             values[key.strip()] = value.strip()
-    return values, match.group(2)
+    body = match.group(2).replace("\r\n", "\n").replace("\r", "\n")
+    return values, body
 
 
 def adapt_text(text: str) -> str:
@@ -91,40 +92,29 @@ def permissions(raw_tools: str) -> list[str]:
     return sorted({TOOL_PERMISSIONS[name] for name in names if name in TOOL_PERMISSIONS})
 
 
-def install_agent(source: Path, destination: Path) -> None:
-    values, body = frontmatter(source.read_text(encoding="utf-8"))
-    name = values.get("name", source.name.removesuffix(".agent.md"))
+def render_agent(source: Path) -> str:
+    document = source.read_text(encoding="utf-8")
+    values, body = frontmatter(document)
     allowed = permissions(values.get("tools", ""))
-    header = ["---", f"description: {adapt_text(values['description'])}", "mode: subagent"]
+    raw_header = re.match(r"\A---\r?\n(.*?)\r?\n---", document, re.S).group(1)
+    kept = []
+    for line in raw_header.splitlines():
+        if line.startswith(("tools:", "allowed-tools:", "disable-model-invocation:", "user-invocable:")):
+            continue
+        kept.append(adapt_text(line))
+    header = ["---", *kept, "mode: subagent"]
     if allowed:
         header.extend(["permission:", *[f"  {item}: allow" for item in allowed]])
     header.extend(["---", ""])
-    destination.mkdir(parents=True, exist_ok=True)
-    (destination / f"{name}.md").write_text("\n".join(header) + adapt_text(body), encoding="utf-8")
+    return "\n".join(header) + adapt_text(body)
 
 
-def install_skill(source: Path, destination: Path) -> None:
-    values, body = frontmatter(source.read_text(encoding="utf-8"))
-    name = values["name"]
-    description = adapt_text(values["description"])
-    target = destination / name
-    target.mkdir(parents=True, exist_ok=True)
-    content = f"---\nname: {name}\ndescription: {description}\ncompatibility: opencode\n---\n" + adapt_text(body)
-    (target / "SKILL.md").write_text(content, encoding="utf-8")
-
-
-def install_command(skill: Path, destination: Path) -> None:
-    values, _ = frontmatter(skill.read_text(encoding="utf-8"))
-    name = values["name"]
-    destination.mkdir(parents=True, exist_ok=True)
-    content = (
-        "---\n"
-        f"description: {adapt_text(values['description'])}\n"
-        "---\n\n"
-        f"Load the `{name}` skill with the native `skill` tool, then apply it exactly once "
-        "using these literal command arguments:\n\n$ARGUMENTS\n"
-    )
-    (destination / f"{name}.md").write_text(content, encoding="utf-8")
+def bundled_profiles() -> str:
+    profiles = []
+    for source in sorted((PLUGINS / "agent-foundry" / "bench").glob("*.agent.md")):
+        name = source.name.removesuffix(".agent.md")
+        profiles.append(f"### {name}\n\n```markdown\n{render_agent(source).rstrip()}\n```")
+    return "\n\n## Embedded bundled profiles\n\n" + "\n\n".join(profiles)
 
 
 def embedded_command(skill: Path) -> str:
@@ -145,6 +135,12 @@ def embedded_command(skill: Path) -> str:
     for dependency in dependencies:
         _, dependency_body = frontmatter(dependency.read_text(encoding="utf-8"))
         result += "\n\n## Embedded internal contract\n\n" + adapt_text(dependency_body)
+    if values["name"] == "bench":
+        result = result.replace(
+            "Bundled templates live at `../../agent-foundry/bench/<id>.md`, relative to this skill's runtime base directory.",
+            "Bundled templates are the exact Markdown documents in this command's `Embedded bundled profiles` appendix.",
+        )
+        result += bundled_profiles()
     return result
 
 
@@ -185,7 +181,7 @@ def write_package(target: Path) -> None:
         "description": "Agent Harbor commands and agents for OpenCode.",
         "keywords": ["opencode", "plugin", "agents", "skills"],
     }
-    (target / "package.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    (target / "package.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
     source = (
         "const commands = " + json.dumps(commands, indent=2) + ";\n"
         "const agents = " + json.dumps(agents, indent=2) + ";\n\n"
@@ -196,7 +192,7 @@ def write_package(target: Path) -> None:
         "  },\n"
         "});\n\nexport default AgentHarborPlugin;\n"
     )
-    (target / "index.js").write_text(source, encoding="utf-8")
+    (target / "index.js").write_text(source, encoding="utf-8", newline="\n")
 
 
 def install_package(target: Path, global_install: bool) -> None:
@@ -214,23 +210,26 @@ def install_package(target: Path, global_install: bool) -> None:
 def install(target: Path, force: bool) -> None:
     target = target.expanduser().resolve()
     marker = target / ".agent-harbor-opencode"
-    managed = (target / "agents", target / "commands", target / "skills", target / "agent-foundry" / "bench")
-    if any(path.exists() for path in managed) and not marker.exists() and not force:
-        raise SystemExit(f"Refusing to overwrite unmanaged OpenCode content in {target}; use --force explicitly")
-    for path in managed:
+    generated = (
+        target / "agents", target / "commands", target / "skills", target / "agent-foundry",
+        target / "index.js", target / "package.json",
+    )
+    manifest = target / "package.json"
+    owned = marker.exists()
+    if manifest.exists():
+        try:
+            owned = owned or json.loads(manifest.read_text(encoding="utf-8")).get("name") == PACKAGE_NAME
+        except (json.JSONDecodeError, OSError):
+            pass
+    if target.exists() and any(target.iterdir()) and not owned and not force:
+        raise SystemExit(f"Refusing to overwrite non-empty directory {target}; use --force explicitly")
+    for path in generated:
         if path.exists():
-            shutil.rmtree(path)
-    for plugin in PLUGINS.iterdir():
-        for skill in (plugin / "skills").glob("*/SKILL.md"):
-            install_skill(skill, target / "skills")
-            if skill.parent.name in PUBLIC_COMMANDS:
-                install_command(skill, target / "commands")
-        for agent in (plugin / "agents").glob("*.agent.md"):
-            install_agent(agent, target / "agents")
-        for agent in (plugin / "bench").glob("*.agent.md"):
-            install_agent(agent, target / "agent-foundry" / "bench")
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+    target.mkdir(parents=True, exist_ok=True)
     write_package(target)
-    marker.write_text("managed-by=agent-harbor\n", encoding="utf-8")
+    if marker.exists():
+        marker.unlink()
     print(f"Installed Agent Harbor for OpenCode in {target}")
 
 
