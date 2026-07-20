@@ -1,12 +1,31 @@
 {
   "name": "@gvillarroel/agent-harbor",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Agent Harbor plugins for GitHub Copilot CLI, OpenCode, and Pi",
   "type": "module",
-  "main": "./runtime/opencode/index.js",
+  "main": "./dist/adapters/opencode.js",
+  "exports": {
+    ".": "./dist/adapters/opencode.js",
+    "./core": "./dist/core/commands.js",
+    "./pi": "./dist/adapters/pi.js"
+  },
+  "bin": {
+    "agent-harbor": "./dist/cli.js"
+  },
   "files": [
-    "runtime/"
+    "dist/",
+    "plugins/"
   ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "npm run build && npm run test:ts",
+    "typecheck": "tsc --noEmit",
+    "test:ts": "tsx --test test-ts/contracts.test.ts test-ts/adapters.test.ts test-ts/compatibility.test.ts",
+    "prepack": "npm run build"
+  },
   "keywords": [
     "opencode",
     "opencode-plugin",
@@ -20,9 +39,25 @@
   },
   "license": "MIT",
   "pi": {
-    "prompts": [
-      "./runtime/pi/prompts",
-      "./runtime/pi/agents"
+    "extensions": [
+      "./dist/adapters/pi.js"
     ]
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "1.0.6",
+    "@opencode-ai/plugin": "1.17.13"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.10"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
   }
 }

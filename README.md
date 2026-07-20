@@ -1,10 +1,13 @@
 # Agent Harbor
 
-Agent Harbor is a Markdown-first agent bundle for GitHub Copilot CLI, OpenCode, and Pi. Copilot consumes the original plugin manifests directly; the generated OpenCode and Pi packages adapt the same canonical agents, commands, and skills to each runtime's native installation model.
+Agent Harbor is a TypeScript library with native adapters for GitHub Copilot CLI, OpenCode, and Pi. Copilot consumes plugin manifests directly; OpenCode loads a compiled plugin and Pi loads a compiled extension. All three share the same executable command contracts.
+
+The normative product, safety, lifecycle, and cross-runtime acceptance
+requirements are consolidated in [REQUIREMENTS.md](REQUIREMENTS.md).
 
 It contains two plugins:
 
-- `agent-foundry`: five slash controls, a user-level bench, six parked SDLC profiles, a team lead, and a trusted GitHub-skill catalog.
+- `agent-foundry`: five slash controls, a user-level bench, six canonical SDLC definitions rendered on activation, a team lead, and a trusted GitHub-skill catalog.
 - `repo-cartographer`: repository orientation plus a `crafter` agent for minimal zx and TypeScript command examples.
 
 ## Install
@@ -32,7 +35,12 @@ copilot plugin update repo-cartographer
 
 Start a new Copilot CLI session, then invoke `/bench`, `/join`, `/retire`, `/contract`, or `/list-skills`. Use Copilot's native `/agent` selector for `team-lead`, `repo-cartographer`, `crafter`, or players activated through `/bench`.
 
+The `agent-foundry` plugin also contributes the `agent-harbor` MCP server with two bounded tools: `control` for deterministic lifecycle preflight and `skill` for allowlisted remote-skill materialization. The latter performs snapshot validation in code before returning invocation-local guidance.
+`repo-cartographer:crafter` therefore requires `agent-foundry` to remain enabled, as in the installation sequence above.
+
 Start a new session after installing, updating, or changing project agents.
+The MCP process inherits the folder from which the Copilot session starts; start
+a new session from the target folder after changing projects.
 
 </details>
 
@@ -74,7 +82,7 @@ OpenCode exposes the same five slash controls and named subagents through its na
 
 ### Install
 
-Install a published revision that contains the root `package.json` and `runtime/pi/` package resources:
+Install a published revision that contains the root `package.json` and compiled Pi extension:
 
 ```shell
 pi install git:github.com/gvillarroel/marketplace
@@ -86,7 +94,7 @@ For a project-only installation:
 pi install --local git:github.com/gvillarroel/marketplace
 ```
 
-The GitHub revision must already include the package files in this repository. `pi list` only confirms that Pi registered a source; it does not prove that the checked-out revision contains prompts. If the package is listed but `/bench` is absent, inspect the installed checkout shown by `pi list`: it must contain `package.json` and `runtime/pi/prompts/`.
+The GitHub revision must already include `package.json` and `dist/adapters/pi.js`. `pi list` only confirms that Pi registered a source; it does not prove that the checked-out revision contains the compiled extension. Run `npm run build` before publishing a revision.
 
 ### Local development before publication
 
@@ -116,23 +124,50 @@ After publishing a new Git revision, install that revision again (or run `pi ins
 
 ### Use
 
-Invoke `/bench`, `/join`, `/retire`, `/contract`, or `/list-skills`. The named profiles are Pi prompt templates, so invoke `/team-lead`, `/repo-cartographer`, or `/crafter` directly.
+Invoke `/bench`, `/join`, `/retire`, `/contract`, or `/list-skills`. Invoke `/team-lead <task>`, `/repo-cartographer <task>`, `/crafter <task>`, or any active personal player directly.
 
-The root `package.json` declares the Pi-native command and agent prompts generated from both plugins. Each command embeds only the internal contracts it needs. Because Pi intentionally has no built-in subagent tool, `/contract` and delegated agent work use one synchronous, ephemeral `pi --no-session -p` child with a mapped `--tools` allowlist. Active player profiles still live in the current project's `.pi/agents/`.
+The root `package.json` declares only the compiled Pi extension. Through `ExtensionAPI`, it registers the five lifecycle commands, the three fixed roles, and every ownership-verified active player. Role/player commands create a real in-memory `createAgentSession` child with a native tool allowlist; they are not static prompt templates. Active definitions live privately in the current project's `.pi/agents/`, and mutations register newly active names immediately (a reload removes names that were deactivated during the current session).
 
 </details>
 
-The canonical Copilot plugin files remain unchanged and are designed to run on macOS, Linux, and Windows. Agent profiles use Copilot's portable `execute` alias, while the OpenCode installer translates it to native `bash` permission. User-level storage resolves from the runtime-specific absolute config directory or the current user's home directory. Nothing assumes a shell family, path separator, platform package, or system-specific executable. The only external command used by a plugin is the cross-platform `gh` CLI expected on `PATH`.
+All three native distributions are designed to run on macOS, Linux, and Windows. Agent profiles use portable abstract tools while the adapters translate them to each SDK's native allowlist. User-level storage resolves from the runtime-specific absolute config directory or the current user's home directory. Nothing assumes a shell family, path separator, platform package, or system-specific executable. The only external command used by the lifecycle core is the cross-platform `gh` CLI expected on `PATH`.
+
+## Shared library and native adapters
+
+`src/core` is the shared TypeScript library. It owns validation, roster
+lifecycle, transactional writes, GitHub snapshot resolution, and the five
+command contracts. Harness modules contain only native translation and SDK
+integration:
+
+- Copilot consumes `plugins/` through its marketplace/plugin system; lifecycle
+  skills and the plugin-provided MCP server invoke the compiled `src/core`
+  runtime shipped inside the plugin;
+- `src/adapters/opencode.ts` exposes commands and the deterministic `harbor`
+  tool through `@opencode-ai/plugin`;
+- `src/adapters/pi.ts` registers native commands through Pi `ExtensionAPI`;
+- `src/orchestrators/` uses the Copilot, OpenCode, and Pi SDKs for disposable
+  child sessions.
+
+Build every native distribution with:
+
+```shell
+npm run build
+```
+
+The npm package exposes the compiled OpenCode plugin as its main entrypoint,
+the Pi extension in its `pi` manifest, and `agent-harbor` as the programmatic
+Copilot SDK CLI. Copilot plugin users execute the packaged MCP runtime directly
+through the host. Users still install through each harness's native mechanism.
 
 ## Tests
 
-Run the complete, credential-free compatibility suite with Python's standard library:
+Run a clean TypeScript build, the contract/security suite, and native discovery tests:
 
 ```shell
-python -m unittest discover -s tests -v
+npm test
 ```
 
-The single test module validates canonical Copilot manifests, regenerates the compact OpenCode and Pi packages, evaluates all five command contracts across the three runtimes, verifies bundled-profile ownership, idempotency, and overwrite protection, confirms Copilot/OpenCode discovery, and installs the Pi package into a temporary Pi home when those executables are available. Missing CLIs skip only their runtime assertion; no model call, API key, Docker service, third-party package download, or network access is required.
+`npm test` first removes and rebuilds every generated artifact, then runs one Node/TypeScript suite. It evaluates all five command contracts across the three runtimes; verifies byte-exact rollback, mutation locking, canonical ownership, idempotency, collisions and leaf/ancestor symlinks; checks remote-body validation, disposable-session cleanup and tool mappings; confirms Copilot/OpenCode discovery; and installs Pi into a temporary home. The native CLI checks run concurrently in isolated directories. Missing CLIs skip only their runtime assertion; no Python runtime, model call, API key, Docker service, or network access is required.
 
 ## Commands
 
@@ -162,7 +197,7 @@ Copilot CLI 1.0.71 does not expand an explicit slash skill when `disable-model-i
 
 `scout → sage → smith → probe → guard → pilot`
 
-They remain parked under the plugin's `bench/` directory until copied to the current `.github/agents/` directory. A batch is fully preflighted and rolled back on failure.
+Their canonical definitions live once in `src/core/defaults.ts` and are rendered directly into the current harness's native agent directory when activated. A batch is serialized, fully preflighted, written file-atomically, verified, and rolled back byte-for-byte on failure.
 
 ## Personal players
 
@@ -186,15 +221,20 @@ Here `current-folder` is the Copilot process working directory, resolved indepen
 
 Consequently the player is active where it joined and remains available from every other project through `bench on reviewer`. `bench off reviewer` removes only the active project copy. `retire reviewer` removes the user registration and the managed copy in the current project; copies in other projects remain intentionally untouched.
 
-Profiles created by `agent-foundry 0.8` are reported as `migration-required`. Repeat their original `join` definition with `"replace":true`; the command verifies ownership, writes the revision-3 registration and active copy, then removes the old inert registration with rollback protection. Legacy `bench off` and `retire` remain supported during migration.
+The TypeScript implementation preserves canonical revision 3, so adopting it
+does not force a schema migration. Revisions 1 and 2 are not implicitly
+migrated; re-register their original definition explicitly. Agent Harbor never
+uses an unverifiable legacy marker as permission to overwrite or delete.
 
-Installed and local skill bodies can be injected into a joined profile. GitHub skills remain canonical references:
+Version 0.11 accepts up to three validated GitHub skill references. Installed
+and local skill embedding is deliberately excluded to keep one portable,
+verifiable acquisition path:
 
 ```text
 /join {"name":"zx-maker","description":"Minimal zx author","prompt":"Create the smallest runnable example.","tools":["read","search","edit","execute"],"skills":[{"kind":"github","name":"zx-example-author","repo":"gvillarroel/zx-harness","path":"skills/zx-example-author/SKILL.md","track":"refs/heads/main"}]}
 ```
 
-Before each active-agent invocation, the generated profile resolves the moving branch again with authenticated `gh api`, fetches the immutable `SKILL.md` for that commit into the agent's context, validates its frontmatter, and uses only its self-contained guidance. It does not install, cache, clone, persist, or fetch sibling resources.
+Before each active-agent invocation, the profile calls the harness-native Agent Harbor loader. Copilot supplies `agent-harbor/skill` through its plugin-provided MCP server, OpenCode supplies `agent_harbor_skill` through its plugin API, and Pi materializes guidance before creating the child session. The shared loader makes exactly two authenticated read-only `gh api` calls, bounds each call to 20 seconds and propagates host cancellation, pins the moving branch to one commit, fetches only the immutable path, validates UTF-8 size/frontmatter/name, strips frontmatter, and returns the body only to that invocation. It never installs, caches, clones, persists, executes, or fetches sibling resources.
 
 ## Disposable players
 
@@ -202,17 +242,11 @@ Before each active-agent invocation, the generated profile resolves the moving b
 /contract {"name":"reviewer","description":"Read-only reviewer","prompt":"Review only; never edit.","tools":["read","search"],"skills":[],"task":"Review src and return three findings."}
 ```
 
-`contract` uses Copilot's native `task` tool and never creates a `CopilotClient` or resolves a platform package. The requested tool subset is prompt policy for built-in child profiles, not a hard sandbox; use `join` when a persistent custom-agent tool allowlist is required.
+Interactive Copilot `/contract` passes the literal JSON through the structured `control` tool of the plugin-provided `agent-harbor` MCP server—never through shell interpolation—then calls Copilot's native `task` exactly once with the validated payload; it never creates a second `CopilotClient`. The programmatic `agent-harbor copilot contract` entrypoint uses `@github/copilot-sdk` and explicitly deletes its session. OpenCode and Pi also create and dispose one SDK child. SDK-backed paths enforce native tool maps; Copilot's built-in `task` profiles can only represent the requested subset as child policy, not an operating-system sandbox.
 
 ## Trusted skills
 
-`harbor-trusted-skill-sources` supports three allowlist scopes:
-
-- a complete repository;
-- one repository folder;
-- one or more exact `SKILL.md` paths.
-
-The included policy trusts `gvillarroel/zx-harness/skills/zx-example-author/SKILL.md` on `refs/heads/main`. List current covered snapshots without downloading bodies:
+Version 0.11 deliberately uses one explicit exact-reference allowlist in `src/core/defaults.ts`; it does not add repository-wide, folder-wide, installed, or local skill scopes. The included policy trusts `gvillarroel/zx-harness/skills/zx-example-author/SKILL.md` on `refs/heads/main`. List its current snapshot without downloading the body:
 
 ```text
 /list-skills
@@ -223,7 +257,7 @@ The command uses the developer's authenticated `gh` CLI and reports repository, 
 
 ## Agents
 
-- `agent-foundry:team-lead`: delegates to the smallest matching active specialist. Full SDLC simulation is opt-in rather than mandatory.
+- `agent-foundry:team-lead`: derives one least-privilege contractor and performs one bounded delegation through the closest native mechanism.
 - `repo-cartographer:repo-cartographer`: builds compact evidence-based repository maps.
 - `repo-cartographer:crafter`: refreshes the trusted external zx skill on every invocation, then creates a minimal self-contained zx or TypeScript command example.
 

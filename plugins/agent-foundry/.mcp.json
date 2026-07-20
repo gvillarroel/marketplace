@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "agent-harbor": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/runtime/dist/adapters/copilot-mcp.js"],
+      "tools": ["control", "skill"],
+      "deferTools": "never",
+      "timeout": 45000
+    }
+  }
+}

@@ -1,15 +1,10 @@
 ---
 name: bench
-description: User-invoked only. Run /bench to list, activate, or bench bundled and personal Copilot players in the current folder; do not select it for another lifecycle command.
-argument-hint: "[list [filter]|on <player...|all>|off <player...|all>]"
-allowed-tools: ["skill", "view", "glob", "create", "edit", "shell"]
+description: User-invoked only. List, activate, or deactivate Agent Harbor players in the current project.
+argument-hint: "[list [filter] | on <ids|all> | off <ids|all>]"
 user-invocable: true
+allowed-tools: ["agent-harbor(control)"]
 ---
+# Bench
 
-# Control the bench
-
-Literal arguments: `$ARGUMENTS`
-
-Load `harbor-roster` with the native `skill` tool. Ignore only Copilot's outer skill-context wrapper and base-directory preamble; require the first nonblank original body line to be `<!-- harbor-skill id=harbor-roster owner=agent-foundry revision=1 -->`. Apply its `bench` operation once with the literal arguments. Do not invoke another slash command.
-
-Examples: `bench`, `bench on scout sage`, `bench off smith`, `bench on all`, `bench off all`.
+Call the `control` tool from the `agent-harbor` MCP server exactly once with `command` equal to `bench` and `args` equal to the complete literal `$ARGUMENTS` string. Do not reinterpret arguments, invoke another command, or call a model-selected lifecycle operation. Return the tool result faithfully.

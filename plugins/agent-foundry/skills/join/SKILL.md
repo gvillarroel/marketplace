@@ -1,19 +1,10 @@
 ---
 name: join
-description: User-invoked only. Run /join to register one recurring Copilot player at user level and activate it in the current folder; do not select it for another lifecycle command.
-argument-hint: "{agent-json}"
-allowed-tools: ["skill", "view", "glob", "create", "edit", "shell"]
+description: User-invoked only. Register one recurring Agent Harbor player and activate it in this project.
+argument-hint: "<json-object>"
 user-invocable: true
+allowed-tools: ["agent-harbor(control)"]
 ---
+# Join
 
-# Add a recurring player
-
-Literal JSON: `$ARGUMENTS`
-
-Load `harbor-roster` with the native `skill` tool. Ignore only Copilot's outer skill-context wrapper and base-directory preamble; require the first nonblank original body line to be `<!-- harbor-skill id=harbor-roster owner=agent-foundry revision=1 -->`. Apply its `join` operation once with the literal JSON. Do not invoke another slash command.
-
-Example:
-
-```text
-/join {"name":"reviewer","description":"Read-only reviewer","prompt":"Review only; never edit.","tools":["read","search"],"skills":[]}
-```
+Call the `control` tool from the `agent-harbor` MCP server exactly once with `command` equal to `join` and `args` equal to the complete literal `$ARGUMENTS` string. Do not parse, rewrite, log, or interpolate the JSON. Return the tool result faithfully.
