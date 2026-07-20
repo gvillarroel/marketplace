@@ -3,11 +3,12 @@ import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { trustedSkills } from "../src/core/defaults.js";
-import { commandNames } from "../src/core/types.js";
+import { CopilotClient, RuntimeConnection, approveAll } from "@github/copilot-sdk";
+import { bundledPlayers, rolePlayers, trustedSkills } from "../src/core/defaults.js";
+import { commandNames, deterministicCommandNames } from "../src/core/types.js";
 import { runCopilotControl } from "../src/adapters/copilot.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
@@ -73,7 +74,7 @@ function succeeded(result: Result): void {
 
 async function inspectCopilotEnvironment(launch: Launch, sandbox: string): Promise<AcpInspection> {
   const child = spawn(launch.command, [...launch.prefix,
-    "--no-auto-update", "--no-color",
+    "--experimental", "--no-auto-update", "--no-color",
     "--plugin-dir", join(plugins, "agent-foundry"),
     "--plugin-dir", join(plugins, "repo-cartographer"),
     "--acp", "--stdio",
@@ -168,17 +169,117 @@ async function pluginDirectories(): Promise<string[]> {
   return entries.filter((entry) => entry.isDirectory()).map((entry) => join(plugins, entry.name));
 }
 
+async function inspectCopilotDirectExtension(launch: Launch, sandbox: string, workingDirectory: string): Promise<{ events: string[]; commands: any[]; agents: any[] }> {
+  const client = new CopilotClient({
+    connection: RuntimeConnection.forStdio({
+      path: launch.command,
+      args: [
+        ...launch.prefix, "--experimental", "--no-auto-update", "--no-color",
+        "--plugin-dir", join(plugins, "agent-foundry"),
+        "--plugin-dir", join(plugins, "repo-cartographer"),
+      ],
+    }),
+    workingDirectory,
+    baseDirectory: join(sandbox, "sdk-home"),
+    logLevel: "error",
+    env: { ...process.env, COPILOT_PLUGIN_DIR_ONLY: "true", NO_COLOR: "1" },
+  });
+  let session: Awaited<ReturnType<CopilotClient["createSession"]>> | undefined;
+  const events: string[] = [];
+  try {
+    await client.start();
+    session = await client.createSession({
+      workingDirectory,
+      enableConfigDiscovery: true,
+      requestExtensions: true,
+      onPermissionRequest: approveAll,
+      enableSessionTelemetry: false,
+      infiniteSessions: { enabled: false },
+      skipCustomInstructions: true,
+    });
+    session.on((event) => { events.push(event.type); });
+    let listed = await session.rpc.commands.list();
+    let direct = listed.commands.find((command) => command.name === "bench" && command.kind === "client");
+    for (let attempt = 0; !direct && attempt < 30; attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      listed = await session.rpc.commands.list();
+      direct = listed.commands.find((command) => command.name === "bench" && command.kind === "client");
+    }
+    assert.ok(direct, `Copilot must discover the direct /bench extension command: ${JSON.stringify(listed.commands)}`);
+    const expectedCommands = [...rolePlayers.keys(), ...bundledPlayers.keys()].map((id) => `harbor-${id}`);
+    assert.ok(expectedCommands.every((name) => listed.commands.some((command) => command.name === name && command.kind === "client")));
+
+    const initial = await session.rpc.agent.list();
+    for (const id of rolePlayers.keys()) assert.ok(initial.agents.some((agent) => agent.name === id || agent.id.endsWith(`:${id}`)), id);
+    for (const id of bundledPlayers.keys()) assert.ok(!initial.agents.some((agent) => agent.name === id || agent.id === id), `${id} must start on the bench`);
+    await assert.rejects(() => session!.rpc.commands.invoke({ name: "harbor-scout", input: "must not reach a model" }), /not active/i);
+
+    const invoked = await session.rpc.commands.invoke({ name: "bench", input: "on all" });
+    assert.equal(invoked.kind, "completed");
+    await assert.rejects(() => session!.rpc.commands.invoke({ name: "bench", input: "toggle" }), /usage: \/?bench/);
+    const refreshed = await session.rpc.agent.reload();
+    for (const id of [...rolePlayers.keys(), ...bundledPlayers.keys()]) {
+      const expectedFixed = {
+        "team-lead": "agent-foundry:team-lead",
+        "repo-cartographer": "repo-cartographer:repo-cartographer",
+        crafter: "repo-cartographer:crafter",
+      }[id];
+      const agent = expectedFixed
+        ? refreshed.agents.find((candidate) => candidate.id === expectedFixed)
+        : refreshed.agents.find((candidate) => candidate.name === id || candidate.id === id);
+      assert.ok(agent, `Copilot must discover ${id}: ${JSON.stringify(refreshed.agents)}`);
+      assert.notEqual(agent.userInvocable, false, id);
+      const selected = await session.rpc.agent.select({ name: agent.id });
+      assert.equal(selected.agent.id, agent.id);
+      assert.equal((await session.rpc.agent.getCurrent()).agent?.id, agent.id);
+      await session.rpc.agent.deselect();
+    }
+    assert.ok(!events.includes("assistant.usage"));
+    assert.ok(!events.includes("assistant.message"));
+    return { events, commands: listed.commands, agents: refreshed.agents };
+  } finally {
+    if (session) await client.deleteSession(session.sessionId);
+    await client.stop();
+  }
+}
+
 test("distribution declares native TypeScript entrypoints", async () => {
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   assert.equal(manifest.main, "./dist/adapters/opencode.js");
+  assert.equal(manifest.exports["./server"], "./dist/adapters/opencode.js");
+  assert.equal(manifest.exports["./tui"], "./dist/adapters/opencode-tui.js");
+  assert.ok(manifest.files.includes("REQUIREMENTS.md"));
   assert.deepEqual(manifest.pi.extensions, ["./dist/adapters/pi.js"]);
   assert.ok(!("prompts" in manifest.pi));
   assert.equal(manifest.engines.node, ">=22.19.0");
   assert.equal(manifest.dependencies["@github/copilot-sdk"], "1.0.6");
   assert.equal(manifest.dependencies["@opencode-ai/plugin"], "1.17.13");
   assert.equal(manifest.peerDependencies["@earendil-works/pi-coding-agent"], "0.80.10");
+  assert.match(manifest.scripts["test:live:lead"], /run-live-lead\.mjs/);
+  assert.match(manifest.scripts.test, /run-tests\.mjs/);
+  assert.doesNotMatch(manifest.scripts.test, /&&|npm run/);
+  assert.doesNotMatch(manifest.scripts["test:live:lead"], /&&|npm run/);
+  assert.doesNotMatch(manifest.scripts["test:ts"], /live-team-lead/);
+  const liveRunner = await readFile(join(root, "scripts", "run-live-lead.mjs"), "utf8");
+  assert.match(liveRunner, /live-team-lead\.test\.ts/);
+  assert.match(liveRunner, /report\?\.status !== "passed"/);
+  assert.match(liveRunner, /rm\(reportPath, \{ force: true \}\)/);
+  assert.match(liveRunner, /delete env\.NODE_TEST_CONTEXT/);
+  assert.match(liveRunner, /generatedAt > now \+ 5_000/);
+  assert.match(liveRunner, /process\.exit\(1\)/);
+  assert.match(liveRunner, /scripts\/build\.mjs/);
+  const suiteRunner = await readFile(join(root, "scripts", "run-test-suite.mjs"), "utf8");
+  assert.match(suiteRunner, /--test-reporter=tap/);
+  assert.match(suiteRunner, /failures !== 0/);
+  assert.match(suiteRunner, /delete env\.NODE_TEST_CONTEXT/);
+  assert.match(suiteRunner, /process\.exit\(1\)/);
+  const testRunner = await readFile(join(root, "scripts", "run-tests.mjs"), "utf8");
+  assert.match(testRunner, /scripts\/build\.mjs/);
+  assert.match(testRunner, /scripts\/run-test-suite\.mjs/);
+  assert.match(testRunner, /process\.exit\(1\)/);
   await Promise.all([
     access(join(dist, "adapters", "opencode.js")),
+    access(join(dist, "adapters", "opencode-tui.js")),
     access(join(dist, "adapters", "pi.js")),
     access(join(dist, "core", "commands.js")),
     access(join(plugins, "agent-foundry", "agents", "team-lead.agent.md")),
@@ -190,6 +291,33 @@ test("distribution declares native TypeScript entrypoints", async () => {
     [join(plugins, "repo-cartographer", "agents", "repo-cartographer.agent.md"), "repo-cartographer"],
     [join(plugins, "repo-cartographer", "agents", "crafter.agent.md"), "crafter"],
   ]) assert.match(await readFile(path, "utf8"), new RegExp(`^---\\nname: ${name}\\n`));
+  const teamLead = await readFile(join(plugins, "agent-foundry", "agents", "team-lead.agent.md"), "utf8");
+  assert.match(teamLead, /between one and six bounded synchronous `task` calls/i);
+  assert.match(teamLead, /Never target `team-lead`/);
+});
+
+test("opt-in Codex live scripts invoke a guarded report-validating runner", async () => {
+  const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+  const expectedScripts = {
+    "test:live:opencode": "node scripts/run-live-codex-leads.mjs opencode",
+    "test:live:pi": "node scripts/run-live-codex-leads.mjs pi",
+    "test:live:codex": "node scripts/run-live-codex-leads.mjs all",
+  } as const;
+
+  for (const [name, command] of Object.entries(expectedScripts)) {
+    assert.equal(manifest.scripts[name], command, `${name} must invoke the live runner directly`);
+    assert.doesNotMatch(manifest.scripts[name], /&&|npm run/);
+  }
+
+  const runner = await readFile(join(root, "scripts", "run-live-codex-leads.mjs"), "utf8");
+  assert.match(runner, /delete env\.NODE_TEST_CONTEXT/);
+  assert.match(runner, /reports\.values\(\)\]\.map\(\(path\) => rm\(path, \{ force: true \}\)\)/);
+  assert.match(runner, /report\?\.schema !== "agent-harbor\/live-codex-team-lead@1"/);
+  assert.match(runner, /report\?\.status !== "passed" \|\| report\?\.harness !== harness/);
+  assert.match(runner, /generatedAt > now \+ 5_000/);
+  assert.match(runner, /requireFresh && generatedAt < startedAt - 1_000/);
+  assert.match(runner, /!requireFresh && generatedAt < now - 24 \* 60 \* 60_000/);
+  assert.match(runner, /catch \(error\)[\s\S]*process\.exit\(1\)/);
 });
 
 test("Copilot plugins expose canonical commands and one plugin-provided MCP server", async () => {
@@ -218,6 +346,7 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
   await Promise.all([
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot.js")),
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-mcp.js")),
+    access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-coordinator.js")),
   ]);
   for (const name of commands) {
     const control = await readFile(join(plugins, "agent-foundry", "skills", name, "SKILL.md"), "utf8");
@@ -229,7 +358,7 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
   assert.match(await readFile(join(plugins, "agent-foundry", "skills", "contract", "SKILL.md"), "utf8"), /Call `task` exactly once/);
   const foundryManifest = JSON.parse(await readFile(join(plugins, "agent-foundry", "plugin.json"), "utf8"));
   assert.equal(foundryManifest.mcpServers, ".mcp.json");
-  assert.ok(!("extensions" in foundryManifest));
+  assert.deepEqual(foundryManifest.extensions, { paths: ["extensions/agent-harbor"], exclusive: false });
   const mcpConfiguration = JSON.parse(await readFile(join(plugins, "agent-foundry", ".mcp.json"), "utf8"));
   assert.deepEqual(Object.keys(mcpConfiguration.mcpServers), ["agent-harbor"]);
   const harbor = mcpConfiguration.mcpServers["agent-harbor"];
@@ -238,7 +367,23 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
   assert.deepEqual(harbor.tools, ["control", "skill"]);
   assert.equal(harbor.timeout, 45_000);
   assert.ok(harbor.args.some((argument: string) => argument.includes("copilot-mcp.js")));
-  await assert.rejects(() => access(join(plugins, "agent-foundry", "extensions")), /ENOENT/);
+  const extension = await readFile(join(plugins, "agent-foundry", "extensions", "agent-harbor", "extension.mjs"), "utf8");
+  assert.match(extension, /joinSession/);
+  assert.match(extension, /runDeterministicCommand/);
+  assert.match(extension, /createCopilotCoordinatorGuard/);
+  assert.match(extension, /hooks: coordinator\.hooks/);
+  assert.match(extension, /coordinator\.observeEvent/);
+  assert.match(extension, /event\.phase !== "target\.resolved"/);
+  assert.match(extension, /type: "agent-harbor-guard"/);
+  assert.match(extension, /ephemeral: true/);
+  assert.match(extension, /await coordinator\.refresh\(\)/);
+  for (const name of deterministicCommandNames) assert.match(extension, new RegExp(`\\["${name}"`));
+  assert.equal(extension.match(/sendAndWait/g)?.length, 1, "only explicit player commands may send one prompt");
+  assert.match(extension, /agent\.select/);
+  assert.match(extension, /harbor-\$\{id\}/);
+  assert.doesNotMatch(extension, /createSession|\.prompt\(/);
+  assert.doesNotMatch(extension, /[\[\"]contract[\]\"]\s*,/);
+  assert.match(extension, /catch \(error\)[\s\S]*throw error;/);
   const crafter = await readFile(join(plugins, "repo-cartographer", "agents", "crafter.agent.md"), "utf8");
   assert.match(crafter, /"agent-harbor\/skill"/);
   assert.match(crafter, /`skill` tool from the `agent-harbor` MCP server/);
@@ -251,8 +396,10 @@ test("Copilot runtime is generated byte-for-byte from shared core", async () => 
     assert.deepEqual(await readFile(join(dist, "core", name)), await readFile(join(pluginDist, "core", name)), name);
   }
   assert.deepEqual(await readFile(join(dist, "adapters", "shared.js")), await readFile(join(pluginDist, "adapters", "shared.js")));
+  assert.deepEqual(await readFile(join(dist, "adapters", "direct.js")), await readFile(join(pluginDist, "adapters", "direct.js")));
   assert.deepEqual(await readFile(join(dist, "adapters", "copilot.js")), await readFile(join(pluginDist, "adapters", "copilot.js")));
   assert.deepEqual(await readFile(join(dist, "adapters", "copilot-mcp.js")), await readFile(join(pluginDist, "adapters", "copilot-mcp.js")));
+  assert.deepEqual(await readFile(join(dist, "adapters", "copilot-coordinator.js")), await readFile(join(pluginDist, "adapters", "copilot-coordinator.js")));
 });
 
 test("generated native runtime retains gh timeout and MCP cancellation guards", async () => {
@@ -262,6 +409,23 @@ test("generated native runtime retains gh timeout and MCP cancellation guards", 
   assert.match(github, /timeout:\s*timeoutMs/);
   assert.match(mcp, /notifications\/cancelled/);
   assert.match(mcp, /activeRequests\.get\(requestId\)\?\.abort\(\)/);
+});
+
+test("every distribution has a direct zero-model bench entrypoint", async (t) => {
+  const sandbox = await mkdtemp(join(tmpdir(), "harbor-direct-cli-"));
+  t.after(() => rm(sandbox, { recursive: true, force: true }));
+  const launch = { command: process.execPath, prefix: [join(dist, "cli.js")] };
+  for (const harness of ["copilot", "opencode", "pi"]) {
+    const env = {
+      ...process.env,
+      COPILOT_HOME: join(sandbox, harness, "copilot-home"),
+      OPENCODE_CONFIG_DIR: join(sandbox, harness, "opencode-home"),
+      PI_CODING_AGENT_DIR: join(sandbox, harness, "pi-home"),
+    };
+    const bench = await run(launch, [harness, "bench", "list"], { cwd: sandbox, env, timeout: 30_000 });
+    succeeded(bench);
+    assert.match(bench.stdout, /scout \| bundled \| bench/, harness);
+  }
 });
 
 test("Copilot native control performs deterministic shared contract preflight", async () => {
@@ -385,7 +549,12 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
       try {
         const inspection = await inspectCopilotEnvironment(copilot!, sandbox);
         assert.match(inspection.transcript, /agent-harbor\s+\(connected,\s*plugin\)/i);
-        assert.match(inspection.transcript, /No extensions loaded/i);
+        const project = join(sandbox, "project");
+        await mkdir(project);
+        const direct = await inspectCopilotDirectExtension(copilot!, sandbox, project);
+        assert.ok(direct.commands.some((command) => command.name === "bench" && command.kind === "client"));
+        assert.ok([...rolePlayers.keys(), ...bundledPlayers.keys()].every((id) =>
+          direct.agents.some((agent) => agent.name === id || agent.id === id || agent.id.endsWith(`:${id}`))));
       } finally {
         await rm(sandbox, { recursive: true, force: true });
       }
@@ -394,11 +563,48 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
       const directory = await mkdtemp(join(tmpdir(), "harbor-opencode-native-"));
       child.after(() => rm(directory, { recursive: true, force: true }));
       succeeded(await run(opencode!, ["plugin", `file:${root}`], { cwd: directory, timeout: 60_000 }));
+      const openCodePluginConfig = await readFile(join(directory, ".opencode", "opencode.json"), "utf8");
+      const openCodeTuiConfig = await readFile(join(directory, ".opencode", "tui.json"), "utf8");
+      assert.match(openCodePluginConfig, /marketplace/i);
+      assert.match(openCodeTuiConfig, /marketplace/i);
+      const tuiSpecs = JSON.parse(openCodeTuiConfig).plugin;
+      assert.equal(tuiSpecs.length, 1);
+      const installedRoot = fileURLToPath(new URL(tuiSpecs[0]));
+      assert.equal(resolve(installedRoot), resolve(root));
+      const installedManifest = JSON.parse(await readFile(join(installedRoot, "package.json"), "utf8"));
+      const installedTui = await import(pathToFileURL(join(installedRoot, installedManifest.exports["./tui"])).href);
+      const layers: any[] = [];
+      await installedTui.default.tui({ keymap: { registerLayer: (layer: unknown) => { layers.push(layer); return () => {}; } } } as any, undefined, {} as any);
+      assert.deepEqual(layers[0].commands.map((command: any) => command.slashName), [
+        "bench-list", "bench-on", "bench-off", "harbor-join", "harbor-retire", "harbor-list-skills", "harbor-filter-skills",
+      ]);
       const config = await run(opencode!, ["debug", "config"], { cwd: directory, timeout: 60_000 });
       succeeded(config);
-      const discovered = JSON.parse(config.stdout);
-      assert.ok([...commands].every((name) => name in discovered.command));
-      assert.ok(["team-lead", "repo-cartographer", "crafter"].every((name) => name in discovered.agent));
+      const initial = JSON.parse(config.stdout);
+      assert.ok([...commands].every((name) => name in initial.command));
+      assert.ok([...rolePlayers.keys()].every((name) => name in initial.agent));
+      assert.ok([...rolePlayers.keys()].every((name) => initial.command[`harbor-${name}`]?.agent === name));
+      assert.equal(initial.agent["team-lead"].tools["*"], false);
+      assert.equal(initial.agent["team-lead"].tools.harbor_delegate, true);
+      assert.ok([...bundledPlayers.keys()].every((name) => !(name in initial.agent)), "bundled players must start on the bench");
+
+      const directLaunch = { command: process.execPath, prefix: [join(dist, "cli.js")] };
+      const directEnv = { ...process.env, OPENCODE_CONFIG_DIR: join(directory, "opencode-home") };
+      succeeded(await run(directLaunch, ["opencode", "bench", "on", "all"], { cwd: directory, env: directEnv, timeout: 30_000 }));
+      const activatedConfig = await run(opencode!, ["debug", "config"], { cwd: directory, timeout: 60_000 });
+      succeeded(activatedConfig);
+      const discovered = JSON.parse(activatedConfig.stdout);
+      for (const id of [...rolePlayers.keys(), ...bundledPlayers.keys()]) {
+        assert.ok(id in discovered.agent, `OpenCode must discover ${id}`);
+        assert.deepEqual(discovered.command[`harbor-${id}`], {
+          template: "$ARGUMENTS",
+          description: `Run Agent Harbor player ${id} in the current session`,
+          agent: id,
+          subtask: false,
+        });
+      }
+      assert.equal(discovered.agent.scout.tools.harbor_delegate, false);
+      assert.equal(discovered.agent.scout.tools["*"], false);
     }),
     t.test("Pi", { skip: pi ? false : "Pi CLI is not installed" }, async (child) => {
       const directory = await mkdtemp(join(tmpdir(), "harbor-pi-native-"));
@@ -408,19 +614,50 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
         const sdk = await import(pathToFileURL(join(dirname(pi!.prefix[0]), "index.js")).href);
         assert.equal(typeof sdk.createAgentSession, "function");
         assert.equal(typeof sdk.SessionManager?.inMemory, "function");
-        const { session } = await sdk.createAgentSession({
+        assert.equal(typeof sdk.DefaultResourceLoader, "function");
+        const resourceLoader = new sdk.DefaultResourceLoader({
+          cwd: directory,
+          agentDir: join(directory, "sdk-home"),
+          noExtensions: true,
+        });
+        await resourceLoader.reload();
+        const delegateProbe = {
+          name: "harbor_delegate_probe",
+          label: "Harbor delegate probe",
+          description: "Native registration probe only",
+          executionMode: "sequential",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          execute: async () => ({ content: [{ type: "text", text: "unused" }] }),
+        };
+        const { session, extensionsResult } = await sdk.createAgentSession({
           cwd: directory,
           agentDir: join(directory, "sdk-home"),
           sessionManager: sdk.SessionManager.inMemory(directory),
-          tools: ["read"],
+          tools: ["read", delegateProbe.name],
+          customTools: [delegateProbe],
+          resourceLoader,
         });
+        assert.deepEqual(extensionsResult.extensions, []);
+        assert.ok(session.getActiveToolNames().includes(delegateProbe.name));
+        assert.ok(session.getAllTools().some((candidate: any) => candidate.name === delegateProbe.name));
         session.dispose();
       }
       succeeded(await run(pi!, ["install", root], { cwd: directory, env, timeout: 90_000 }));
       const listed = await run(pi!, ["list"], { cwd: directory, env, timeout: 30_000 });
       succeeded(listed);
       assert.ok(listed.stdout.toLowerCase().includes(root.toLowerCase()));
-      const bench = await run(pi!, ["--no-session", "-e", join(dist, "adapters", "pi.js"), "-p", "/bench"], { cwd: directory, env, timeout: 60_000 });
+      const initialRpc = await run(pi!, ["--no-session", "-e", join(dist, "adapters", "pi.js"), "--mode", "rpc"], {
+        cwd: directory, env, timeout: 60_000, input: '{"type":"get_commands"}\n',
+      });
+      succeeded(initialRpc);
+      const initialResponse = initialRpc.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+        .find((item) => item.type === "response" && item.command === "get_commands");
+      assert.ok(initialResponse?.success);
+      const initialNames = new Set<string>(initialResponse.data.commands.map((command: any) => command.name));
+      assert.ok([...commands, ...rolePlayers.keys()].every((name) => initialNames.has(name)));
+      assert.ok([...bundledPlayers.keys()].every((name) => !initialNames.has(name)), "bundled Pi players must start on the bench");
+
+      const bench = await run(pi!, ["--no-session", "-e", join(dist, "adapters", "pi.js"), "-p", "/bench on all"], { cwd: directory, env, timeout: 60_000 });
       succeeded(bench);
       const rpc = await run(pi!, ["--no-session", "-e", join(dist, "adapters", "pi.js"), "--mode", "rpc"], {
         cwd: directory, env, timeout: 60_000, input: '{"type":"get_commands"}\n',
@@ -430,7 +667,7 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
         .find((item) => item.type === "response" && item.command === "get_commands");
       assert.ok(response?.success);
       const names = new Set<string>(response.data.commands.map((command: any) => command.name));
-      assert.ok([...commands, "team-lead", "repo-cartographer", "crafter"].every((name) => names.has(name)));
+      assert.ok([...commands, ...rolePlayers.keys(), ...bundledPlayers.keys()].every((name) => names.has(name)));
     }),
   ]);
 });

@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 1,
+  "roster": {
+    "fixed": [
+      {
+        "id": "team-lead",
+        "runtimeIds": {
+          "copilot": "agent-foundry:team-lead",
+          "opencode": "team-lead",
+          "pi": "team-lead"
+        }
+      },
+      {
+        "id": "repo-cartographer",
+        "runtimeIds": {
+          "copilot": "repo-cartographer:repo-cartographer",
+          "opencode": "repo-cartographer",
+          "pi": "repo-cartographer"
+        }
+      },
+      {
+        "id": "crafter",
+        "runtimeIds": {
+          "copilot": "repo-cartographer:crafter",
+          "opencode": "crafter",
+          "pi": "crafter"
+        }
+      }
+    ],
+    "bundled": [
+      {
+        "id": "scout",
+        "runtimeIds": {
+          "copilot": "scout",
+          "opencode": "scout",
+          "pi": "scout"
+        }
+      },
+      {
+        "id": "sage",
+        "runtimeIds": {
+          "copilot": "sage",
+          "opencode": "sage",
+          "pi": "sage"
+        }
+      },
+      {
+        "id": "smith",
+        "runtimeIds": {
+          "copilot": "smith",
+          "opencode": "smith",
+          "pi": "smith"
+        }
+      },
+      {
+        "id": "probe",
+        "runtimeIds": {
+          "copilot": "probe",
+          "opencode": "probe",
+          "pi": "probe"
+        }
+      },
+      {
+        "id": "guard",
+        "runtimeIds": {
+          "copilot": "guard",
+          "opencode": "guard",
+          "pi": "guard"
+        }
+      },
+      {
+        "id": "pilot",
+        "runtimeIds": {
+          "copilot": "pilot",
+          "opencode": "pilot",
+          "pi": "pilot"
+        }
+      }
+    ]
+  },
+  "cycles": [
+    {
+      "id": "default-specialists",
+      "coordinator": "team-lead",
+      "activate": [],
+      "steps": [
+        {
+          "agent": "repo-cartographer",
+          "task": "Map the bounded fixture: identify relevant entrypoints, boundaries, tests, and the shortest validation command. Do not edit.",
+          "evidenceFrom": null
+        },
+        {
+          "agent": "crafter",
+          "task": "Implement the smallest correct TypeScript change using the verified repository map, then run the focused validation.",
+          "evidenceFrom": "repo-cartographer"
+        }
+      ]
+    },
+    {
+      "id": "full-sdlc",
+      "coordinator": "team-lead",
+      "activate": [
+        "scout",
+        "sage",
+        "smith",
+        "probe",
+        "guard",
+        "pilot"
+      ],
+      "steps": [
+        {
+          "agent": "scout",
+          "task": "Discover the exact files, constraints, and validation surface for the bounded fixture. Do not edit.",
+          "evidenceFrom": null
+        },
+        {
+          "agent": "sage",
+          "task": "Design the smallest evidence-backed implementation plan from the discovery findings. Do not edit.",
+          "evidenceFrom": "scout"
+        },
+        {
+          "agent": "smith",
+          "task": "Implement the smallest correct change from the verified design and report the changed scope.",
+          "evidenceFrom": "sage"
+        },
+        {
+          "agent": "probe",
+          "task": "Run focused verification for the implemented change and report reproducible results.",
+          "evidenceFrom": "smith"
+        },
+        {
+          "agent": "guard",
+          "task": "Review the change and verification evidence for correctness, regressions, safety, scope, and coverage. Do not edit.",
+          "evidenceFrom": "probe"
+        },
+        {
+          "agent": "pilot",
+          "task": "Assess delivery readiness, rollback, and residual risk from the verified review evidence. Do not edit.",
+          "evidenceFrom": "guard"
+        }
+      ]
+    }
+  ]
+}

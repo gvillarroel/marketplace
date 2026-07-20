@@ -39,14 +39,16 @@ for (const harness of ["copilot", "opencode", "pi"] as const) {
     assert.match(await executeCommand("bench", "list scout", context), /scout \| bundled \| stale/);
     assert.match(await executeCommand("bench", "on scout", context), /turned on/);
     assert.match(await executeCommand("bench", "list scout", context), /scout \| bundled \| on/);
+    assert.match(await executeCommand("list-skills", "zx", context), new RegExp(`${"a".repeat(40)}.*${"b".repeat(40)}`));
+    assert.deepEqual(calls, [], "deterministic controls must not invoke an orchestrator or model");
     assert.equal(await executeCommand("contract", JSON.stringify({ ...JSON.parse(player), task: "one task" }), context), `${harness}:child`);
     assert.deepEqual(calls, ["one task"], "contract must create exactly one child");
-    assert.match(await executeCommand("list-skills", "zx", context), new RegExp(`${"a".repeat(40)}.*${"b".repeat(40)}`));
 
     const active = join(project, spec.activeDir, `reviewer${spec.extension}`);
     const activeProfile = await readFile(active, "utf8");
     assert.match(activeProfile, new RegExp(`revision=3`));
     if (harness === "opencode") {
+      assert.match(activeProfile, /  "\*": false/);
       assert.match(activeProfile, /  read: true/);
       assert.match(activeProfile, /  grep: true/);
       assert.match(activeProfile, /  bash: false/);

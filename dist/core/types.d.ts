@@ -1,5 +1,7 @@
 export declare const commandNames: readonly ["bench", "join", "retire", "contract", "list-skills"];
 export type CommandName = (typeof commandNames)[number];
+export declare const deterministicCommandNames: readonly ["bench", "join", "retire", "list-skills"];
+export type DeterministicCommandName = (typeof deterministicCommandNames)[number];
 export type HarnessName = "copilot" | "opencode" | "pi";
 export type HarborTool = "read" | "search" | "edit" | "execute";
 export interface PlayerDefinition {

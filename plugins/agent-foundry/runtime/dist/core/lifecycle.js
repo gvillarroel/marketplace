@@ -101,7 +101,7 @@ export function validatePlayer(value, allowReserved = false) {
         throw new Error("invalid description");
     if (typeof input.prompt !== "string" || !input.prompt.trim())
         throw new Error("invalid prompt");
-    if (!Array.isArray(input.tools) || input.tools.length === 0 || input.tools.some((tool) => typeof tool !== "string" || !allowedTools.has(tool)))
+    if (!Array.isArray(input.tools) || (!allowReserved && input.tools.length === 0) || input.tools.some((tool) => typeof tool !== "string" || !allowedTools.has(tool)))
         throw new Error("invalid tools");
     if (new Set(input.tools).size !== input.tools.length)
         throw new Error("duplicate tools");
