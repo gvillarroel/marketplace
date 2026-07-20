@@ -84,7 +84,7 @@ export function validatePlayer(value: unknown, allowReserved = false): PlayerDef
   if (typeof input.name !== "string" || !idPattern.test(input.name) || (!allowReserved && reserved.has(input.name))) throw new Error("invalid or reserved name");
   if (typeof input.description !== "string" || !input.description || /[\r\n]/.test(input.description)) throw new Error("invalid description");
   if (typeof input.prompt !== "string" || !input.prompt.trim()) throw new Error("invalid prompt");
-  if (!Array.isArray(input.tools) || input.tools.length === 0 || input.tools.some((tool) => typeof tool !== "string" || !allowedTools.has(tool))) throw new Error("invalid tools");
+  if (!Array.isArray(input.tools) || (!allowReserved && input.tools.length === 0) || input.tools.some((tool) => typeof tool !== "string" || !allowedTools.has(tool))) throw new Error("invalid tools");
   if (new Set(input.tools).size !== input.tools.length) throw new Error("duplicate tools");
   if (input.model !== undefined && typeof input.model !== "string") throw new Error("invalid model");
   if (input.replace !== undefined && typeof input.replace !== "boolean") throw new Error("invalid replace");

@@ -6,6 +6,8 @@
   "main": "./dist/adapters/opencode.js",
   "exports": {
     ".": "./dist/adapters/opencode.js",
+    "./server": "./dist/adapters/opencode.js",
+    "./tui": "./dist/adapters/opencode-tui.js",
     "./core": "./dist/core/commands.js",
     "./pi": "./dist/adapters/pi.js"
   },
@@ -13,17 +15,23 @@
     "agent-harbor": "./dist/cli.js"
   },
   "files": [
+    "REQUIREMENTS.md",
     "dist/",
     "plugins/"
   ],
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=22.19.0",
+    "opencode": ">=1.18.3"
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "npm run build && npm run test:ts",
+    "test": "node scripts/run-tests.mjs",
     "typecheck": "tsc --noEmit",
-    "test:ts": "tsx --test test-ts/contracts.test.ts test-ts/adapters.test.ts test-ts/compatibility.test.ts",
+    "test:ts": "node scripts/run-test-suite.mjs",
+    "test:live:lead": "node scripts/run-live-lead.mjs",
+    "test:live:opencode": "node scripts/run-live-codex-leads.mjs opencode",
+    "test:live:pi": "node scripts/run-live-codex-leads.mjs pi",
+    "test:live:codex": "node scripts/run-live-codex-leads.mjs all",
     "prepack": "npm run build"
   },
   "keywords": [

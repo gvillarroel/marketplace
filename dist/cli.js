@@ -1,18 +1,30 @@
 #!/usr/bin/env node
 import { executeCommand } from "./core/commands.js";
+import { deterministicCommandNames } from "./core/types.js";
+import { runDeterministicCommand } from "./adapters/direct.js";
 import { harborContext } from "./adapters/shared.js";
-import { CopilotOrchestrator } from "./orchestrators/copilot.js";
 const [, , harnessRaw, commandRaw, ...rest] = process.argv;
-if (!["copilot"].includes(harnessRaw) || !["bench", "join", "retire", "contract", "list-skills"].includes(commandRaw)) {
-    console.error("usage: agent-harbor copilot <bench|join|retire|contract|list-skills> [arguments]");
+const harnesses = ["copilot", "opencode", "pi"];
+const commands = ["bench", "join", "retire", "contract", "list-skills"];
+if (!harnesses.includes(harnessRaw) || !commands.includes(commandRaw)) {
+    console.error("usage: agent-harbor <copilot|opencode|pi> <bench|join|retire|contract|list-skills> [arguments]");
     process.exitCode = 2;
 }
 else {
     const harness = harnessRaw;
     const command = commandRaw;
-    const context = harborContext(harness, process.cwd(), new CopilotOrchestrator());
+    const args = rest.join(" ");
     try {
-        console.log(await executeCommand(command, rest.join(" "), context));
+        if (deterministicCommandNames.includes(command)) {
+            console.log(await runDeterministicCommand(harness, command, args));
+        }
+        else if (harness === "copilot") {
+            const { CopilotOrchestrator } = await import("./orchestrators/copilot.js");
+            console.log(await executeCommand(command, args, harborContext(harness, process.cwd(), new CopilotOrchestrator())));
+        }
+        else {
+            throw new Error(`/contract must run inside ${harness}; the direct CLI never starts a hidden model session`);
+        }
     }
     catch (error) {
         console.error(error instanceof Error ? error.message : String(error));

@@ -1,5 +1,7 @@
 export const commandNames = ["bench", "join", "retire", "contract", "list-skills"] as const;
 export type CommandName = (typeof commandNames)[number];
+export const deterministicCommandNames = ["bench", "join", "retire", "list-skills"] as const;
+export type DeterministicCommandName = (typeof deterministicCommandNames)[number];
 export type HarnessName = "copilot" | "opencode" | "pi";
 export type HarborTool = "read" | "search" | "edit" | "execute";
 

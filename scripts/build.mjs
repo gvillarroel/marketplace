@@ -13,5 +13,7 @@ for (const name of await readdir(new URL("../dist/core/", import.meta.url))) {
 }
 await mkdir(new URL("adapters/", target), { recursive: true });
 await cp(new URL("../dist/adapters/shared.js", import.meta.url), new URL("adapters/shared.js", target));
+await cp(new URL("../dist/adapters/direct.js", import.meta.url), new URL("adapters/direct.js", target));
 await cp(new URL("../dist/adapters/copilot.js", import.meta.url), new URL("adapters/copilot.js", target));
 await cp(new URL("../dist/adapters/copilot-mcp.js", import.meta.url), new URL("adapters/copilot-mcp.js", target));
+await cp(new URL("../dist/adapters/copilot-coordinator.js", import.meta.url), new URL("adapters/copilot-coordinator.js", target));

@@ -1,71 +1,75 @@
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import * as hostPiSdk from "@earendil-works/pi-coding-agent";
+import { listInvocablePlayerIds, listManagedActiveIds, loadPiActivePlayer } from "../core/active.js";
 import { executeCommand } from "../core/commands.js";
+import { runDeterministicCommand } from "./direct.js";
 import { bundledPlayers, rolePlayers } from "../core/defaults.js";
-import { isOwnedProfile, validatePlayer } from "../core/lifecycle.js";
-import { decodePlayer } from "../core/profiles.js";
 import { commandNames } from "../core/types.js";
+import { normalizeDelegatedTaskPaths } from "../core/profiles.js";
 import { PiOrchestrator } from "../orchestrators/pi.js";
 import { harborContext } from "./shared.js";
 const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
-function activeRoot(project) { return resolve(project, ".pi", "agents"); }
-function rejectSymlinkPath(project, target) {
-    const root = resolve(project);
-    const rel = relative(root, resolve(target));
-    if (rel === "" || rel.startsWith("..") || isAbsolute(rel))
-        throw new Error(`unsafe path: ${target}`);
-    let cursor = root;
-    for (const segment of ["", ...rel.split(/[\\/]+/)]) {
-        if (segment)
-            cursor = join(cursor, segment);
-        const stat = lstatSync(cursor);
-        if (stat.isSymbolicLink())
-            throw new Error(`symlink traversal refused: ${cursor}`);
-    }
-}
-function activePlayer(project, id) {
-    if (!idPattern.test(id))
-        throw new Error(`invalid player: ${id}`);
-    const path = join(activeRoot(project), `${id}.md`);
-    rejectSymlinkPath(project, path);
-    const content = readFileSync(path, "utf8");
-    if (!isOwnedProfile(content, id))
-        throw new Error(`active managed player not found: ${id}`);
-    return validatePlayer(decodePlayer(content, id), bundledPlayers.has(id));
-}
-function activeIds(project) {
-    const root = activeRoot(project);
-    try {
-        rejectSymlinkPath(project, root);
-        const ids = [];
-        const entries = readdirSync(root, { withFileTypes: true })
-            .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
-            .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0).slice(0, 200);
-        for (const entry of entries) {
-            const id = entry.name.slice(0, -3);
-            if (!idPattern.test(id))
-                continue;
-            try {
-                activePlayer(project, id);
-                ids.push(id);
-            }
-            catch { /* unmanaged or malformed profiles are not invocable */ }
-        }
-        return ids;
-    }
-    catch (error) {
-        if (["ENOENT", "ENOTDIR"].includes(error?.code))
-            return [];
-        throw error;
-    }
-}
 export default function agentHarbor(pi) {
     const registered = new Set();
-    const runPlayer = async (player, task, cwd) => {
+    const loadHostSdk = async () => hostPiSdk;
+    const currentSessionOptions = (model) => ({
+        ...(model === undefined ? {} : { model }),
+        thinkingLevel: pi.getThinkingLevel(),
+    });
+    const createOrchestrator = (cwd, sessionOptions, additionalTools = [], customTools = []) => new PiOrchestrator(cwd, loadHostSdk, additionalTools, undefined, customTools, undefined, sessionOptions);
+    const createDelegateTool = (cwd, leadSessionOptions) => {
+        let calls = 0;
+        const delegatedAgents = new Set();
+        const delegationTargets = listInvocablePlayerIds("pi", cwd).filter((id) => id !== "team-lead");
+        const delegationRoster = delegationTargets.map((id) => {
+            const definition = rolePlayers.get(id) ?? bundledPlayers.get(id);
+            return `${id}: ${definition?.description ?? "active personal Agent Harbor player"}`;
+        }).join("; ");
+        return {
+            name: "harbor_delegate",
+            label: "Agent Harbor Delegate",
+            description: `Run one active named Agent Harbor specialist and return its evidence. Active targets: ${delegationRoster}.`,
+            executionMode: "sequential",
+            parameters: {
+                type: "object",
+                properties: {
+                    agent: { type: "string", enum: delegationTargets, description: "Exact active Agent Harbor agent ID" },
+                    task: { type: "string", description: "Complete bounded task for that agent" },
+                },
+                required: ["agent", "task"],
+                additionalProperties: false,
+            },
+            execute: async (_id, params, signal, _update, context) => {
+                const project = context?.cwd || cwd;
+                if (typeof params.agent !== "string" || !idPattern.test(params.agent) || params.agent === "team-lead")
+                    throw new Error("invalid or recursive delegation target");
+                if (typeof params.task !== "string" || !params.task.trim())
+                    throw new Error("delegation requires a non-empty task");
+                const player = rolePlayers.get(params.agent) ?? loadPiActivePlayer(project, params.agent);
+                if (calls >= 6)
+                    throw new Error("delegation limit reached (6)");
+                if (delegatedAgents.has(params.agent))
+                    throw new Error(`already delegated to ${params.agent} in this team-lead run`);
+                calls += 1;
+                delegatedAgents.add(params.agent);
+                const delegateSessionOptions = {
+                    ...leadSessionOptions,
+                    ...(context.model === undefined ? {} : { model: context.model }),
+                };
+                const text = await createOrchestrator(project, delegateSessionOptions).run({
+                    ...player,
+                    task: normalizeDelegatedTaskPaths(params.task, project),
+                }, signal);
+                return { content: [{ type: "text", text }], details: { harness: "pi", agent: params.agent, call: calls } };
+            },
+        };
+    };
+    const runPlayer = async (player, task, cwd, model, thinkingLevel) => {
         if (!task.trim())
             throw new Error(`/${player.name} requires a non-empty task`);
-        const additionalTools = player.name === "team-lead" ? ["harbor_contract"] : [];
-        return new PiOrchestrator(cwd, undefined, additionalTools).run({ ...player, task });
+        const sessionOptions = { ...(model === undefined ? {} : { model }), thinkingLevel };
+        const customTools = player.name === "team-lead" ? [createDelegateTool(cwd, sessionOptions)] : [];
+        const additionalTools = customTools.map((tool) => tool.name);
+        return createOrchestrator(cwd, sessionOptions, additionalTools, customTools).run({ ...player, task });
     };
     const registerPlayer = (id, fixed) => {
         if (registered.has(id))
@@ -74,7 +78,7 @@ export default function agentHarbor(pi) {
             description: fixed?.description ?? `Run active Agent Harbor player ${id}`,
             handler: async (args, ctx) => {
                 try {
-                    ctx.ui.notify(await runPlayer(fixed ?? activePlayer(ctx.cwd, id), args, ctx.cwd), "info");
+                    ctx.ui.notify(await runPlayer(fixed ?? loadPiActivePlayer(ctx.cwd, id), args, ctx.cwd, ctx.model, pi.getThinkingLevel()), "info");
                 }
                 catch (error) {
                     ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -83,12 +87,13 @@ export default function agentHarbor(pi) {
         });
         registered.add(id);
     };
-    const syncActivePlayers = (project) => { for (const id of activeIds(project))
+    const syncActivePlayers = (project) => { for (const id of listManagedActiveIds("pi", project))
         registerPlayer(id); };
     pi.registerTool({
         name: "harbor_contract",
         label: "Agent Harbor Contract",
         description: "Run exactly one invocation-scoped Agent Harbor child through the Pi SDK.",
+        executionMode: "sequential",
         parameters: {
             type: "object",
             properties: { definition: { type: "string", description: "Complete /contract JSON object" } },
@@ -96,7 +101,7 @@ export default function agentHarbor(pi) {
             additionalProperties: false,
         },
         execute: async (_id, params, signal, _update, ctx) => {
-            const context = harborContext("pi", ctx.cwd, new PiOrchestrator(ctx.cwd));
+            const context = harborContext("pi", ctx.cwd, createOrchestrator(ctx.cwd, currentSessionOptions(ctx.model)));
             const text = await executeCommand("contract", params.definition, context, signal);
             return { content: [{ type: "text", text }], details: { harness: "pi" } };
         },
@@ -105,9 +110,10 @@ export default function agentHarbor(pi) {
         pi.registerCommand(name, {
             description: `Agent Harbor ${name} control`,
             handler: async (args, ctx) => {
-                const context = harborContext("pi", ctx.cwd, new PiOrchestrator(ctx.cwd));
                 try {
-                    const result = await executeCommand(name, args, context);
+                    const result = name === "contract"
+                        ? await executeCommand(name, args, harborContext("pi", ctx.cwd, createOrchestrator(ctx.cwd, currentSessionOptions(ctx.model))))
+                        : await runDeterministicCommand("pi", name, args, ctx.cwd);
                     if (name === "join" || name === "bench")
                         syncActivePlayers(ctx.cwd);
                     ctx.ui.notify(result, "info");
