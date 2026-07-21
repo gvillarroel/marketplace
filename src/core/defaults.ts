@@ -9,9 +9,6 @@ import type { GithubSkill, GithubSkillCatalogSource, PlayerDefinition } from "./
 
 const honorOutputContract = " Honor every explicit completion and output-format contract literally, including required standalone final lines.";
 
-/** Retired bundled identifiers retained solely for safe discovery and cleanup. */
-export const legacyBundledPlayerIds = ["scout", "sage", "smith", "probe", "guard", "pilot"] as const;
-
 /** Ordered lifecycle peers that users can deterministically place on or off the active roster. */
 export const bundledPlayers = new Map<string, PlayerDefinition>([
   ["portfolio-management", {

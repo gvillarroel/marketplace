@@ -12,8 +12,8 @@ sus métricas están en [SIMPLIFICATION-PLAN.md](SIMPLIFICATION-PLAN.md).
 1. **Un solo core.** Validación, comandos, roster, ownership, rendering, skills
    y GitHub viven en `src/core`. Los adapters traducen esas decisiones a cada
    host; no mantienen una segunda implementación del lifecycle.
-2. **Tres clases de player.** Los roles fijos `team-lead`,
-   `repo-cartographer` y `crafter` siempre están disponibles; los seis players
+2. **Tres clases de player.** Los roles fijos `team-lead` y `crafter` siempre
+   están disponibles; los seis players
    SDLC de `bundledPlayers` empiezan en banca; un player personal tiene un
    registro persistente y una copia activa por proyecto.
 3. **Lifecycle determinista.** `bench`, `join`, `retire` y `list-skills` tienen
@@ -81,7 +81,7 @@ mismo layout.
 
 | Consumidor | Entrypoint | Superficie principal |
 | --- | --- | --- |
-| Copilot marketplace | `.github/plugin/marketplace.json` y los `plugin.json` | Instala `agent-foundry` y `repo-cartographer`. |
+| Copilot marketplace | `.github/plugin/marketplace.json` y `plugins/agent-foundry/plugin.json` | Instala únicamente `agent-foundry`. |
 | Copilot extensión | `plugins/agent-foundry/extensions/agent-harbor/extension.mjs` | Comandos client deterministas, `/harbor-<id>`, cambio/restauración de agente y guard de `team-lead`. |
 | Copilot MCP | `plugins/agent-foundry/.mcp.json` → runtime generado `adapters/copilot-mcp.js` | Tool global `control`; `--skills-player <id>` publica sólo `skills`; `--scout` publica sólo `filter_skills` y `join_player`. |
 | Copilot model-backed | `plugins/agent-foundry/skills/contract/SKILL.md` | Único wrapper Markdown: `/contract` hace preflight y crea exactamente un child. Los cuatro controles deterministas no tienen fallback skill. |
@@ -198,7 +198,6 @@ Las clases tienen lifecycle diferente:
 | Fija | `src/core/roles/*.md` → `rolePlayers` y assets Copilot | No usa roster de usuario. | Siempre invocable. |
 | Bundled SDLC | `bundledPlayers` | Sólo copia activa de proyecto. | `bench on`; `bench off` la elimina. |
 | Personal | JSON de `join` | Registro en home + copia activa inicial. | `bench off` conserva registro; `bench on` re-renderiza desde revisión 4; `retire` elimina registro y copia actual. |
-| Legacy | IDs `scout`, `sage`, `smith`, `probe`, `guard`, `pilot` | Sólo se reconoce para cleanup seguro. | Nunca se reactiva ni se acepta como target. |
 
 Un perfil revisión 4 renderizado por `renderPlayer` contiene:
 
@@ -213,11 +212,10 @@ Un perfil revisión 4 renderizado por `renderPlayer` contiene:
 `isCanonicalPlayerProfile` además exige que la definición decodificada y toda
 la representación ejecutable coincidan con el renderer actual. Copilot acepta
 como equivalente sólo una ruta MCP alternativa cuyo archivo sea regular,
-byte-idéntico al entrypoint esperado y no sea symlink. Una revisión 3 puede
-limpiarse o reemplazarse, pero no reactivarse.
+byte-idéntico al entrypoint esperado y no sea symlink. Cualquier metadata de
+ownership distinto del formato actual se trata como una colisión no administrada.
 
-`Roster.bench` expone `on`, `bench`, `stale` y `conflict`. Para legacy también
-existe `retired-active`. En términos operativos:
+`Roster.bench` expone `on`, `bench`, `stale` y `conflict`. En términos operativos:
 
 - `on`: perfil activo, owned y canónico;
 - `bench`: no hay copia activa recuperable;
@@ -247,8 +245,6 @@ todos los errores. Nunca elimina directorios.
 `join` y `retire` son transacciones de dos archivos. `Roster.bench` separa
 parsing, inventario y planificación; un `bench on|off` de varios IDs toma un
 solo lock, completa todo el plan y recién entonces ejecuta una sola transacción.
-El preflight incluye el cleanup de perfiles SDLC legacy owned. Una colisión
-legacy unmanaged aborta todo el lote.
 
 ## Rendering y discovery seguro
 
@@ -343,15 +339,15 @@ cleanup.
 
 ## Build y artefactos generados
 
-`npm run build` ejecuta únicamente `scripts/build.mjs`: elimina los tres
+`npm run build` ejecuta únicamente `scripts/build.mjs`: elimina los dos
 árboles generados, ejecuta TypeScript con `noEmitOnError` y luego copia el
 runtime Copilot desde ese mismo `dist`.
 
 | Entrada fuente | Salida generada | Consumidor |
 | --- | --- | --- |
 | `src/**/*.ts` | `dist/**/*.js` y `dist/**/*.d.ts` | Paquete npm, CLI, OpenCode y Pi. |
-| `dist/core/*.js` | `plugins/agent-foundry/runtime/dist/core/*.js` y `plugins/repo-cartographer/runtime/dist/core/*.js` | Ambos plugins Copilot; copia física porque `${PLUGIN_ROOT}` cambia por plugin. |
-| `dist/adapters/{shared,copilot,copilot-mcp}.js` | Mismos paths bajo ambos runtimes de plugin | MCP global/player-scoped y preflight Copilot. |
+| `dist/core/*.js` | `plugins/agent-foundry/runtime/dist/core/*.js` | Runtime del único plugin Copilot. |
+| `dist/adapters/{shared,copilot,copilot-mcp}.js` | Mismos paths bajo el runtime de `agent-foundry` | MCP global/player-scoped y preflight Copilot. |
 | `dist/adapters/{direct,copilot-coordinator}.js` | Sólo `plugins/agent-foundry/runtime/dist/adapters/` | Controles client y guard del coordinador. |
 | Manifests, `plugins/*/agents`, `plugins/*/skills`, `extension.mjs` | No se generan | Assets Copilot revisados como fuente. |
 

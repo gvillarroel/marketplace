@@ -11,17 +11,9 @@
         }
       },
       {
-        "id": "repo-cartographer",
-        "runtimeIds": {
-          "copilot": "repo-cartographer:repo-cartographer",
-          "opencode": "repo-cartographer",
-          "pi": "repo-cartographer"
-        }
-      },
-      {
         "id": "crafter",
         "runtimeIds": {
-          "copilot": "repo-cartographer:crafter",
+          "copilot": "agent-foundry:crafter",
           "opencode": "crafter",
           "pi": "crafter"
         }
@@ -85,14 +77,9 @@
       "activate": [],
       "steps": [
         {
-          "agent": "repo-cartographer",
-          "task": "Map the bounded fixture: identify relevant entrypoints, boundaries, tests, and the shortest validation command. Do not edit.",
-          "evidenceFrom": null
-        },
-        {
           "agent": "crafter",
-          "task": "Implement the smallest correct TypeScript change using the verified repository map, then run the focused validation.",
-          "evidenceFrom": "repo-cartographer"
+          "task": "Inspect the bounded fixture, implement the smallest correct TypeScript change, then run the focused validation.",
+          "evidenceFrom": null
         }
       ]
     },

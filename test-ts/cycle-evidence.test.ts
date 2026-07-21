@@ -263,7 +263,7 @@ test("the full Harbor dataset cycle activates, dispatches, hands off evidence, a
   await Promise.all([runCopilotCycle(fullCycle), runOpenCodeCycle(fullCycle), runPiCycle(fullCycle)]);
 });
 
-test("the default Harbor cycle dispatches both startup specialists with evidence and cleanup", async () => {
+test("the default Harbor cycle dispatches crafter with evidence and cleanup", async () => {
   await Promise.all([runOpenCodeCycle(defaultCycle), runPiCycle(defaultCycle)]);
 });
 

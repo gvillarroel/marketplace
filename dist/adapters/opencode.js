@@ -15,7 +15,6 @@ import { harborContext } from "./shared.js";
  */
 export const AgentHarborPlugin = async ({ client, directory }) => {
     const teamLead = rolePlayers.get("team-lead");
-    const repoCartographer = rolePlayers.get("repo-cartographer");
     const crafter = rolePlayers.get("crafter");
     const delegationTargets = listInvocablePlayerIds("opencode", directory).filter((id) => id !== "team-lead");
     const delegationRoster = delegationTargets.map((id) => {
@@ -124,13 +123,6 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                     prompt: `${composePlayerInstructions(teamLead)} In OpenCode, harbor_delegate is the named delegation tool; select only an exact active target from its enum and provide a complete non-empty task.`,
                     tools: { ...openCodeToolPolicy([]), harbor_delegate: true },
                     permission: openCodePermissionPolicy([], ["harbor_delegate"], directory),
-                },
-                "repo-cartographer": {
-                    description: repoCartographer.description, mode: "subagent",
-                    steps: 4,
-                    prompt: composePlayerInstructions(repoCartographer),
-                    tools: { ...openCodeToolPolicy(repoCartographer.tools), harbor_delegate: false },
-                    permission: openCodePermissionPolicy(repoCartographer.tools, [], directory),
                 },
                 crafter: {
                     description: crafter.description, mode: "subagent",

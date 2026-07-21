@@ -43,7 +43,7 @@ async function copyRuntime({ root, adapters }) {
 
 await Promise.all(runtimeTargets.map(copyRuntime));
 
-// Team lead retains its hand-tuned plugin asset. Every other Markdown role gets
+// Hand-tuned roles retain their plugin assets. Every other Markdown role gets
 // Markdown role gets a deterministic least-privilege Copilot asset so adding a
 // file to src/core/roles is sufficient after rebuilding.
 const generatedAgentRoot = new URL("../plugins/agent-foundry/agents/", import.meta.url);
@@ -53,7 +53,7 @@ await Promise.all(existing.filter((name) => name.endsWith(generatedSuffix))
   .map((name) => rm(new URL(name, generatedAgentRoot), { force: true })));
 const { rolePlayers } = await import(new URL("core/defaults.js", dist));
 const { composePlayerInstructions, nativeTools } = await import(new URL("core/profiles.js", dist));
-const specialized = new Set(["team-lead"]);
+const specialized = new Set(["team-lead", "crafter"]);
 for (const [id, player] of rolePlayers) {
   if (specialized.has(id)) continue;
   const server = `agent-harbor-skills-${id}`;

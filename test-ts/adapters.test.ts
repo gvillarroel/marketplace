@@ -692,7 +692,6 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
   assert.equal(config.agent["team-lead"].permission.harbor_delegate, "allow");
   assert.equal(config.agent["team-lead"].permission.read, "deny");
   assert.equal(config.agent["team-lead"].steps, 7);
-  assert.equal(config.agent["repo-cartographer"].steps, 4);
   assert.equal(config.agent.crafter.steps, 4);
   assert.ok(config.agent["team-lead"].prompt.startsWith("Identity: team-lead\n"));
   assert.ok(config.agent["team-lead"].prompt.includes(rolePlayers.get("team-lead")!.prompt));
@@ -702,10 +701,6 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
   assert.equal(scopedExternalDirectory["*"], "deny");
   assert.ok(Object.entries(scopedExternalDirectory).some(([pattern, action]) =>
     action === "allow" && pattern.toLowerCase().startsWith(resolve(initial).toLowerCase())));
-  assert.equal(config.agent["repo-cartographer"].tools.read, true);
-  assert.equal(config.agent["repo-cartographer"].tools.apply_patch, false);
-  assert.equal(config.agent["repo-cartographer"].permission.read, "allow");
-  assert.equal(config.agent["repo-cartographer"].permission.edit, "deny");
   assert.equal(config.agent.crafter.tools.apply_patch, true);
   assert.equal(config.agent.crafter.permission.edit, "allow");
   assert.equal(config.agent.crafter.tools.agent_harbor_skills, true);
@@ -916,7 +911,7 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
   await assert.rejects(() => delegate.execute(
     { agent: fullCycle.steps[0].agent, task: "seventh stage" }, { ...sdlcExecution, messageID: "sdlc-7" },
   ), /at most six/);
-  assert.equal(creates.length, 8);
+  assert.equal(creates.length, defaultCycle.steps.length + fullCycle.steps.length);
   assert.deepEqual(prompts.map((entry) => entry.body.agent), [...defaultCycle.steps, ...fullCycle.steps].map((step) => step.agent));
   assert.deepEqual(
     prompts.map((entry) => entry.body.model),
@@ -1255,10 +1250,10 @@ test("Pi team lead delegates sequentially to different active agents with bounds
       new AbortController().signal, undefined, context,
     ), /already delegated/);
     assert.deepEqual(
-      calls.slice(0, 6).map((call) => call.name),
+      calls.slice(0, 2 + defaultCycle.steps.length + 2).map((call) => call.name),
       ["team-lead", ...defaultCycle.steps.map((step) => step.agent), "team-lead", ...fullCycle.steps.slice(0, 2).map((step) => step.agent)],
     );
-    assert.match(calls[5].task, new RegExp(`evidence:${fullCycle.steps[0].agent}`));
+    assert.match(calls.at(-1).task, new RegExp(`evidence:${fullCycle.steps[0].agent}`));
 
     const beforeInvalid = calls.length;
     await assert.rejects(() => delegate.execute("bad", { agent: "team-lead", task: "recurse" }, new AbortController().signal, undefined, context), /recursive/);

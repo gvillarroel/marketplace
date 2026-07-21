@@ -8,13 +8,12 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { bundledPlayers, legacyBundledPlayerIds, trustedSkills } from "./defaults.js";
+import { bundledPlayers, trustedSkills } from "./defaults.js";
 import { isTrustedGithubSkill } from "./github.js";
 import { isHarborId } from "./identity.js";
 import { decodePlayer, isCanonicalPlayerProfile } from "./profiles.js";
 import { validateSkillReference } from "./skills.js";
-const legacyBundledIds = new Set(legacyBundledPlayerIds);
-const reserved = new Set([...bundledPlayers.keys(), ...legacyBundledPlayerIds, "team-lead", "repo-cartographer", "crafter", "talent-scout", "bench", "join", "retire", "contract", "list-skills"]);
+const reserved = new Set([...bundledPlayers.keys(), "team-lead", "crafter", "talent-scout", "bench", "join", "retire", "contract", "list-skills"]);
 const allowedTools = new Set(["read", "search", "edit", "execute"]);
 /** Parses bench syntax without touching roster state or the filesystem. */
 function parseBenchCommand(args, bundled) {
@@ -86,45 +85,34 @@ async function rejectSymlinkTraversal(root, target) {
         }
     }
 }
-// Ownership is intentionally narrower than validity: this recognizes only the structural marker and
-// trailing metadata emitted by Agent Harbor. Revision 3 remains recognizable for collision-safe
-// migration and cleanup, but only canonical revision-4 profiles embed a recoverable definition.
-function ownedProfileRevision(content, id, expectedRoster) {
+// Ownership is intentionally narrower than validity: this recognizes only the current structural
+// marker and trailing metadata emitted by Agent Harbor.
+export function isOwnedProfile(content, id, expectedRoster) {
     if (!content?.startsWith("---\n"))
-        return undefined;
+        return false;
     const end = content.indexOf("\n---\n", 4);
     if (end < 0)
-        return undefined;
-    const marker = /^<!-- agent-foundry:profile id=([a-z0-9-]+) revision=(3|4) -->\n/.exec(content.slice(end + 5));
+        return false;
+    const marker = /^<!-- agent-foundry:profile id=([a-z0-9-]+) revision=4 -->\n/.exec(content.slice(end + 5));
     if (!marker || marker[1] !== id)
-        return undefined;
-    const revision = marker[2];
+        return false;
     const lines = content.slice(4, end).split("\n");
     if (lines.filter((line) => line === `name: ${JSON.stringify(id)}`).length !== 1)
-        return undefined;
+        return false;
     const roster = expectedRoster ?? (lines.includes("  roster: personal") ? "personal" : lines.includes("  roster: sdlc") ? "sdlc" : undefined);
     if (!roster)
-        return undefined;
+        return false;
     const metadata = [
         "metadata:",
         "  owner: agent-foundry",
         `  roster: ${roster}`,
         `  player: ${JSON.stringify(id)}`,
-        `  revision: "${revision}"`,
+        '  revision: "4"',
     ];
     if (lines.slice(-metadata.length).join("\n") !== metadata.join("\n"))
-        return undefined;
+        return false;
     return metadata.every((expected) => lines.filter((line) => line === expected).length === 1) &&
-        lines.filter((line) => line === "  roster: personal" || line === "  roster: sdlc").length === 1
-        ? revision
-        : undefined;
-}
-/**
- * Returns whether content has a structurally valid Agent Harbor ownership marker for this player.
- * Ownership authorizes replacement or cleanup; it does not imply the profile is current or invocable.
- */
-export function isOwnedProfile(content, id, expectedRoster) {
-    return ownedProfileRevision(content, id, expectedRoster) !== undefined;
+        lines.filter((line) => line === "  roster: personal" || line === "  roster: sdlc").length === 1;
 }
 /**
  * Strictly validates an external player definition and returns its typed form.
@@ -388,24 +376,6 @@ export class Roster {
         }
         return rows;
     }
-    async legacyBenchInventory(bundled, filter) {
-        const rows = [];
-        for (const id of legacyBundledPlayerIds) {
-            if (bundled.has(id) || (filter && !id.includes(filter)))
-                continue;
-            const { active } = this.paths(id);
-            await rejectSymlinkTraversal(this.spec.project, active);
-            const content = await existing(active);
-            if (content === undefined)
-                continue;
-            rows.push({
-                id,
-                roster: "legacy",
-                state: isOwnedProfile(content, id, "sdlc") ? "retired-active" : "conflict",
-            });
-        }
-        return rows;
-    }
     async registrationEntries() {
         const registrationRoot = contained(this.spec.home, join(this.spec.home, this.spec.registrationDir));
         try {
@@ -421,8 +391,8 @@ export class Roster {
             throw error;
         }
     }
-    personalBenchState(id, active, activeRevision, definition) {
-        if (active !== undefined && !activeRevision)
+    personalBenchState(active, activeOwned, definition) {
+        if (active !== undefined && !activeOwned)
             return "conflict";
         if (!definition)
             return "stale";
@@ -443,29 +413,24 @@ export class Roster {
             ]);
             const registration = await existing(paths.registration);
             const active = await existing(paths.active);
-            const registrationRevision = ownedProfileRevision(registration, id, "personal");
-            if (!registrationRevision) {
+            if (!isOwnedProfile(registration, id, "personal")) {
                 rows.push({ id, roster: "personal", state: "conflict" });
                 continue;
             }
-            const activeRevision = ownedProfileRevision(active, id, "personal");
             let definition;
-            if (registrationRevision === "4") {
-                try {
-                    definition = validatePlayer(decodePlayer(registration, id));
-                }
-                catch {
-                    definition = undefined;
-                }
+            try {
+                definition = validatePlayer(decodePlayer(registration, id));
             }
-            rows.push({ id, roster: "personal", state: this.personalBenchState(id, active, activeRevision, definition) });
+            catch {
+                definition = undefined;
+            }
+            rows.push({ id, roster: "personal", state: this.personalBenchState(active, isOwnedProfile(active, id, "personal"), definition) });
         }
         return rows;
     }
     async listBench(filter, bundled) {
         const rows = [];
         rows.push(...await this.bundledBenchInventory(bundled, filter));
-        rows.push(...await this.legacyBenchInventory(bundled, filter));
         rows.push(...await this.personalBenchInventory(filter));
         return rows.map(({ id, roster, state }) => `${id} | ${roster} | ${state}`).join("\n");
     }
@@ -477,8 +442,7 @@ export class Roster {
         ]);
         const active = await existing(paths.active);
         const definition = bundled.get(id);
-        const legacy = !definition && legacyBundledIds.has(id);
-        const roster = definition || legacy ? "sdlc" : "personal";
+        const roster = definition ? "sdlc" : "personal";
         if (active !== undefined && !isOwnedProfile(active, id, roster))
             throw new Error(`unmanaged collision: ${id}`);
         if (action === "off") {
@@ -487,14 +451,9 @@ export class Roster {
             }
             return { path: paths.active };
         }
-        if (legacy)
-            throw new Error(`retired bundled player: ${id}; use bench off ${id}`);
         const registration = definition ? undefined : await existing(paths.registration);
         if (!definition && (!registration || !isOwnedProfile(registration, id, "personal")))
             throw new Error(`unknown player: ${id}`);
-        if (!definition && ownedProfileRevision(registration, id, "personal") !== "4") {
-            throw new Error(`stale personal profile: ${id}; re-run join with replace:true`);
-        }
         try {
             return {
                 path: paths.active,
@@ -507,51 +466,26 @@ export class Roster {
             throw new Error(`stale personal profile: ${id}; re-run join with replace:true`);
         }
     }
-    async planLegacyCleanup(ids, bundled) {
-        const changes = [];
-        const cleanedLegacy = [];
-        for (const id of legacyBundledPlayerIds) {
-            if (bundled.has(id) || ids.includes(id))
-                continue;
-            const { active } = this.paths(id);
-            await rejectSymlinkTraversal(this.spec.project, active);
-            const content = await existing(active);
-            if (content === undefined)
-                continue;
-            if (!isOwnedProfile(content, id, "sdlc"))
-                throw new Error(`unmanaged legacy collision: ${id}`);
-            changes.push({ path: active });
-            cleanedLegacy.push(id);
-        }
-        return { changes, cleanedLegacy };
-    }
     /** Completes every collision/read/render preflight before returning transaction input. */
     async planBenchMutation(command, bundled) {
         const changes = [];
         for (const id of command.ids)
             changes.push(await this.planBenchPlayer(id, command.action, bundled));
-        if (!command.ids.some((id) => bundled.has(id)))
-            return { changes, cleanedLegacy: [] };
-        const cleanup = await this.planLegacyCleanup(command.ids, bundled);
-        return { changes: [...changes, ...cleanup.changes], cleanedLegacy: cleanup.cleanedLegacy };
+        return changes;
     }
     /**
      * Lists roster state or deterministically turns bundled/personal players on and off.
      * Turning a personal player off removes only its owned active copy; its registration remains the
-     * source of truth. Turning it on requires a recoverable revision-4 registration. Legacy bundled
-     * profiles are recognized only for safe reporting and removal, never reactivation.
+     * source of truth. Turning it on requires a recoverable current registration.
      */
     async bench(args, bundled) {
         const command = parseBenchCommand(args, bundled);
         if (command.kind === "list")
             return this.listBench(command.filter, bundled);
         return this.withMutationLock(async () => {
-            const plan = await this.planBenchMutation(command, bundled);
-            await this.transaction(plan.changes);
-            return [
-                ...command.ids.map((id) => `${id}: turned ${command.action}`),
-                ...plan.cleanedLegacy.map((id) => `${id}: retired legacy profile removed`),
-            ].join("\n");
+            const changes = await this.planBenchMutation(command, bundled);
+            await this.transaction(changes);
+            return command.ids.map((id) => `${id}: turned ${command.action}`).join("\n");
         });
     }
     /**

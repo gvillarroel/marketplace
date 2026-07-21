@@ -3,8 +3,6 @@
  * These definitions are policy-bearing defaults consumed by every harness renderer.
  */
 import type { GithubSkill, GithubSkillCatalogSource, PlayerDefinition } from "./types.js";
-/** Retired bundled identifiers retained solely for safe discovery and cleanup. */
-export declare const legacyBundledPlayerIds: readonly ["scout", "sage", "smith", "probe", "guard", "pilot"];
 /** Ordered lifecycle peers that users can deterministically place on or off the active roster. */
 export declare const bundledPlayers: Map<string, PlayerDefinition>;
 /** Exact GitHub skill references permitted in player definitions; branch heads are pinned when loaded. */

@@ -15,14 +15,14 @@ harness:
 - extensión de paquete para Pi.
 
 Los tres **DEBEN** ofrecer `/bench`, `/join`, `/retire`, `/contract` y
-`/list-skills`, además de `team-lead`, `repo-cartographer` y `crafter` mediante
+`/list-skills`, además de `team-lead` y `crafter` mediante
 el mecanismo nativo de agentes de cada harness.
 
-Esos tres roles fijos **DEBEN** estar activos al iniciar y permanecer separados
+Esos dos roles fijos **DEBEN** estar activos al iniciar y permanecer separados
 de los seis compañeros SDLC bundled: `portfolio-management`, `design`, `build`,
 `manage`, `consume` y `dispose`. Los seis **DEBEN** empezar en banca y sólo
 pasan a ser invocables en el proyecto mediante `bench on`. La suite **DEBE**
-distinguir ambos estados y probar los nueve nombres después de `bench on all`.
+distinguir ambos estados y probar los ocho nombres después de `bench on all`.
 
 Cuando se requiere el ciclo completo, esos compañeros representan, en orden:
 
@@ -66,7 +66,7 @@ la misma responsabilidad y el mismo límite de herramientas. Los comandos de
 lifecycle no pueden depender de decisiones del modelo.
 
 Pi **NO DEBE** representar un player únicamente como prompt estático: su
-extensión registra los tres roles fijos y cada perfil activo con ownership
+extensión registra los dos roles fijos y cada perfil activo con ownership
 verificado como comandos nativos; invocarlos crea una sesión SDK en memoria con
 la allowlist traducida. `.pi/agents` es almacenamiento privado del adapter, no
 un directorio de prompts que Pi deba descubrir.
@@ -149,12 +149,6 @@ ruta cero modelo.
 
 - Un ID **DEBE** cumplir `^[a-z0-9][a-z0-9-]{0,47}$` y no ser un comando, rol o
   miembro incluido reservado.
-- Los IDs legacy `scout`, `sage`, `smith`, `probe`, `guard` y `pilot` **DEBEN**
-  permanecer reservados exclusivamente para migración; **NO DEBEN** registrarse
-  como personales, aparecer en el roster bundled vigente ni aceptarse como
-  targets por Agent Harbor. Un harness nativo **PUEDE** descubrir sus archivos
-  de proyecto anteriores hasta ejecutar el cleanup y reiniciar la sesión; el
-  roster de exactamente seis compañeros sólo se afirma después de ese paso.
 - Un perfil administrado **DEBE** hacer coincidir filename, `name`, `owner`,
   `roster`, `player`, `revision: "4"` y el marcador exacto de ownership. La
   revisión 4 **DEBE** incluir una definición codificada recuperable por los
@@ -176,15 +170,9 @@ ruta cero modelo.
 - Repetir una operación con el mismo estado **DEBE** ser idempotente.
 - Nunca se elimina un directorio.
 - Un perfil administrado diferente sólo se reemplaza con `replace: true`.
-- La revisión canónica es `4`. Una revisión 3 con ownership completo **PUEDE**
-  reemplazarse o limpiarse como legacy, pero **NO DEBE** ser invocable bajo la
-  garantía de skills cerrada porque no conserva una definición estructurada
-  para Copilot y OpenCode. Revisiones 1/2 no se migran implícitamente y nunca
-  justifican borrar una colisión no verificable.
-- Toda mutación de un bundled vigente **DEBE** incluir en el mismo preflight y
-  lote atómico el cleanup de perfiles legacy con ownership completo. Una
-  colisión legacy unmanaged **DEBE** abortar y restaurar el lote completo sin
-  sobrescribirla ni eliminarla.
+- La revisión canónica es `4`. Cualquier otro metadata de ownership **DEBE**
+  tratarse como una colisión no administrada y nunca justificar reemplazo o
+  eliminación.
 
 ## 4. Comandos
 
@@ -194,14 +182,10 @@ ruta cero modelo.
   `toggle`.
 - `all` significa, en orden: `portfolio-management`, `design`, `build`,
   `manage`, `consume`, `dispose`.
-- Como excepción de upgrade, `off scout sage smith probe guard pilot` **DEBE**
-  aceptar los seis IDs legacy reservados y eliminar exclusivamente sus copias
-  activas con ownership probado. No los vuelve a incluir ni invocables.
 - `on` escribe sólo la copia activa; `off` elimina sólo una copia activa con
   ownership probado y conserva el registro personal recuperable.
 - Los lotes son atómicos. El listado no muta ni usa red y distingue `on`,
-  `bench`, `stale` y `conflict`; un perfil SDLC legacy administrado aún presente
-  aparece como `legacy | retired-active` hasta su cleanup.
+  `bench`, `stale` y `conflict`.
 - Ver la banca **DEBE** completar con cero tokens de modelo en Copilot, OpenCode
   y Pi mediante su superficie directa documentada.
 
@@ -252,7 +236,7 @@ ruta cero modelo.
 ### Invocación y delegación nominal
 
 - Copilot **DEBE** registrar comandos `client` `/harbor-<id> <task>` para los
-  tres roles fijos, los seis compañeros bundled y los perfiles activos conocidos al
+  dos roles fijos, los seis compañeros bundled y los perfiles activos conocidos al
   iniciar. El handler **DEBE** recargar discovery, resolver el ID estable o el
   path exacto administrado, seleccionar el agente, enviar el task una sola vez
   y restaurar la selección. Un bundled apagado falla sin inferencia.
@@ -292,9 +276,9 @@ ruta cero modelo.
   `bundledPlayers`, porque catálogo y prueba podrían desviarse juntos. El
   roster se compara como conjunto, pero el orden de un ciclo se compara como
   secuencia exacta.
-- El dataset **DEBE** declarar los tres IDs fijos y sus identidades nativas, los
+- El dataset **DEBE** declarar los dos IDs fijos y sus identidades nativas, los
   seis compañeros bundled en orden canónico y, como mínimo, estos ciclos:
-  `default-specialists` (`repo-cartographer` → `crafter`, sin activación) y
+  `default-specialists` (`crafter`, sin activación) y
   `full-sdlc` (`bench on` de los seis seguido de `portfolio-management` →
   `design` → `build` → `manage` → `consume` → `dispose`). Cada etapa salvo la
   primera referencia exactamente la evidencia de su predecesora inmediata.
@@ -576,10 +560,10 @@ capacidades ordinarias que el usuario le declaró.
 | TXN-01 | Lock, preflight, reemplazo atómico y rollback byte-idéntico | `concurrent roster mutations are serialized`, `bench preflights a whole batch` y `a failed multi-file mutation restores the complete prior state` |
 | CON-01 | Un child, allowlist cerrada y cleanup sin pérdida de errores | pruebas de los tres orquestadores, `SDK orchestrators clean up child sessions when prompting fails`, `SDK orchestrators preserve execution and cleanup failures together` y aserciones `"*": false`/`executionMode: "sequential"` |
 | SKL-01 | Grupo propio por player, fuentes repo/GitHub y cero discovery ambiental | `repository skill references reject traversal, absolute paths, mismatched names, and cross-source duplicate names`, `skill capsules contain only the configured file and clean up their invocation root`, `compiled Copilot MCP servers are bounded and scope every player skill group to its own process`, `OpenCode removes an owned stale profile from host discovery instead of inheriting expanded tools`, `managed dispatch rejects owned profiles whose executable frontmatter differs from the encoded definition`, `contract skills are validated and materialized before any SDK child is created`, `Pi gives a child exactly its invocation-scoped skill allowlist`, `Pi fails closed on ambient, malformed, or post-reload skill discovery and cleans the capsule` y `Pi cancellation during skill reload creates no child and cleans the capsule` |
-| AGT-01 | Tres roles activos por defecto y seis compañeros SDLC bundled opt-in, invocables sin router | `the factory roster has exactly three active roles and six opt-in SDLC players`, `all harness rosters expose only fixed roles until owned SDLC profiles are activated`, `installed CLIs discover the native packages` y pruebas de comandos exactos por adapter |
+| AGT-01 | Dos roles activos por defecto y seis compañeros SDLC bundled opt-in, invocables sin router | `the factory roster has exactly two active roles and six opt-in SDLC players`, `all harness rosters expose only fixed roles until owned SDLC profiles are activated`, `installed CLIs discover the native packages` y pruebas de comandos exactos por adapter |
 | ORC-01 | Despacho secuencial nominal, evidencia entre etapas, límite, no recursión y cleanup | `Copilot team-lead hooks enforce exact active sequential delegation across user turns`, `OpenCode named runner dispatches every fixed and activated ID exactly`, `OpenCode team lead dispatches exact active agents sequentially without a router` y `Pi team lead delegates sequentially to different active agents with bounds and preflight` |
-| EVD-01 | Dataset literal común, identidades runtime y traza correlacionada sin contenido sensible | `the Harbor cycle dataset is literal, closed, and independent from runtime catalogs`, `the full Harbor dataset cycle activates, dispatches, hands off evidence, and cleans every SDK child`, `the default Harbor cycle dispatches both startup specialists with evidence and cleanup`, `evidence hooks retain only hashes and byte lengths`, `a failing async evidence collector cannot alter child execution or cleanup`, `creation, prompt, and cleanup failures produce bounded truthful evidence traces` y las tres pruebas ORC-01 alimentadas por el mismo dataset |
-| LIV-01 | Selección semántica y comunicación eficiente con inferencia real en Copilot, OpenCode y Pi | smoke Copilot opt-in `live Copilot team-lead selects and orchestrates the Harbor SDLC cycle efficiently` y smokes `live opencode|pi team-lead selects and orchestrates the Harbor SDLC cycle with Codex`: candidatos desordenados, nonce oculto acotado, seis children nativos correlacionados, secuencia exacta, concurrencia máxima uno, identidad/terminación nativas, ausencia de marcadores stale/duplicados, presupuestos raíz/child/total, fixture verificada, tokens positivos, cleanup y reportes sanitizados. La evidencia autenticada anterior al cambio de roster es legacy, **NO** satisface esta secuencia canónica y **DEBE** regenerarse con los seis compañeros vigentes antes de afirmar LIV-01 cumplido. |
+| EVD-01 | Dataset literal común, identidades runtime y traza correlacionada sin contenido sensible | `the Harbor cycle dataset is literal, closed, and independent from runtime catalogs`, `the full Harbor dataset cycle activates, dispatches, hands off evidence, and cleans every SDK child`, `the default Harbor cycle dispatches crafter with evidence and cleanup`, `evidence hooks retain only hashes and byte lengths`, `a failing async evidence collector cannot alter child execution or cleanup`, `creation, prompt, and cleanup failures produce bounded truthful evidence traces` y las tres pruebas ORC-01 alimentadas por el mismo dataset |
+| LIV-01 | Selección semántica y comunicación eficiente con inferencia real en Copilot, OpenCode y Pi | smoke Copilot opt-in `live Copilot team-lead selects and orchestrates the Harbor SDLC cycle efficiently` y smokes `live opencode|pi team-lead selects and orchestrates the Harbor SDLC cycle with Codex`: candidatos desordenados, nonce oculto acotado, seis children nativos correlacionados, secuencia exacta, concurrencia máxima uno, identidad/terminación nativas, ausencia de marcadores stale/duplicados, presupuestos raíz/child/total, fixture verificada, tokens positivos, cleanup y reportes sanitizados. La evidencia autenticada anterior al cambio de roster **NO** satisface esta secuencia canónica y **DEBE** regenerarse con los seis compañeros vigentes antes de afirmar LIV-01 cumplido. |
 | COP-01 | MCP estructurado, preflight compartido y runtime generado | `Copilot native control performs deterministic shared contract preflight`, `compiled Copilot MCP servers are bounded and scope every player skill group to its own process`, `Copilot runtime is generated byte-for-byte from shared core`, `generated native runtime retains gh timeout and MCP cancellation guards` y smoke ACP `agent-harbor (connected, plugin)` |
 | GH-01 | Referencias canónicas, snapshot read-only y body invocation-local | `GitHub references are bounded...`, `GitHub resolver pins one branch and one exact blob with two read-only cancellable gh calls`, `default gh runner enforces its process timeout`, `GitHub skill bodies are snapshot-loaded...` y `contract skills are validated and materialized before any SDK child...`; POC manual autenticado con `gh` |
 | PI-01 | API real de Pi, skills aisladas, comandos de roles, delegación nominal y sesión en memoria | smoke de `createAgentSession`, RPC `get_commands`, `Pi gives a child exactly its invocation-scoped skill allowlist`, `Pi extension invokes every fixed and activated agent and equips the team lead for named delegation` y `Pi team lead delegates sequentially to different active agents with bounds and preflight` |

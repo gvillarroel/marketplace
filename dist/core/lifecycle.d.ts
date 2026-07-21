@@ -4,10 +4,6 @@
  * mutations coordinate both locations without overwriting or deleting unmanaged files.
  */
 import type { HarnessSpec, PlayerDefinition } from "./types.js";
-/**
- * Returns whether content has a structurally valid Agent Harbor ownership marker for this player.
- * Ownership authorizes replacement or cleanup; it does not imply the profile is current or invocable.
- */
 export declare function isOwnedProfile(content: string | undefined, id: string, expectedRoster?: "personal" | "sdlc"): boolean;
 /**
  * Strictly validates an external player definition and returns its typed form.
@@ -40,20 +36,17 @@ export declare class Roster {
      */
     join(input: unknown): Promise<string>;
     private bundledBenchInventory;
-    private legacyBenchInventory;
     private registrationEntries;
     private personalBenchState;
     private personalBenchInventory;
     private listBench;
     private planBenchPlayer;
-    private planLegacyCleanup;
     /** Completes every collision/read/render preflight before returning transaction input. */
     private planBenchMutation;
     /**
      * Lists roster state or deterministically turns bundled/personal players on and off.
      * Turning a personal player off removes only its owned active copy; its registration remains the
-     * source of truth. Turning it on requires a recoverable revision-4 registration. Legacy bundled
-     * profiles are recognized only for safe reporting and removal, never reactivation.
+     * source of truth. Turning it on requires a recoverable current registration.
      */
     bench(args: string, bundled: ReadonlyMap<string, PlayerDefinition>): Promise<string>;
     /**

@@ -39,7 +39,7 @@ async function runMission(orchestrator: Orchestrator): Promise<string> {
   return evidence;
 }
 
-test("the factory roster has exactly three active roles and six opt-in SDLC players", () => {
+test("the factory roster has exactly two active roles and six opt-in SDLC players", () => {
   assert.deepEqual([...rolePlayers.keys()], fixedIds);
   assert.deepEqual([...bundledPlayers.keys()], sdlcIds);
   assert.deepEqual(
@@ -303,14 +303,14 @@ test("OpenCode team lead propagates the originating user model to its child prom
     abort: new AbortController().signal,
   };
   assert.equal(await plugin.tool!.harbor_delegate.execute(
-    { agent: "repo-cartographer", task: "Map the bounded fixture." }, execution,
+    { agent: "crafter", task: "Implement the bounded fixture." }, execution,
   ), "verified evidence");
   assert.deepEqual(prompts[0].model, { providerID: openCodeModel.providerID, modelID: openCodeModel.modelID });
   assert.equal(prompts[0].variant, openCodeModel.variant);
 
   originatingModel = undefined;
   await assert.rejects(() => plugin.tool!.harbor_delegate.execute(
-    { agent: "repo-cartographer", task: "Do not fall back to a default model." },
+    { agent: "crafter", task: "Do not fall back to a default model." },
     { ...execution, messageID: "assistant-missing" },
   ), /no explicit model/);
   assert.equal(creates, 1, "a turn without an explicit model must create no child");

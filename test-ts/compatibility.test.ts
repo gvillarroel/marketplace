@@ -76,7 +76,6 @@ async function inspectCopilotEnvironment(launch: Launch, sandbox: string): Promi
   const child = spawn(launch.command, [...launch.prefix,
     "--experimental", "--no-auto-update", "--no-color",
     "--plugin-dir", join(plugins, "agent-foundry"),
-    "--plugin-dir", join(plugins, "repo-cartographer"),
     "--acp", "--stdio",
   ], {
     cwd: root,
@@ -176,7 +175,6 @@ async function inspectCopilotDirectExtension(launch: Launch, sandbox: string, wo
       args: [
         ...launch.prefix, "--experimental", "--no-auto-update", "--no-color",
         "--plugin-dir", join(plugins, "agent-foundry"),
-        "--plugin-dir", join(plugins, "repo-cartographer"),
       ],
     }),
     workingDirectory,
@@ -223,8 +221,7 @@ async function inspectCopilotDirectExtension(launch: Launch, sandbox: string, wo
     for (const id of [...rolePlayers.keys(), ...bundledPlayers.keys()]) {
       const expectedFixed = {
         "team-lead": "agent-foundry:team-lead",
-        "repo-cartographer": "repo-cartographer:repo-cartographer",
-        crafter: "repo-cartographer:crafter",
+        crafter: "agent-foundry:crafter",
       }[id];
       const agent = expectedFixed
         ? refreshed.agents.find((candidate) => candidate.id === expectedFixed)
@@ -287,13 +284,11 @@ test("distribution declares native TypeScript entrypoints", async () => {
     access(join(dist, "adapters", "pi.js")),
     access(join(dist, "core", "commands.js")),
     access(join(plugins, "agent-foundry", "agents", "team-lead.agent.md")),
-    access(join(plugins, "repo-cartographer", "agents", "repo-cartographer.agent.md")),
-    access(join(plugins, "repo-cartographer", "agents", "crafter.agent.md")),
+    access(join(plugins, "agent-foundry", "agents", "crafter.agent.md")),
   ]);
   for (const [path, name] of [
     [join(plugins, "agent-foundry", "agents", "team-lead.agent.md"), "team-lead"],
-    [join(plugins, "repo-cartographer", "agents", "repo-cartographer.agent.md"), "repo-cartographer"],
-    [join(plugins, "repo-cartographer", "agents", "crafter.agent.md"), "crafter"],
+    [join(plugins, "agent-foundry", "agents", "crafter.agent.md"), "crafter"],
   ]) assert.match(await readFile(path, "utf8"), new RegExp(`^---\\nname: ${name}\\n`));
   const teamLead = await readFile(join(plugins, "agent-foundry", "agents", "team-lead.agent.md"), "utf8");
   assert.match(teamLead, /between one and six bounded synchronous `task` calls/i);
@@ -341,8 +336,8 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
     }
     if (directory.endsWith(join("plugins", "agent-foundry"))) assert.deepEqual(localSkills, new Set(["contract"]));
   }
-  assert.deepEqual(skillNames, new Set(["contract", "harbor-repository-map"]));
-  assert.deepEqual(new Set(manifests.map((manifest) => manifest.name)), new Set(["agent-foundry", "repo-cartographer"]));
+  assert.deepEqual(skillNames, new Set(["contract"]));
+  assert.deepEqual(new Set(manifests.map((manifest) => manifest.name)), new Set(["agent-foundry"]));
   const marketplace = JSON.parse(await readFile(join(root, ".github", "plugin", "marketplace.json"), "utf8"));
   const marketplaceVersions = new Map<string, string>(marketplace.plugins.map((plugin: any) => [plugin.name, plugin.version]));
   for (const manifest of manifests) assert.equal(marketplaceVersions.get(manifest.name), manifest.version);
@@ -389,11 +384,11 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
   assert.doesNotMatch(extension, /createSession|\.prompt\(/);
   assert.doesNotMatch(extension, /[\[\"]contract[\]\"]\s*,/);
   assert.match(extension, /catch \(error\)[\s\S]*throw error;/);
-  const crafter = await readFile(join(plugins, "repo-cartographer", "agents", "crafter.agent.md"), "utf8");
-  assert.match(crafter, /"repo-cartographer-crafter-skills\/skills"/);
-  assert.match(crafter, /mcp-servers:\n  repo-cartographer-crafter-skills:/);
-  assert.match(crafter, /"--skills-player", "crafter"/);
-  assert.match(crafter, /`skills` from the player-scoped `repo-cartographer-crafter-skills` MCP server/);
+  const crafter = await readFile(join(plugins, "agent-foundry", "agents", "crafter.agent.md"), "utf8");
+  assert.match(crafter, /"agent-harbor-skills-crafter\/skills"/);
+  assert.match(crafter, /mcp-servers:\n  agent-harbor-skills-crafter:/);
+  assert.match(crafter, /"--skills-player",\s*"crafter"/);
+  assert.match(crafter, /player-scoped `agent-harbor-skills-crafter` MCP server/);
   assert.doesNotMatch(crafter, /"agent-harbor\/skill"/);
   assert.doesNotMatch(crafter, /agent_harbor_skill/);
   const scout = await readFile(join(plugins, "agent-foundry", "agents", "talent-scout.agent.md"), "utf8");
@@ -406,16 +401,10 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
 
 test("Copilot runtimes contain exact physical byte copies of their shared build inputs", async () => {
   const coreFiles = (await readdir(join(dist, "core"))).filter((name) => name.endsWith(".js")).sort();
-  const runtimes = [
-    {
-      name: "agent-foundry",
-      adapters: ["copilot-coordinator.js", "copilot-mcp.js", "copilot.js", "direct.js", "shared.js"],
-    },
-    {
-      name: "repo-cartographer",
-      adapters: ["copilot-mcp.js", "copilot.js", "shared.js"],
-    },
-  ] as const;
+  const runtimes = [{
+    name: "agent-foundry",
+    adapters: ["copilot-coordinator.js", "copilot-mcp.js", "copilot.js", "direct.js", "shared.js"],
+  }] as const;
 
   for (const runtime of runtimes) {
     const runtimeDist = join(plugins, runtime.name, "runtime", "dist");
@@ -423,7 +412,7 @@ test("Copilot runtimes contain exact physical byte copies of their shared build 
     const adapterRoot = join(runtimeDist, "adapters");
     assert.deepEqual((await readdir(runtimeDist)).sort(), ["adapters", "core"]);
     assert.deepEqual((await readdir(coreRoot)).sort(), [...coreFiles, "roles"].sort(), `${runtime.name} must contain generated core JavaScript and fixed role Markdown`);
-    assert.deepEqual((await readdir(join(coreRoot, "roles"))).sort(), ["crafter.md", "repo-cartographer.md", "team-lead.md"]);
+    assert.deepEqual((await readdir(join(coreRoot, "roles"))).sort(), ["crafter.md", "team-lead.md"]);
     assert.deepEqual((await readdir(adapterRoot)).sort(), [...runtime.adapters].sort(), `${runtime.name} adapter inventory`);
 
     for (const directory of [runtimeDist, coreRoot, adapterRoot]) {
@@ -556,7 +545,7 @@ test("compiled Copilot MCP servers are bounded and scope every player skill grou
   await assert.rejects(() => access(home), /ENOENT/);
 
   const crafterScoped = await run({ command: process.execPath, prefix: [] }, [
-    join(plugins, "repo-cartographer", "runtime", "dist", "adapters", "copilot-mcp.js"),
+    join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-mcp.js"),
     "--skills-player", "crafter",
   ], {
     cwd: project,
@@ -661,12 +650,10 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
     t.test("Copilot", { skip: copilot ? false : "Copilot CLI is not installed" }, async () => {
       const result = await run(copilot!, [
         "--plugin-dir", join(plugins, "agent-foundry"),
-        "--plugin-dir", join(plugins, "repo-cartographer"),
         "plugin", "list",
       ], { cwd: root, timeout: 30_000 });
       succeeded(result);
       assert.match(result.stdout, /agent-foundry/);
-      assert.match(result.stdout, /repo-cartographer/);
 
       const sandbox = await mkdtemp(join(tmpdir(), "harbor-copilot-acp-"));
       try {
@@ -689,8 +676,8 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
         assert.ok(direct.commands.some((command) => command.name === "bench" && command.kind === "client"));
         assert.ok([...rolePlayers.keys(), ...bundledPlayers.keys()].every((id) =>
           direct.agents.some((agent) => agent.name === id || agent.id === id || agent.id.endsWith(`:${id}`))));
-        const crafter = direct.agents.find((agent) => agent.id === "repo-cartographer:crafter");
-        assert.deepEqual(crafter?.mcpServers?.["repo-cartographer-crafter-skills"]?.tools, ["skills"]);
+        const crafter = direct.agents.find((agent) => agent.id === "agent-foundry:crafter");
+        assert.deepEqual(crafter?.mcpServers?.["agent-harbor-skills-crafter"]?.tools, ["skills"]);
         const nativeWorker = direct.agents.find((agent) => agent.name === "native-worker" || agent.id === "native-worker");
         assert.ok(nativeWorker, `Copilot must parse the player-scoped MCP profile: ${JSON.stringify(direct.agents)}`);
         assert.ok(nativeWorker.mcpServers?.["agent-harbor-skills-native-worker"]);

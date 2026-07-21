@@ -115,3 +115,21 @@ process that rejects the general lifecycle control. Its join still passes
 through the shared validation and ownership transaction. Catalog description
 tests verify opt-in rendering and filtering without exposing instruction
 bodies, commits, or blobs.
+
+## Retired repo-cartographer plugin gate
+
+Recorded at `2026-07-20T23:49:48-04:00`.
+
+| Command | Result |
+| --- | --- |
+| `npm test` | Passed: 95 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 13,800.407 ms |
+| `npm run typecheck` | Passed |
+| `npm audit --audit-level=high` | Passed: 0 vulnerabilities |
+| `npm pack --dry-run --json` | Passed: 87 entries, 104,200 bytes packed, 479,467 bytes unpacked; contains only `agent-foundry` |
+| `copilot plugin list` after uninstall | Passed: only `agent-foundry@agent-harbor` remains installed |
+| `git diff --check` | Passed |
+
+The retired plugin directory, manifest, duplicated runtime, agents, and
+repository-mapping skill are absent. `crafter` remains functional as
+`agent-foundry:crafter` with its player-scoped skill MCP, and the startup roster
+now contains exactly `team-lead` and `crafter` plus the six opt-in SDLC peers.

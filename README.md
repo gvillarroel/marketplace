@@ -8,10 +8,9 @@ requirements are consolidated in [REQUIREMENTS.md](REQUIREMENTS.md).
 The current technical and operational design is documented in
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
-It contains two plugins:
-
-- `agent-foundry`: five slash controls, a user-level bench, six opt-in SDLC companion definitions rendered on activation, a team lead, and a trusted GitHub-skill catalog.
-- `repo-cartographer`: repository orientation plus a `crafter` agent for minimal zx and TypeScript command examples.
+It contains one plugin: `agent-foundry`, with five slash controls, a user-level
+bench, six opt-in SDLC companion definitions, a team lead, a `crafter`, the
+restricted talent scout, and a trusted GitHub-skill catalog.
 
 ## Install
 
@@ -23,7 +22,6 @@ It contains two plugins:
 ```shell
 copilot plugin marketplace add gvillarroel/marketplace
 copilot plugin install agent-foundry@agent-harbor
-copilot plugin install repo-cartographer@agent-harbor
 ```
 
 ### Update
@@ -31,7 +29,6 @@ copilot plugin install repo-cartographer@agent-harbor
 ```shell
 copilot plugin marketplace update agent-harbor
 copilot plugin update agent-foundry
-copilot plugin update repo-cartographer
 ```
 
 ### Use
@@ -41,7 +38,7 @@ plugin extension then registers `/bench`, `/join`, `/retire`, and
 `/list-skills` as direct client commands: they execute TypeScript without a
 model request or model tokens. `/contract` deliberately remains model-backed
 because it creates exactly one child. Use Copilot's native `/agent` selector
-for `team-lead`, `repo-cartographer`, `crafter`, or players activated through
+for `team-lead`, `crafter`, or players activated through
 `/bench`.
 
 For a prompt sent straight to one named player, use
@@ -72,8 +69,7 @@ The `agent-foundry` plugin also contributes the global `agent-harbor` MCP
 server with only the bounded `control` tool. A player that has configured
 skills receives a separate player-scoped `skills` tool; it performs snapshot
 validation in code before returning invocation-local guidance.
-`repo-cartographer:crafter` therefore requires `agent-foundry` to remain
-enabled, as in the installation sequence above.
+The fixed `agent-foundry:crafter` uses that player-scoped server directly.
 
 Start a new session after installing, updating, or changing project agents.
 The MCP process inherits the folder from which the Copilot session starts; start
@@ -86,7 +82,7 @@ a new session from the target folder after changing projects.
 
 ### Install
 
-Install the package containing both repository plugins directly from this repository's GitHub tarball:
+Install the package directly from this repository's GitHub tarball:
 
 ```shell
 opencode plugin https://github.com/gvillarroel/marketplace/archive/refs/heads/main.tar.gz --global
@@ -116,7 +112,7 @@ The canonical `/bench`, `/join`, `/retire`, `/contract`, and `/list-skills`
 commands remain available for parity, but OpenCode routes that command system
 through the model. For exact argument syntax without inference, use the package
 CLI, for example `agent-harbor opencode bench on portfolio-management`. Select `team-lead`,
-`repo-cartographer`, `crafter`, or an activated player through OpenCode's native
+`crafter` or an activated player through OpenCode's native
 agent interface.
 
 OpenCode also exposes `/harbor-<id> <task>`. Its command configuration uses the
@@ -133,7 +129,7 @@ messages. Its tool enum and description expose the exact startup-active targets,
 so the model does not have to guess the roster. Every generated agent policy starts
 with `"*": false` before enabling its explicit least-privilege tools.
 
-OpenCode does not accept Pi's `git:github.com/…` shorthand, but its current package installer accepts the repository archive URL. The equivalent npm-ready command is `opencode plugin @gvillarroel/agent-harbor --global` once that package is published. The package registers commands and agents from both `agent-foundry` and `repo-cartographer` through OpenCode's plugin configuration hook.
+OpenCode does not accept Pi's `git:github.com/…` shorthand, but its current package installer accepts the repository archive URL. The equivalent npm-ready command is `opencode plugin @gvillarroel/agent-harbor --global` once that package is published. The package registers Agent Harbor commands and agents through OpenCode's plugin configuration hook.
 
 The package installs both an OpenCode server target and a TUI target. The server
 provides the five canonical [commands](https://opencode.ai/docs/commands), tools,
@@ -193,8 +189,8 @@ After publishing a new Git revision, install that revision again (or run `pi ins
 
 Invoke `/bench`, `/join`, `/retire`, or `/list-skills` directly; their native
 handlers perform no model request. `/contract` creates exactly one child by
-design. Invoke `/team-lead <task>`, `/repo-cartographer <task>`,
-`/crafter <task>`, any activated bundled SDLC companion, or any active personal
+design. Invoke `/team-lead <task>`, `/crafter <task>`, any activated bundled
+SDLC companion, or any active personal
 player directly.
 
 `/team-lead` can delegate sequentially to as many as six active specialists
@@ -205,7 +201,7 @@ as sequential, so sibling tool calls cannot open children in parallel. The
 tool schema lists the exact active targets captured when that team-lead session
 starts.
 
-The root `package.json` declares only the compiled Pi extension. Through `ExtensionAPI`, it registers the five lifecycle commands, the three fixed roles, and every ownership-verified active player. Role/player commands create a real in-memory `createAgentSession` child with a native tool allowlist; they are not static prompt templates. Active definitions live privately in the current project's `.pi/agents/`, and mutations register newly active names immediately (a reload removes names that were deactivated during the current session).
+The root `package.json` declares only the compiled Pi extension. Through `ExtensionAPI`, it registers the five lifecycle commands, the two fixed roles, and every ownership-verified active player. Role/player commands create a real in-memory `createAgentSession` child with a native tool allowlist; they are not static prompt templates. Active definitions live privately in the current project's `.pi/agents/`, and mutations register newly active names immediately (a reload removes names that were deactivated during the current session).
 
 </details>
 
@@ -247,7 +243,7 @@ Run a clean TypeScript build, the contract/security suite, and native discovery 
 npm test
 ```
 
-`npm test` is one Node wrapper rather than an npm/`&&` command chain. It rebuilds generated artifacts, removes inherited `NODE_TEST_CONTEXT`, validates each child exit/signal and requires the native runner's TAP summary (`tests > 0`, `fail = 0`), preventing shell propagation quirks, nested-runner state or loaded host code from creating a false green. The suite evaluates all five command contracts across the three runtimes; verifies byte-exact rollback, mutation locking, canonical ownership, idempotency, collisions and leaf/ancestor symlinks; checks remote-body validation, closed tool policies, disposable-session cleanup and double-failure reporting; confirms Copilot/OpenCode discovery; and installs Pi into a temporary home. The agent matrix proves that only the three fixed roles start active and all nine names are available after `bench on all`.
+`npm test` is one Node wrapper rather than an npm/`&&` command chain. It rebuilds generated artifacts, removes inherited `NODE_TEST_CONTEXT`, validates each child exit/signal and requires the native runner's TAP summary (`tests > 0`, `fail = 0`), preventing shell propagation quirks, nested-runner state or loaded host code from creating a false green. The suite evaluates all five command contracts across the three runtimes; verifies byte-exact rollback, mutation locking, canonical ownership, idempotency, collisions and leaf/ancestor symlinks; checks remote-body validation, closed tool policies, disposable-session cleanup and double-failure reporting; confirms Copilot/OpenCode discovery; and installs Pi into a temporary home. The agent matrix proves that only the two fixed roles start active and all eight roster names are available after `bench on all`.
 
 The literal, closed-schema dataset in `test-ts/fixtures/harbor-cycles.json` is independent from the runtime catalog. It defines the default fixed-role map/build cycle and the opt-in six-companion SDLC cycle. The same cases feed the Copilot hooks and the real OpenCode/Pi delegation tools, while a normalized SDK test proves activation, exact target identity, sequential evidence handoff and cleanup in all three orchestrators. Optional evidence hooks store only SHA-256 hashes, UTF-8 sizes and correlation metadata—never raw tasks or responses—and are no-ops unless explicitly injected. Events label their basis as observed or inferred, so Copilot's synchronous terminal fallback is not presented as a native cleanup event. These offline tests exercise no model or network. They prove requested routing and lifecycle mechanics; the separate live smoke below proves model-driven selection.
 
@@ -337,7 +333,7 @@ final-response byte budgets are also enforced. The tests account for native
 root and child usage without gaps. These bounds measure routing, immediate
 handoff and run resources, not universal model quality or cost.
 
-The suite also exercises exact dispatch of all nine OpenCode IDs, direct Pi invocation of all nine, and native Copilot discovery/selection of all nine. Coordinator tests enforce exact active targets, per-user-turn bounds, sequential execution, no recursion and cleanup across Copilot, OpenCode and Pi. A delayed-reload race test proves that stale Copilot discovery cannot overwrite a newer root selection event. The suite proves that every distribution can list the bench without a model, that Pi and OpenCode direct controls cannot enter an orchestrator, and that Copilot's lifecycle command and native agent selection emit no assistant message or usage event. The native CLI checks run concurrently in isolated directories. Missing CLIs skip only their runtime assertion; no Python runtime, live model call, API key, Docker service, or network access is required.
+The suite also exercises exact dispatch of all eight OpenCode roster IDs, direct Pi invocation of all eight, and native Copilot discovery/selection of all eight. Coordinator tests enforce exact active targets, per-user-turn bounds, sequential execution, no recursion and cleanup across Copilot, OpenCode and Pi. A delayed-reload race test proves that stale Copilot discovery cannot overwrite a newer root selection event. The suite proves that every distribution can list the bench without a model, that Pi and OpenCode direct controls cannot enter an orchestrator, and that Copilot's lifecycle command and native agent selection emit no assistant message or usage event. The native CLI checks run concurrently in isolated directories. Missing CLIs skip only their runtime assertion; no Python runtime, live model call, API key, Docker service, or network access is required.
 
 ## Commands
 
@@ -395,7 +391,7 @@ bundled companion profiles:
 
 `portfolio-management → design → build → manage → consume → dispose`
 
-The three fixed roles are active without this command. Their editable source is
+The two fixed roles are active without this command. Their editable source is
 `src/core/roles/*.md`: each file declares `name`, `description`, `order`,
 `tools`, and trusted skill names in closed JSON frontmatter, while its Markdown
 body is the prompt. Add a file and rebuild to include another fixed definition;
@@ -405,21 +401,6 @@ above are only included definitions until activated; discovery and direct
 invocation reject them while they remain on the bench.
 
 Their canonical definitions live once in `src/core/defaults.ts` and are rendered directly into the current harness's native agent directory when activated. A batch is serialized, fully preflighted, written file-atomically, verified, and rolled back byte-for-byte on failure.
-
-For upgrades, the former IDs `scout`, `sage`, `smith`, `probe`, `guard`, and
-`pilot` remain reserved and Agent Harbor will not route or register them. A
-native harness can still discover their old project files until they are
-cleaned and the session is restarted. Run this explicit cleanup before relying
-on the exact six-companion roster:
-
-```text
-/bench off scout sage smith probe guard pilot
-```
-
-It removes only legacy profiles with complete Agent Harbor ownership. Any
-mutation of the new bundled companions, including `/bench on all`, performs the
-same legacy cleanup in its transaction. An unmanaged legacy collision aborts
-the whole mutation and is never overwritten or deleted.
 
 ## Personal players
 
@@ -457,12 +438,10 @@ Here `current-folder` is the Copilot process working directory, resolved indepen
 
 Consequently the player is active where it joined and remains available from every other project through `bench on reviewer`. `bench off reviewer` removes only the active project copy. `retire reviewer` removes the user registration and the managed copy in the current project; copies in other projects remain intentionally untouched.
 
-Version 0.12 renders canonical revision 4 profiles. Revision 4 stores the
-validated definition in every harness profile so the adapter can recover and
-enforce that exact player's skill group. Owned revision 3 profiles remain safe
-to replace or remove, but are not invocable under the new isolation guarantee;
-run `bench on <id>` for bundled players or re-run `join` with `replace:true` for
-personal players. Revisions 1 and 2 are never treated as ownership.
+The canonical profile format uses revision 4 and stores the validated definition
+in every harness profile so the adapter can recover and enforce that exact
+player's skill group. Any other ownership metadata is treated as an unmanaged
+collision and is never overwritten or deleted.
 
 `skills` accepts at most three references with unique names. A repository
 reference points to one exact `SKILL.md` relative to the current project root;
@@ -580,12 +559,11 @@ There are therefore two deliberately separate lists to edit:
 
 ## Agents
 
-The three fixed roles are available at startup and are separate from the
+The two fixed roles are available at startup and are separate from the
 opt-in SDLC companions:
 
 - `agent-foundry:team-lead`: derives the smallest sufficient sequence, preferring one specialist and permitting at most six sequential named delegations when distinct stages are necessary.
-- `repo-cartographer:repo-cartographer`: builds compact evidence-based repository maps.
-- `repo-cartographer:crafter`: loads only its player-scoped trusted zx skill group on every invocation, then creates a minimal self-contained zx or TypeScript command example.
+- `agent-foundry:crafter`: loads only its player-scoped trusted zx skill group on every invocation, then creates a minimal self-contained zx or TypeScript command example.
 
 The six bundled companions start on the bench and represent the ordered SDLC
 when the full cycle is explicitly required. For ordinary work, `team-lead`

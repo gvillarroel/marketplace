@@ -43,7 +43,7 @@ export function nativeTools(harness, tools) {
 function openCodeAllowedTools(tools, additional) {
     return new Set([...nativeTools("opencode", tools), ...additional]);
 }
-/** Builds OpenCode's legacy boolean tool allowlist, explicitly disabling every known tool by default. */
+/** Builds OpenCode's boolean tool allowlist, explicitly disabling every known tool by default. */
 export function openCodeToolPolicy(tools, additional = []) {
     const allowed = openCodeAllowedTools(tools, additional);
     return Object.fromEntries(openCodeToolNames.map((name) => [name, allowed.has(name)]));

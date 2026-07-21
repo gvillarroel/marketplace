@@ -377,7 +377,6 @@ test("live Copilot team-lead selects and orchestrates the Harbor SDLC cycle effi
       args: [
         "--experimental", "--no-auto-update", "--no-color", "--max-ai-credits", String(maxAiCredits),
         "--plugin-dir", join(plugins, "agent-foundry"),
-        "--plugin-dir", join(plugins, "repo-cartographer"),
       ],
     }),
     workingDirectory: project,

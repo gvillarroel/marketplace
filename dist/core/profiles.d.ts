@@ -12,7 +12,7 @@ export declare function normalizeDelegatedTaskPaths(task: string, directory: str
 export declare function scopedOpenCodeExternalDirectoryPolicy(directory: string): Record<string, OpenCodePermissionAction>;
 /** Maps runtime-independent Harbor capabilities to the native tool names of one harness. */
 export declare function nativeTools(harness: HarnessName, tools: readonly HarborTool[]): string[];
-/** Builds OpenCode's legacy boolean tool allowlist, explicitly disabling every known tool by default. */
+/** Builds OpenCode's boolean tool allowlist, explicitly disabling every known tool by default. */
 export declare function openCodeToolPolicy(tools: readonly HarborTool[], additional?: readonly string[]): Record<string, boolean>;
 /**
  * Builds OpenCode's permission policy from Harbor capabilities and invocation-scoped additions.

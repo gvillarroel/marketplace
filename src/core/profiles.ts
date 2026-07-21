@@ -57,7 +57,7 @@ function openCodeAllowedTools(tools: readonly HarborTool[], additional: readonly
   return new Set([...nativeTools("opencode", tools), ...additional]);
 }
 
-/** Builds OpenCode's legacy boolean tool allowlist, explicitly disabling every known tool by default. */
+/** Builds OpenCode's boolean tool allowlist, explicitly disabling every known tool by default. */
 export function openCodeToolPolicy(tools: readonly HarborTool[], additional: readonly string[] = []): Record<string, boolean> {
   const allowed = openCodeAllowedTools(tools, additional);
   return Object.fromEntries(openCodeToolNames.map((name) => [name, allowed.has(name)]));

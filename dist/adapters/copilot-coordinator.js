@@ -10,8 +10,6 @@ import { harnessProfileLayout } from "../core/harnesses.js";
 /** Maps stable Harbor role IDs to Copilot's plugin-qualified runtime IDs. */
 const specializedCopilotRoles = new Map([
     ["team-lead", "agent-foundry:team-lead"],
-    ["repo-cartographer", "repo-cartographer:repo-cartographer"],
-    ["crafter", "repo-cartographer:crafter"],
 ]);
 export const copilotFixedAgentIds = new Map([...rolePlayers.keys()].map((id) => [id, specializedCopilotRoles.get(id) ?? `agent-foundry:${id}`]));
 /** Plugin-qualified identity used only by the explicit `/scout` command. */
