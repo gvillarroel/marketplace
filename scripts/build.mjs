@@ -19,23 +19,31 @@ await Promise.all([dist, ...runtimeTargets.map(({ root }) => root)]
 execFileSync(process.execPath, [fileURLToPath(new URL("../node_modules/typescript/bin/tsc", import.meta.url))], { stdio: "inherit" });
 
 const coreSource = new URL("core/", dist);
+const bundledSource = new URL("../src/core/bundled/", import.meta.url);
+const bundledDist = new URL("core/bundled/", dist);
 const roleSource = new URL("../src/core/roles/", import.meta.url);
 const roleDist = new URL("core/roles/", dist);
 const adapterSource = new URL("adapters/", dist);
 const coreFiles = (await readdir(coreSource)).filter((name) => name.endsWith(".js"));
-await cp(roleSource, roleDist, { recursive: true });
+await Promise.all([
+  cp(bundledSource, bundledDist, { recursive: true }),
+  cp(roleSource, roleDist, { recursive: true }),
+]);
 
 async function copyRuntime({ root, adapters }) {
   const coreTarget = new URL("core/", root);
   const adapterTarget = new URL("adapters/", root);
+  const bundledTarget = new URL("bundled/", coreTarget);
   const roleTarget = new URL("roles/", coreTarget);
   await Promise.all([
     mkdir(coreTarget, { recursive: true }),
     mkdir(adapterTarget, { recursive: true }),
+    mkdir(bundledTarget, { recursive: true }),
     mkdir(roleTarget, { recursive: true }),
   ]);
   await Promise.all([
     ...coreFiles.map((name) => cp(new URL(name, coreSource), new URL(name, coreTarget))),
+    cp(bundledSource, bundledTarget, { recursive: true }),
     cp(roleSource, roleTarget, { recursive: true }),
     ...adapters.map((name) => cp(new URL(name, adapterSource), new URL(name, adapterTarget))),
   ]);
@@ -44,8 +52,8 @@ async function copyRuntime({ root, adapters }) {
 await Promise.all(runtimeTargets.map(copyRuntime));
 
 // Hand-tuned roles retain their plugin assets. Every other Markdown role gets
-// Markdown role gets a deterministic least-privilege Copilot asset so adding a
-// file to src/core/roles is sufficient after rebuilding.
+// a deterministic least-privilege Copilot asset so adding a file to
+// src/core/roles is sufficient after rebuilding.
 const generatedAgentRoot = new URL("../plugins/agent-foundry/agents/", import.meta.url);
 const generatedSuffix = ".generated.agent.md";
 const existing = await readdir(generatedAgentRoot);

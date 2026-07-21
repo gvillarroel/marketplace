@@ -28,7 +28,7 @@ aproximadamente 88 % del método menor.
 
 La simplificación no puede cambiar:
 
-- texto, orden ni estados de `/bench`, incluido `all` y cleanup legacy;
+- texto, orden ni estados actuales de `/bench`, incluido `all`;
 - bytes canónicos de perfiles revision 4 ni su definición recuperable;
 - ownership, detección de colisiones, containment y rechazo de symlinks;
 - preflight completo antes de mutar, escritura atómica, verificación y rollback
