@@ -250,6 +250,7 @@ test("distribution declares native TypeScript entrypoints", async () => {
   assert.equal(manifest.exports["./tui"], "./dist/adapters/opencode-tui.js");
   assert.ok(manifest.files.includes("REQUIREMENTS.md"));
   assert.ok(manifest.files.includes("ARCHITECTURE.md"));
+  assert.ok(manifest.files.includes("SIMPLIFICATION-PLAN.md"));
   assert.deepEqual(manifest.pi.extensions, ["./dist/adapters/pi.js"]);
   assert.ok(!("prompts" in manifest.pi));
   assert.equal(manifest.engines.node, ">=22.19.0");

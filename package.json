@@ -17,6 +17,7 @@
   "files": [
     "ARCHITECTURE.md",
     "REQUIREMENTS.md",
+    "SIMPLIFICATION-PLAN.md",
     "dist/",
     "plugins/"
   ],

@@ -4,6 +4,9 @@ Este documento describe la implementación actual de Agent Harbor 0.12.0. Es
 operativo y explicativo; [REQUIREMENTS.md](REQUIREMENTS.md) sigue siendo la
 fuente normativa cuando exista una discrepancia.
 
+La reducción de complejidad aplicada sobre esta arquitectura, sus límites y
+sus métricas están en [SIMPLIFICATION-PLAN.md](SIMPLIFICATION-PLAN.md).
+
 ## Principios e invariantes
 
 1. **Un solo core.** Validación, comandos, roster, ownership, rendering, skills
@@ -53,7 +56,7 @@ flowchart LR
 
 | Capa | Responsabilidad | Regla de imports |
 | --- | --- | --- |
-| `src/core` | Tipos, catálogo, comandos, perfiles, roster, active discovery, GitHub, skills y evidencia normalizada. | Sólo Node y otros módulos del core; no importa SDKs ni adapters. `profiles.ts` calcula la ruta compilada de `copilot-mcp.js` para renderizar perfiles, pero no importa ese adapter. |
+| `src/core` | Tipos, identidad/layout, catálogo, comandos, perfiles, roster, active discovery, GitHub, skills y evidencia normalizada. | Sólo Node y otros módulos del core; no importa SDKs ni adapters. `profiles.ts` calcula la ruta compilada de `copilot-mcp.js` para renderizar perfiles, pero no importa ese adapter. |
 | `src/adapters` | Registro nativo, superficies directas, traducción de tools/permisos y preflight específico del host. | Puede importar core, su SDK y orchestrators. No debe duplicar reglas de negocio del roster. |
 | `src/orchestrators` | Preparar, crear, ejecutar y limpiar un child con el SDK de un harness. | Importa core y un SDK; no registra ni muta players persistentes. |
 | `src/cli.ts` | Bin portable `agent-harbor`; despacha controles directos y el contrato programático de Copilot. | Importa el backend compartido y carga el orquestador Copilot sólo cuando hace falta. |
@@ -65,6 +68,11 @@ Los contratos públicos básicos están en `src/core/types.ts`: `PlayerDefinitio
 `ContractDefinition`, `HarnessSpec`, `Orchestrator`, `SkillReference` y los
 nombres de comando. `src/core/commands.ts:executeCommand` es el único switch de
 los cinco comandos.
+
+`src/core/identity.ts` es la única definición de la sintaxis de IDs compartida
+por players y skills. `src/core/harnesses.ts` concentra directorio activo y
+extensión por harness; rendering, discovery y resolución Copilot consumen el
+mismo layout.
 
 ## Entrypoints y superficies nativas
 
@@ -124,7 +132,7 @@ completo antes de crear el child.
 | --- | --- | --- |
 | Copilot plugin | `runCopilotControl` valida y devuelve exactamente `{agent_type, description, prompt}`; `plugins/agent-foundry/skills/contract/SKILL.md` llama una vez al `task` nativo. | El host posee el lifecycle del único child. El tipo es `general-purpose`, `task` o `explore` según tools. |
 | Copilot programático/CLI | `CopilotOrchestrator.run` | Un `CopilotClient` y una custom-agent session, sin config discovery, con tools/skills exactas; luego delete session y stop client. |
-| OpenCode | `OpenCodeOrchestrator.run` | Una `client.session.create`; agente runtime `general` si edita/ejecuta y `explore` en otro caso; tools cerradas; `session.delete` en `finally`. |
+| OpenCode | `OpenCodeOrchestrator.run` | Una `client.session.create`; agente runtime `general` si edita/ejecuta y `explore` en otro caso; tools cerradas; `session.delete` en `finally`. `run` y `runAgent` preparan sus diferencias y comparten un único lifecycle privado. |
 | Pi | `PiOrchestrator.run` | Una `createAgentSession` con `SessionManager.inMemory`, tools exactas y resource loader aislado; `dispose` en `finally`. |
 
 Un fallo de ejecución y otro de cleanup se conservan juntos en un
@@ -165,7 +173,8 @@ dispose`. Para tareas ordinarias no se abre la cadena completa por defecto.
 
 ## Persistencia, ownership y estados
 
-`src/core/profiles.ts:harnessSpec` define dos destinos por harness:
+`src/core/harnesses.ts:harnessProfileLayout` define el destino activo y
+`src/core/profiles.ts:harnessSpec` lo combina con el registro bajo el home:
 
 | Harness | Registro personal bajo el home | Copia activa bajo el proyecto |
 | --- | --- | --- |
@@ -226,9 +235,11 @@ Después verifica bytes o ausencia. Si algo falla, restaura el lote en orden
 inverso; si también falla el rollback lanza un `AggregateError` que conserva
 todos los errores. Nunca elimina directorios.
 
-`join` y `retire` son transacciones de dos archivos. Un `bench on|off` de varios
-IDs es una sola transacción y su preflight incluye el cleanup de perfiles SDLC
-legacy owned. Una colisión legacy unmanaged aborta todo el lote.
+`join` y `retire` son transacciones de dos archivos. `Roster.bench` separa
+parsing, inventario y planificación; un `bench on|off` de varios IDs toma un
+solo lock, completa todo el plan y recién entonces ejecuta una sola transacción.
+El preflight incluye el cleanup de perfiles SDLC legacy owned. Una colisión
+legacy unmanaged aborta todo el lote.
 
 ## Rendering y discovery seguro
 
@@ -248,7 +259,8 @@ sandbox del sistema operativo.
 
 `src/core/active.ts` es la puerta de discovery de Agent Harbor:
 
-1. limita el directorio activo a 200 candidatos;
+1. limita el directorio activo a 200 candidatos y escanea cada candidato una
+   sola vez para proyectar las vistas `owned` y `managed` desde los mismos bytes;
 2. rechaza symlinks en el directorio, ancestros o entradas;
 3. acepta sólo IDs válidos, archivos regulares de hasta 30.000 bytes y
    ownership de la clase esperada;
