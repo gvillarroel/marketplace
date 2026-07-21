@@ -1,9 +1,11 @@
+/** One-child Copilot SDK orchestration with isolated skills and full cleanup. */
 import { CopilotClient, approveAll } from "@github/copilot-sdk";
 import { GhResolver } from "../core/github.js";
 import { trustedSkills } from "../core/defaults.js";
 import { emitHarborEvidence, fingerprintHarborEvidence } from "../core/evidence.js";
 import { composePlayerInstructions, nativeTools } from "../core/profiles.js";
 import { createSkillCapsule } from "../core/skills.js";
+/** Executes invocation-scoped contracts through the Copilot SDK. */
 export class CopilotOrchestrator {
     createClient;
     directory;
@@ -16,6 +18,10 @@ export class CopilotOrchestrator {
         this.github = github;
         this.evidenceHook = evidenceHook;
     }
+    /**
+     * Creates exactly one custom-agent session, returns its non-empty evidence,
+     * and always deletes the session, stops the client, and removes its capsule.
+     */
     async run(definition, signal) {
         signal?.throwIfAborted();
         const capsule = await createSkillCapsule(definition, this.directory, this.github, trustedSkills, signal);
@@ -101,6 +107,8 @@ export class CopilotOrchestrator {
             });
         }
         finally {
+            // Cleanup errors remain observable. If execution also failed, preserve
+            // both causes in one AggregateError instead of masking either failure.
             const cleanupErrors = [];
             if (abort)
                 signal?.removeEventListener("abort", abort);

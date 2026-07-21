@@ -1,4 +1,9 @@
+/**
+ * Command parsing and dispatch for deterministic roster operations and one-shot contracts.
+ * This layer contains no harness-specific rendering or lifecycle mutation logic.
+ */
 import { validatePlayer } from "./lifecycle.js";
+/** Parses and validates the single JSON object accepted by `/contract`. */
 export function parseContractDefinition(args) {
     const raw = JSON.parse(args);
     if (!raw || typeof raw !== "object" || Array.isArray(raw))
@@ -10,6 +15,10 @@ export function parseContractDefinition(args) {
         throw new Error("contract requires a non-empty task");
     return { ...validatePlayer(playerInput), task };
 }
+/**
+ * Routes one validated command to its deterministic service or contract orchestrator.
+ * Skill listing resolves each configured branch to immutable commit and blob identities.
+ */
 export async function executeCommand(name, args, context, signal) {
     switch (name) {
         case "bench": return context.roster.bench(args, context.bundled);

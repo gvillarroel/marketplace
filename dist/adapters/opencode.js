@@ -8,6 +8,10 @@ import { formatLoadedSkillGroup, loadConfiguredSkills } from "../core/skills.js"
 import { commandNames } from "../core/types.js";
 import { OpenCodeOrchestrator } from "../orchestrators/opencode.js";
 import { harborContext } from "./shared.js";
+/**
+ * Creates the OpenCode plugin configuration, command tools, named players, and
+ * bounded team-lead delegation for the current project directory.
+ */
 export const AgentHarborPlugin = async ({ client, directory }) => {
     const teamLead = rolePlayers.get("team-lead");
     const repoCartographer = rolePlayers.get("repo-cartographer");
@@ -25,6 +29,8 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
     for (const id of [...rolePlayers.keys(), ...bundledPlayers.keys()])
         directAgentCommands.set(`harbor-${id}`, id);
     const originatingUserMessage = async (sessionID, messageID, currentDirectory) => {
+        // SDK-created assistant messages do not reliably repeat the root model.
+        // Walk the bounded ancestry and recover the explicit originating user turn.
         const seen = new Set();
         let cursor = messageID;
         for (let depth = 0; depth < 64; depth += 1) {
@@ -127,6 +133,8 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                 },
             };
             const managedIds = new Set(listManagedActiveIds("opencode", directory));
+            // Owned-but-stale profiles must be removed from host discovery. Leaving
+            // an old host entry could silently retain broader tools than revision 4.
             for (const id of listOwnedActiveIds("opencode", directory)) {
                 if (!managedIds.has(id))
                     delete config.agent[id];

@@ -1,5 +1,11 @@
+/**
+ * Built-in SDLC players, fixed coordination roles, and trusted remote skill references.
+ * These definitions are policy-bearing defaults consumed by every harness renderer.
+ */
 const honorOutputContract = " Honor every explicit completion and output-format contract literally, including required standalone final lines.";
+/** Retired bundled identifiers retained solely for safe discovery and cleanup. */
 export const legacyBundledPlayerIds = ["scout", "sage", "smith", "probe", "guard", "pilot"];
+/** Ordered lifecycle peers that users can deterministically place on or off the active roster. */
 export const bundledPlayers = new Map([
     ["portfolio-management", {
             name: "portfolio-management",
@@ -38,6 +44,7 @@ export const bundledPlayers = new Map([
             tools: [],
         }],
 ]);
+/** Exact GitHub skill references permitted in player definitions; branch heads are pinned when loaded. */
 export const trustedSkills = [{
         kind: "github",
         name: "zx-example-author",
@@ -45,6 +52,7 @@ export const trustedSkills = [{
         path: "skills/zx-example-author/SKILL.md",
         track: "refs/heads/main",
     }];
+/** Fixed, always-invocable roles supplied by Agent Harbor rather than project profile files. */
 export const rolePlayers = new Map([
     ["team-lead", {
             name: "team-lead",

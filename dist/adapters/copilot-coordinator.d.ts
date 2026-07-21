@@ -1,9 +1,11 @@
 import { type HarborEvidenceHook } from "../core/evidence.js";
+/** Minimal host identity needed to resolve a logical Harbor player. */
 export interface CopilotAgentIdentity {
     id: string;
     path?: string;
     userInvocable?: boolean;
 }
+/** Narrow RPC surface used to refresh Copilot's selected and available agents. */
 export interface CopilotCoordinatorSession {
     rpc: {
         agent: {
@@ -40,12 +42,14 @@ interface PreToolDecision {
     permissionDecision: "allow" | "deny";
     permissionDecisionReason?: string;
 }
+/** Hook callbacks installed into the Copilot extension session. */
 export interface CopilotCoordinatorHooks {
     onUserPromptSubmitted(input: UserPromptHookInput, invocation: HookInvocation): Promise<void>;
     onPreToolUse(input: ToolHookInput, invocation: HookInvocation): Promise<PreToolDecision | void>;
     onPostToolUse(input: PostToolHookInput, invocation: HookInvocation): Promise<void>;
     onPostToolUseFailure(input: PostToolFailureHookInput, invocation: HookInvocation): Promise<void>;
 }
+/** Stateful guard plus host-event observer used by the Copilot extension. */
 export interface CopilotCoordinatorGuard {
     hooks: CopilotCoordinatorHooks;
     refresh(): Promise<void>;
@@ -66,9 +70,11 @@ export interface CopilotCoordinatorGuard {
         };
     }): void;
 }
+/** Maps stable Harbor role IDs to Copilot's plugin-qualified runtime IDs. */
 export declare const copilotFixedAgentIds: ReadonlyMap<string, string>;
+/** Lists canonical active project profile IDs without trusting arbitrary files. */
 export declare function listCopilotActiveProfileIds(project: string): string[];
-/** Resolve one logical Harbor ID to the exact Copilot agent exposed by the host. */
+/** Resolves one logical ID to exactly one currently invocable Copilot identity. */
 export declare function resolveCopilotPlayer(id: string, agents: readonly CopilotAgentIdentity[], project: string): CopilotAgentIdentity;
 /**
  * Enforce the team-lead contract around Copilot's native synchronous `task`

@@ -1,3 +1,8 @@
+/**
+ * Canonical profile rendering, decoding, and runtime-specific least-privilege policies.
+ * Revision-4 profiles carry a self-contained definition so active files can be validated without
+ * trusting mutable registration state.
+ */
 import { Buffer } from "node:buffer";
 import { lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
@@ -11,6 +16,7 @@ const openCodeToolNames = ["*", "invalid", "question", "bash", "read", "glob", "
 function regexEscape(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
+/** Rewrites occurrences of the delegated working directory to `.` in child task text. */
 export function normalizeDelegatedTaskPaths(task, directory) {
     const root = resolve(directory);
     const variants = new Set([root, root.replace(/\\/gu, "/"), root.replace(/\//gu, "\\")]);
@@ -20,6 +26,7 @@ export function normalizeDelegatedTaskPaths(task, directory) {
     }
     return normalized;
 }
+/** Builds OpenCode's deny-by-default external-directory exception for one working tree. */
 export function scopedOpenCodeExternalDirectoryPolicy(directory) {
     const root = resolve(directory);
     return {
@@ -28,13 +35,20 @@ export function scopedOpenCodeExternalDirectoryPolicy(directory) {
         [`${root.replace(/\\/gu, "/")}/**`]: "allow",
     };
 }
+/** Maps runtime-independent Harbor capabilities to the native tool names of one harness. */
 export function nativeTools(harness, tools) {
     return [...new Set(tools.flatMap((tool) => toolMap[harness][tool]))];
 }
+/** Builds OpenCode's legacy boolean tool allowlist, explicitly disabling every known tool by default. */
 export function openCodeToolPolicy(tools, additional = []) {
     const allowed = new Set([...nativeTools("opencode", tools), ...additional]);
     return Object.fromEntries(openCodeToolNames.map((name) => [name, allowed.has(name)]));
 }
+/**
+ * Builds OpenCode's permission policy from Harbor capabilities and invocation-scoped additions.
+ * Delegation, network access, questions, and ambient skills remain denied unless an exact additional
+ * tool is explicitly supplied; external filesystem access is limited to the delegated directory.
+ */
 export function openCodePermissionPolicy(tools, additional = [], directory) {
     const allowed = new Set([...nativeTools("opencode", tools), ...additional]);
     return {
@@ -83,6 +97,7 @@ function configuredSkillInstructions(player, harness) {
         "The harness supplies this exact group through its invocation-scoped skill configuration. Do not use an ambient or globally installed skill with the same or another name.",
     ];
 }
+/** Composes the stable identity, player prompt, efficiency rules, and skill bootstrap contract. */
 export function composePlayerInstructions(player, harness) {
     return [
         `Identity: ${player.name}`,
@@ -91,6 +106,7 @@ export function composePlayerInstructions(player, harness) {
         ...configuredSkillInstructions(player, harness),
     ].join("\n");
 }
+/** Renders the complete one-shot task prompt while restating the contracted tool boundary. */
 export function composeContractPrompt(definition, additionalTools = []) {
     return [
         `Description: ${definition.description}`,
@@ -102,10 +118,12 @@ export function composeContractPrompt(definition, additionalTools = []) {
         definition.task,
     ].join("\n");
 }
+// `replace` authorizes a lifecycle mutation but is not part of the executable player definition.
 function encodedPlayer(player) {
     const { replace: _replace, ...definition } = player;
     return Buffer.from(JSON.stringify(definition), "utf8").toString("base64url");
 }
+/** Decodes a revision-4 embedded definition and verifies that it belongs to the requested player. */
 export function decodePlayer(content, id) {
     const match = /^<!-- agent-foundry:definition ([A-Za-z0-9_-]+) -->$/m.exec(content);
     if (!match || match[1].length > 40_000)
@@ -115,6 +133,11 @@ export function decodePlayer(content, id) {
         throw new Error(`managed definition mismatch: ${id}`);
     return decoded;
 }
+/**
+ * Renders the canonical revision-4 active/registration profile for a harness.
+ * The ownership metadata, embedded definition, tool policy, and instructions form one executable
+ * representation; discovery treats mutations to any of them as stale rather than silently trusting them.
+ */
 export function renderPlayer(harness, player, roster, project) {
     const mapped = nativeTools(harness, player.tools);
     const common = [
@@ -158,6 +181,9 @@ export function renderPlayer(harness, player, roster, project) {
     common.push("", composePlayerInstructions(player, harness), "");
     return common.join("\n");
 }
+// Installed packages can move while retaining the exact MCP adapter bytes. For Copilot skill profiles,
+// accept only that path relocation: both entrypoints must be regular, non-symlinked, byte-identical files,
+// and every other byte of the profile must still equal the freshly rendered canonical form.
 function copilotRuntimeEquivalentProfile(content, canonical, id) {
     const extract = (profile) => {
         const matches = [...profile.matchAll(/^    args: (.+)$/gmu)];
@@ -193,11 +219,16 @@ function copilotRuntimeEquivalentProfile(content, canonical, id) {
     }
     return content === canonical.replace(expected.line, actual.line);
 }
+/**
+ * Tests whether an owned profile exactly matches its validated definition and current renderer.
+ * Copilot skill profiles permit only a byte-verified relocation of the local MCP entrypoint.
+ */
 export function isCanonicalPlayerProfile(content, harness, player, roster, project) {
     const canonical = renderPlayer(harness, player, roster, project);
     return content === canonical || Boolean(harness === "copilot" && player.skills?.length &&
         copilotRuntimeEquivalentProfile(content, canonical, player.name));
 }
+/** Creates the filesystem layout and bound canonical renderer for one harness/project pair. */
 export function harnessSpec(name, home, project) {
     const values = {
         copilot: { activeDir: ".github/agents", extension: ".agent.md" },

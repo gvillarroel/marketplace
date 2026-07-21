@@ -1,3 +1,8 @@
+/**
+ * Persistent roster lifecycle with ownership-aware collision handling and transactional updates.
+ * Registration lives under the user's harness home while active profiles live in one project;
+ * mutations coordinate both locations without overwriting or deleting unmanaged files.
+ */
 import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
@@ -66,6 +71,9 @@ async function rejectSymlinkTraversal(root, target) {
         }
     }
 }
+// Ownership is intentionally narrower than validity: this recognizes only the structural marker and
+// trailing metadata emitted by Agent Harbor. Revision 3 remains recognizable for collision-safe
+// migration and cleanup, but only canonical revision-4 profiles embed a recoverable definition.
 function ownedProfileRevision(content, id, expectedRoster) {
     if (!content?.startsWith("---\n"))
         return undefined;
@@ -96,9 +104,18 @@ function ownedProfileRevision(content, id, expectedRoster) {
         ? revision
         : undefined;
 }
+/**
+ * Returns whether content has a structurally valid Agent Harbor ownership marker for this player.
+ * Ownership authorizes replacement or cleanup; it does not imply the profile is current or invocable.
+ */
 export function isOwnedProfile(content, id, expectedRoster) {
     return ownedProfileRevision(content, id, expectedRoster) !== undefined;
 }
+/**
+ * Strictly validates an external player definition and returns its typed form.
+ * Unknown keys, duplicate capabilities, reserved names, untrusted GitHub skills, and skill-bearing
+ * definitions without read access are rejected before any filesystem mutation occurs.
+ */
 export function validatePlayer(value, allowReserved = false) {
     if (!value || typeof value !== "object" || Array.isArray(value))
         throw new Error("expected one JSON object");
@@ -145,8 +162,14 @@ export function validatePlayer(value, allowReserved = false) {
     }
     return input;
 }
+/**
+ * Owns deterministic join, bench, and retire operations for one harness/project pair.
+ * Every mutation is serialized by the home-scoped roster lock and committed across registration
+ * and active paths as a verified transaction with best-effort full rollback.
+ */
 export class Roster {
     spec;
+    /** Binds lifecycle operations to one harness's home, project, layout, and renderer. */
     constructor(spec) {
         this.spec = spec;
     }
@@ -158,6 +181,10 @@ export class Roster {
         }
         throw new Error(`unsafe transaction path: ${path}`);
     }
+    // The lock is shared through the harness home, so concurrent projects cannot race updates to the
+    // same persistent registration. `wx` provides exclusive acquisition. A dead owner's lock is removed
+    // only after its structured ownership record is re-read unchanged; foreign or malformed locks are
+    // collisions, never cleanup candidates. Release likewise verifies the token before deleting the file.
     async withMutationLock(action) {
         const path = contained(this.spec.home, join(this.spec.home, this.spec.registrationDir, ".roster.lock"));
         await rejectSymlinkTraversal(this.spec.home, path);
@@ -238,6 +265,7 @@ export class Roster {
             await rm(path, { force: true });
         }
     }
+    /** Applies one transaction step; protected to support failure injection without weakening checks. */
     async applyChange(change, _index) {
         try {
             if ((await lstat(change.path)).isSymbolicLink())
@@ -252,6 +280,9 @@ export class Roster {
         else
             await atomicWrite(change.path, change.content);
     }
+    // Snapshot exact bytes before writing, apply in declared order, then verify every destination byte.
+    // Any failure restores snapshots in reverse order. Rollback failures are retained alongside the
+    // original error so callers are never told that an incomplete restoration succeeded.
     async transaction(changes) {
         const before = await Promise.all(changes.map(async ({ path }) => {
             await rejectSymlinkTraversal(this.rootFor(path), path);
@@ -302,6 +333,11 @@ export class Roster {
         const active = contained(this.spec.project, join(this.spec.project, this.spec.activeDir, `${id}${this.spec.extension}`));
         return { registration, active };
     }
+    /**
+     * Validates and joins a personal player by writing identical registration and active profiles.
+     * Unmanaged collisions are never replaced. A differing owned profile requires `replace: true`,
+     * and both files either verify successfully or are restored to their prior exact bytes.
+     */
     async join(input) {
         const player = validatePlayer(input);
         const content = this.spec.renderPlayer(player, "personal");
@@ -322,6 +358,12 @@ export class Roster {
             return `joined ${player.name}\nregistration: ${paths.registration}\nactive: ${paths.active}`;
         });
     }
+    /**
+     * Lists roster state or deterministically turns bundled/personal players on and off.
+     * Turning a personal player off removes only its owned active copy; its registration remains the
+     * source of truth. Turning it on requires a recoverable revision-4 registration. Legacy bundled
+     * profiles are recognized only for safe reporting and removal, never reactivation.
+     */
     async bench(args, bundled) {
         const value = args.trim();
         if (!value || value === "list" || value.startsWith("list ")) {
@@ -457,6 +499,10 @@ export class Roster {
             ].join("\n");
         });
     }
+    /**
+     * Removes an owned personal registration and this project's owned active copy transactionally.
+     * Active copies in other projects are intentionally outside the transaction and remain untouched.
+     */
     async retire(id) {
         if (!idPattern.test(id) || reserved.has(id))
             throw new Error("invalid personal player");

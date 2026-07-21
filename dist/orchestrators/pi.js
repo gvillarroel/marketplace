@@ -1,3 +1,4 @@
+/** Pi in-memory child orchestration with a fail-closed skill registry. */
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { GhResolver } from "../core/github.js";
@@ -10,6 +11,8 @@ function pathKey(path) {
     return process.platform === "win32" ? absolute.toLowerCase() : absolute;
 }
 function assertIsolatedSkills(result, expectedSkills) {
+    // Pi's loader remains the parser of record, but every discovered name and
+    // physical file must exactly match the invocation capsule allowlist.
     if (result.diagnostics.length) {
         const details = result.diagnostics.map((diagnostic) => `${diagnostic.type}: ${diagnostic.message}${diagnostic.path ? ` (${diagnostic.path})` : ""}`).join("; ");
         throw new Error(`Pi rejected the isolated skill capsule diagnostics: ${details}`);
@@ -42,6 +45,7 @@ async function cleanupCapsuleAfterPreparationFailure(capsule, failure) {
     }
     throw failure;
 }
+/** Executes each contract in one isolated, in-memory Pi SDK session. */
 export class PiOrchestrator {
     directory;
     loadSdk;
@@ -60,6 +64,10 @@ export class PiOrchestrator {
         this.evidenceHook = evidenceHook;
         this.sessionOptions = sessionOptions;
     }
+    /**
+     * Loads only the invocation capsule, creates one child, captures text
+     * evidence, and disposes every session/capsule resource on all exit paths.
+     */
     async run(definition, signal) {
         signal?.throwIfAborted();
         const capsule = await createSkillCapsule(definition, this.directory, this.github, trustedSkills, signal);
@@ -161,6 +169,8 @@ export class PiOrchestrator {
             });
         }
         finally {
+            // Preserve all cleanup failures, and combine them with a prompt failure
+            // when both occur so callers never receive a misleading single cause.
             const cleanupErrors = [];
             signal?.removeEventListener("abort", abort);
             if (abortPromise) {

@@ -3,6 +3,7 @@ import { trustedSkills } from "../core/defaults.js";
 import { emitHarborEvidence, fingerprintHarborEvidence } from "../core/evidence.js";
 import { composeContractPrompt, openCodeToolPolicy } from "../core/profiles.js";
 import { loadConfiguredSkills, withLoadedSkillGuidance } from "../core/skills.js";
+/** Executes each OpenCode delegation or contract in one disposable session. */
 export class OpenCodeOrchestrator {
     client;
     directory;
@@ -15,6 +16,7 @@ export class OpenCodeOrchestrator {
         this.github = github;
         this.evidenceHook = evidenceHook;
     }
+    /** Runs an exact named OpenCode agent using an explicit inherited model. */
     async runAgent(agent, task, parentID, model, signal) {
         signal?.throwIfAborted();
         if (!agent.trim())
@@ -92,6 +94,8 @@ export class OpenCodeOrchestrator {
             });
         }
         finally {
+            // Deleting the child is part of correctness, not best-effort telemetry;
+            // execution and cleanup failures are therefore reported together.
             let cleanupError;
             try {
                 const removed = await this.client.session.delete({ path: { id }, query: { directory: this.directory }, throwOnError: true });
@@ -118,6 +122,7 @@ export class OpenCodeOrchestrator {
             throw failure;
         return output;
     }
+    /** Runs one portable contract using a closed OpenCode tool policy. */
     async run(definition, signal) {
         signal?.throwIfAborted();
         const loaded = await loadConfiguredSkills(definition, this.directory, this.github, trustedSkills, signal);

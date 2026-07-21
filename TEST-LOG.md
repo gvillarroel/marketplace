@@ -8,15 +8,15 @@ credentials.
 
 ## Final offline gate
 
-Recorded at `2026-07-20T22:30:16-04:00`.
+Recorded at `2026-07-20T22:38:11-04:00`.
 
 | Command | Result |
 | --- | --- |
-| `npm test` | Passed: 82 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 23,549.546 ms |
+| `npm test` | Passed: 82 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 19,661.454 ms |
 | Native CLI discovery inside `npm test` | Passed: Copilot CLI, OpenCode and Pi |
 | `npm run typecheck` | Passed |
 | `npm audit --audit-level=high` | Passed: 0 vulnerabilities |
-| `npm pack --dry-run --json` | Passed: 84 entries, 70,492 bytes packed, 409,147 bytes unpacked |
+| `npm pack --dry-run --json` | Passed: 85 entries, 91,359 bytes packed, 490,268 bytes unpacked; includes `ARCHITECTURE.md` |
 | `node scripts/run-live-codex-leads.mjs all --verify-report-only` | Passed: both Codex live reports have the expected schema, status and freshness |
 | `node scripts/run-live-lead.mjs --verify-report-only` | Passed: the Copilot v2 live report has the expected schema, status and freshness |
 | `git diff --check` | Passed |

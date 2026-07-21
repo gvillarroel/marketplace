@@ -1,3 +1,8 @@
+/**
+ * Loading and invocation-scoped isolation of configured repository and GitHub skills.
+ * Only each referenced `SKILL.md` body crosses the boundary: sibling files and ambient skills are
+ * deliberately excluded, and remote content is loaded from an allowlisted pinned commit.
+ */
 import { Buffer } from "node:buffer";
 import { mkdtemp, lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -13,6 +18,7 @@ function safeRepositoryPath(value) {
     return segments.every((segment) => segment !== "" && segment !== "." && segment !== ".." &&
         segmentPattern.test(segment) && !segment.toLowerCase().endsWith(".lock"));
 }
+/** Validates a project-relative reference to one traversal-safe `SKILL.md` file. */
 export function validateRepositorySkill(value) {
     if (!value || typeof value !== "object" || Array.isArray(value))
         throw new Error("invalid repository skill reference");
@@ -26,6 +32,7 @@ export function validateRepositorySkill(value) {
     }
     return skill;
 }
+/** Dispatches strict validation according to the skill reference discriminator. */
 export function validateSkillReference(value) {
     if (value && typeof value === "object" && !Array.isArray(value) && value.kind === "repo") {
         return validateRepositorySkill(value);
@@ -40,6 +47,8 @@ function contained(root, target) {
         throw new Error(`repository skill escapes the project: ${target}`);
     return child;
 }
+// Lexical containment, component-by-component symlink rejection, and final realpath containment are
+// all required: no project-local skill may redirect the loader outside the supplied project root.
 async function readRepositorySkill(skill, project) {
     const root = resolve(project);
     const target = contained(root, join(root, ...skill.path.split("/")));
@@ -68,6 +77,11 @@ async function readRepositorySkill(skill, project) {
     contained(physicalRoot, physicalTarget);
     return { reference: skill, body: parseSkillBody(await readFile(target), skill.name, "repository") };
 }
+/**
+ * Loads every explicitly configured skill after validating unique names and source trust.
+ * Repository sources are confined to the project, GitHub sources are pinned by the resolver, and
+ * the combined instruction bodies are capped before being exposed to a child.
+ */
 export async function loadConfiguredSkills(definition, project, github, trusted, signal) {
     if (!definition.skills?.length)
         return [];
@@ -116,6 +130,12 @@ function safeTemporaryRoot(root) {
     const rel = relative(parent, child);
     return Boolean(rel) && !rel.startsWith("..") && !isAbsolute(rel) && rel.startsWith("agent-harbor-skills-");
 }
+/**
+ * Materializes configured skills into a private, uniquely named temporary capsule.
+ * Each skill receives only its canonical `SKILL.md`; no source siblings are copied. Preparation is
+ * all-or-cleaned-up, and the returned cleanup is idempotent and refuses paths outside the expected
+ * operating-system temporary-root prefix.
+ */
 export async function createSkillCapsule(definition, project, github, trusted, signal) {
     const loaded = await loadConfiguredSkills(definition, project, github, trusted, signal);
     if (!loaded.length)
@@ -152,6 +172,11 @@ export async function createSkillCapsule(definition, project, github, trusted, s
         throw error;
     }
 }
+/**
+ * Inlines already validated skill guidance into a player prompt for runtimes without capsules.
+ * The original `skills` references are removed from the returned executable definition so loaders
+ * cannot fetch them again, and the final prompt has its own UTF-8 size bound.
+ */
 export function withLoadedSkillGuidance(definition, loaded) {
     if (!loaded.length)
         return definition;
@@ -176,6 +201,7 @@ export function withLoadedSkillGuidance(definition, loaded) {
     const { skills: _skills, ...prepared } = definition;
     return { ...prepared, prompt };
 }
+/** Formats loaded skills as a deterministic, provenance-labelled bootstrap response. */
 export function formatLoadedSkillGroup(loaded) {
     if (!loaded.length)
         throw new Error("player has no configured skills");

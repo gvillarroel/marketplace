@@ -1,6 +1,11 @@
+/**
+ * Copilot hook guard that constrains native `task` delegation and correlates
+ * host lifecycle events into privacy-preserving Agent Harbor evidence.
+ */
 import { resolve } from "node:path";
 import { listManagedActiveIds } from "../core/active.js";
 import { emitHarborEvidence, fingerprintHarborEvidence } from "../core/evidence.js";
+/** Maps stable Harbor role IDs to Copilot's plugin-qualified runtime IDs. */
 export const copilotFixedAgentIds = new Map([
     ["team-lead", "agent-foundry:team-lead"],
     ["repo-cartographer", "repo-cartographer:repo-cartographer"],
@@ -13,10 +18,11 @@ function samePath(left, right) {
 function activePath(project, id) {
     return resolve(project, ".github", "agents", `${id}.agent.md`);
 }
+/** Lists canonical active project profile IDs without trusting arbitrary files. */
 export function listCopilotActiveProfileIds(project) {
     return listManagedActiveIds("copilot", project);
 }
-/** Resolve one logical Harbor ID to the exact Copilot agent exposed by the host. */
+/** Resolves one logical ID to exactly one currently invocable Copilot identity. */
 export function resolveCopilotPlayer(id, agents, project) {
     const fixedId = copilotFixedAgentIds.get(id);
     if (fixedId) {
@@ -71,6 +77,8 @@ export function createCopilotCoordinatorGuard(getSession, evidenceHook) {
     let snapshot = { ready: false, agents: [] };
     let selectionEpoch = 0;
     let guard = Promise.resolve();
+    // Hook callbacks and asynchronous refreshes share state. A tiny promise lock
+    // makes their ordering deterministic without blocking the host event loop.
     const locked = (action) => {
         const result = guard.then(action, action);
         guard = result.then(() => undefined, () => undefined);

@@ -1,3 +1,4 @@
+/** Copilot MCP-facing command adapter and native `/contract` preflight. */
 import { harborContext } from "./shared.js";
 import { executeCommand, parseContractDefinition } from "../core/commands.js";
 import { trustedSkills } from "../core/defaults.js";
@@ -8,6 +9,13 @@ const unavailable = {
     harness: "copilot",
     run: async () => { throw new Error("use Copilot native task after contract preflight"); },
 };
+/**
+ * Runs one Copilot control request.
+ *
+ * Deterministic controls execute immediately. `/contract` performs all local
+ * and remote skill validation, then returns a closed task descriptor for the
+ * Copilot extension to invoke exactly once through its native `task` tool.
+ */
 export async function runCopilotControl(command, args, cwd = process.cwd(), signal) {
     if (command !== "contract")
         return executeCommand(command, args, harborContext("copilot", cwd, unavailable), signal);

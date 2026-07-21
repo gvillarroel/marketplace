@@ -1,3 +1,4 @@
+/** Pi extension entrypoint, direct controls, player commands, and delegation. */
 import * as hostPiSdk from "@earendil-works/pi-coding-agent";
 import { listInvocablePlayerIds, listManagedActiveIds, loadPiActivePlayer } from "../core/active.js";
 import { executeCommand } from "../core/commands.js";
@@ -8,6 +9,11 @@ import { normalizeDelegatedTaskPaths } from "../core/profiles.js";
 import { PiOrchestrator } from "../orchestrators/pi.js";
 import { harborContext } from "./shared.js";
 const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
+/**
+ * Registers Agent Harbor's command and tool surface in the active Pi host.
+ * Active profiles are read from private Harbor storage and invoked through a
+ * real in-memory child; Pi's ambient agent/skill discovery is never trusted.
+ */
 export default function agentHarbor(pi) {
     const registered = new Set();
     const loadHostSdk = async () => hostPiSdk;
@@ -17,6 +23,8 @@ export default function agentHarbor(pi) {
     });
     const createOrchestrator = (cwd, sessionOptions, additionalTools = [], customTools = []) => new PiOrchestrator(cwd, loadHostSdk, additionalTools, undefined, customTools, undefined, sessionOptions);
     const createDelegateTool = (cwd, leadSessionOptions) => {
+        // Delegation state is invocation-scoped because a fresh tool is created for
+        // each team-lead child. This enforces sequential, at-most-once specialists.
         let calls = 0;
         const delegatedAgents = new Set();
         const delegationTargets = listInvocablePlayerIds("pi", cwd).filter((id) => id !== "team-lead");

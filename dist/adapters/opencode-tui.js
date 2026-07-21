@@ -2,6 +2,7 @@ import { runDeterministicCommand } from "./direct.js";
 function message(error) {
     return error instanceof Error ? error.message : String(error);
 }
+/** Creates palette commands that call the deterministic backend directly. */
 export function openCodeDirectCommands(api) {
     const execute = async (command, args) => {
         try {
@@ -40,4 +41,5 @@ const plugin = {
     id: "agent-harbor.direct-controls",
     tui: async (api) => { api.keymap.registerLayer({ commands: openCodeDirectCommands(api) }); },
 };
+/** OpenCode TUI plugin entrypoint. */
 export default plugin;

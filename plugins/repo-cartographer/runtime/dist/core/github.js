@@ -1,3 +1,8 @@
+/**
+ * Validation and GitHub CLI resolution for allowlisted remote skill documents.
+ * Mutable branch references are resolved first and every subsequent content lookup uses the resulting
+ * immutable commit SHA, preventing a branch movement from changing the loaded snapshot mid-operation.
+ */
 import { execFile } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { promisify } from "node:util";
@@ -12,6 +17,7 @@ function safeSegments(value, firstAlphanumeric) {
         segmentPattern.test(segment) && !segment.toLowerCase().endsWith(".lock") &&
         (!firstAlphanumeric || /^[A-Za-z0-9]/.test(segment)));
 }
+/** Validates the exact schema and traversal-safe coordinates of a GitHub skill reference. */
 export function validateGithubSkill(value) {
     if (!value || typeof value !== "object" || Array.isArray(value))
         throw new Error("invalid GitHub skill reference");
@@ -38,6 +44,10 @@ function bytes(value) {
 function text(value) {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes(value));
 }
+/**
+ * Validates a bounded UTF-8 `SKILL.md` document and returns its non-empty instruction body.
+ * The single top-level frontmatter name must match the canonical configured reference.
+ */
 export function parseSkillBody(raw, expectedName, sourceLabel = "GitHub") {
     const source = bytes(raw);
     if (source.length === 0 || source.length > 18_000)
@@ -67,10 +77,12 @@ export function parseSkillBody(raw, expectedName, sourceLabel = "GitHub") {
         throw new Error(`${sourceLabel} skill body is empty`);
     return body;
 }
+/** Returns whether all security-relevant coordinates exactly match an allowlisted skill reference. */
 export function isTrustedGithubSkill(skill, trusted) {
     return trusted.some((candidate) => candidate.name === skill.name && candidate.repo.toLowerCase() === skill.repo.toLowerCase() &&
         candidate.path === skill.path && candidate.track === skill.track);
 }
+/** Validates, allowlists, pins, and loads one GitHub skill through the supplied resolver. */
 export async function loadTrustedGithubSkill(value, trusted, resolver, signal) {
     const skill = validateGithubSkill(value);
     if (!isTrustedGithubSkill(skill, trusted))
@@ -78,10 +90,12 @@ export async function loadTrustedGithubSkill(value, trusted, resolver, signal) {
     signal?.throwIfAborted();
     return { skill, ...(await resolver.load(skill, signal)) };
 }
+/** GitHub CLI-backed resolver that reads skill metadata and content from pinned commits. */
 export class GhResolver {
     run;
     timeoutMs;
     executable;
+    /** Creates a resolver with a bounded command timeout and injectable runner for testing. */
     constructor(run = runGh, timeoutMs = 20_000, executable = "gh") {
         this.run = run;
         this.timeoutMs = timeoutMs;
@@ -91,6 +105,7 @@ export class GhResolver {
         if (typeof executable !== "string" || !executable)
             throw new Error("invalid gh executable");
     }
+    /** Resolves the tracked branch to a commit, then resolves the skill blob at that exact commit. */
     async resolve(skill, signal) {
         validateGithubSkill(skill);
         const branch = skill.track.slice("refs/heads/".length);
@@ -102,6 +117,7 @@ export class GhResolver {
             throw new Error("invalid blob SHA from gh");
         return { commit, blob };
     }
+    /** Resolves the tracked branch once and loads the validated skill body from that immutable commit. */
     async load(skill, signal) {
         validateGithubSkill(skill);
         const branch = skill.track.slice("refs/heads/".length);

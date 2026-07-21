@@ -1,3 +1,10 @@
+/**
+ * Bounded stdio MCP server used by the Copilot plugins.
+ *
+ * With no arguments it exposes only the global `control` tool. With
+ * `--skills-player <id>` it exposes only that player's no-argument `skills`
+ * tool, preventing one persistent profile from querying another skill group.
+ */
 import { Buffer } from "node:buffer";
 import { createInterface } from "node:readline";
 import { runCopilotControl } from "./copilot.js";
@@ -110,6 +117,8 @@ async function handle(request) {
         if (request.method === "notifications/initialized" && initializeSeen)
             initialized = true;
         if (request.method === "notifications/cancelled" && request.params && typeof request.params === "object") {
+            // Cancellation is keyed to the JSON-RPC request so it reaches any active
+            // gh subprocess through the shared AbortSignal.
             const requestId = request.params.requestId;
             if (typeof requestId === "string" || typeof requestId === "number")
                 activeRequests.get(requestId)?.abort();

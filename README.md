@@ -5,6 +5,9 @@ Agent Harbor is a TypeScript library with native adapters for GitHub Copilot CLI
 The normative product, safety, lifecycle, and cross-runtime acceptance
 requirements are consolidated in [REQUIREMENTS.md](REQUIREMENTS.md).
 
+The current technical and operational design is documented in
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
 It contains two plugins:
 
 - `agent-foundry`: five slash controls, a user-level bench, six opt-in SDLC companion definitions rendered on activation, a team lead, and a trusted GitHub-skill catalog.
