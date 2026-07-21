@@ -20,9 +20,11 @@ import {
   formatCopilotElapsed,
   formatCopilotMissionDetails,
   formatCopilotModel,
+  formatCopilotNativeTelemetry,
   formatCopilotReasoning,
   formatCopilotRunDetails,
   formatCopilotTokenCount,
+  formatCopilotUsage,
   type CopilotTeamMemberKind,
   type CopilotTeamRunSnapshot,
 } from "./copilot-team-runtime.js";
@@ -41,6 +43,7 @@ export interface CopilotNativeRosterStatus {
   readonly agents: readonly CopilotAgentIdentity[];
   readonly discoveryAvailable: boolean;
   readonly coordinatorReady: boolean;
+  readonly selectionRestoreUnverified?: boolean;
 }
 
 export const maximumVisibleCopilotRosterMembers = 32;
@@ -110,7 +113,7 @@ function verifyNativeAvailability(
   try {
     const identity = resolveCopilotPlayer(member.id, native.agents, project, activeProfileIds);
     if (identity.userInvocable === false) throw new Error("not user invocable");
-    return member;
+    return { ...member, configuredModel: identity.model ?? member.configuredModel };
   } catch {
     return { ...member, availability: "unavailable", repairKind: "native-discovery" };
   }
@@ -185,7 +188,7 @@ function memberMatches(member: CopilotTeamMember, filter: string): boolean {
 }
 
 function activityMatches(run: CopilotTeamRunSnapshot, filter: string): boolean {
-  return !filter || [run.id, run.agent, run.kind, run.state, run.task, run.reasoningEffort ?? "unknown", formatCopilotModel(run)]
+  return !filter || [run.id, run.agent, run.kind, run.state, run.task, formatCopilotReasoning(run), formatCopilotModel(run)]
     .some((value) => value.toLowerCase().includes(filter));
 }
 
@@ -200,13 +203,14 @@ function renderActivity(runs: readonly CopilotTeamRunSnapshot[], hasOtherActiveW
   return runs.flatMap((run) => [
     `${run.parentRunId ? "↳" : "●"} ${run.agent} · run ${run.id}${run.parentRunId ? ` · parent ${run.parentRunId}` : ""} · ${run.kind} · ${run.state} · ${formatCopilotElapsed(run.elapsedMs)}`,
     `  Task: “${run.task}”`,
-    `  ${formatCopilotModel(run)} · ${formatCopilotReasoning(run)} · native usage events ${run.nativeCalls ?? "—"} · ${formatCopilotTokenCount(run.usage.total, run.usageLowerBounds.includes("total"))} native tokens`,
+    `  ${formatCopilotModel(run)} · ${formatCopilotReasoning(run)} · ${formatCopilotNativeTelemetry(run, false)}`,
   ]);
 }
 
 function renderRoster(
   members: readonly CopilotTeamMember[],
   activeMemberStates: ReadonlyMap<string, CopilotTeamRunSnapshot["state"]>,
+  suppressNativeDiscoveryRepair = false,
 ): string[] {
   return members.flatMap((member) => {
     const activity = activeMemberStates.get(member.id) ?? member.availability;
@@ -216,7 +220,7 @@ function renderRoster(
         ? [`  Repair: re-run /join with the full definition and "replace":true; then reload.`]
         : member.availability === "conflict"
           ? ["  Repair: inspect the unmanaged collision; Agent Harbor will not overwrite it."]
-          : member.repairKind === "native-discovery"
+          : member.repairKind === "native-discovery" && !suppressNativeDiscoveryRepair
             ? ["  Repair: reload the Copilot session and run /team again before delegation."]
           : [];
     const description = copilotPublicIdentifier(member.description, 500) ?? "Description unavailable";
@@ -237,20 +241,25 @@ function compactMemberIds(members: readonly CopilotTeamMember[], limit = 12): st
   return members.length > limit ? `${shown} (+${members.length - limit} more)` : shown;
 }
 
-function renderLeadAccess(members: readonly CopilotTeamMember[], working: ReadonlySet<string>): string[] {
+function renderLeadAccess(
+  members: readonly CopilotTeamMember[],
+  working: ReadonlySet<string>,
+  selectionGate?: string,
+): string[] {
   const specialists = members.filter((member) =>
     member.id !== "team-lead" && member.kind !== "manager" && member.kind !== "utility" && member.availability === "ready");
   const busy = specialists.filter((member) => working.has(member.id));
-  const delegable = specialists.filter((member) => !working.has(member.id));
+  const eligibleNow = selectionGate ? [] : specialists.filter((member) => !working.has(member.id));
   const bundled = members.filter((member) => member.kind === "bundled");
   const benched = bundled.filter((member) => member.availability === "bench");
   const unhealthy = members.filter((member) => member.availability !== "ready" && member.availability !== "bench");
   return [
-    `Active specialists: ${specialists.length} · mission budget: up to 6 sequential delegations`,
-    `Delegable now: ${compactMemberIds(delegable)}`,
+    `Enabled specialists: ${specialists.length} · mission budget: up to 6 sequential delegations`,
+    `Eligible specialists: ${compactMemberIds(specialists)}`,
+    `Can delegate now: ${compactMemberIds(eligibleNow)}${selectionGate ? ` · ${selectionGate}` : ""}`,
     ...(busy.length ? [`Busy (double-booking blocked): ${compactMemberIds(busy)}`] : []),
-    `SDLC coverage: ${bundled.filter((member) => member.availability === "ready").length}/${bundled.length} active · ${benched.length} benched`,
-    ...(benched.length ? [`Activate SDLC: /bench on ${benched.map(({ id }) => id).join(" ")}`] : []),
+    `SDLC coverage: ${bundled.filter((member) => member.availability === "ready").length}/${bundled.length} enabled · ${benched.length} benched`,
+    ...(benched.length ? [`Enable SDLC: /bench on ${benched.map(({ id }) => id).join(" ")}`] : []),
     ...(unhealthy.length ? [`Repair before delegation: ${compactMemberIds(unhealthy)}`] : []),
   ];
 }
@@ -262,6 +271,64 @@ export interface CopilotTeamViewOptions {
   readonly nextReasoning?: string;
   readonly nextMaxOutputTokens?: number;
   readonly native?: CopilotNativeRosterStatus;
+  readonly selectionGate?: string;
+}
+
+/** Minimal process-local fallback used when authoritative roster rendering misses its shared deadline. */
+export function formatCopilotDegradedTeamView(
+  project: string,
+  runtime: CopilotTeamRuntime,
+  options: {
+    title?: "team" | "bench";
+    filter?: string;
+    reasons?: readonly string[];
+    budgetMs?: number;
+    selectionGate?: string;
+  } = {},
+): string {
+  const needle = options.filter?.trim().toLowerCase() ?? "";
+  const unorderedActive = runtime.activeProjectRuns(project);
+  const rootOrder = new Map<string, number>();
+  for (const run of unorderedActive) {
+    const current = rootOrder.get(run.rootRunId);
+    if (current === undefined || run.sequence < current) rootOrder.set(run.rootRunId, run.sequence);
+  }
+  const active = unorderedActive.sort((left, right) =>
+    rootOrder.get(left.rootRunId)! - rootOrder.get(right.rootRunId)! || left.sequence - right.sequence);
+  const matchingActive = active.filter((run) => !needle || activityMatches(run, needle));
+  const runs = matchingActive.slice(0, maximumVisibleCopilotRosterMembers);
+  const omittedActive = Math.max(0, matchingActive.length - runs.length);
+  const latestCandidate = active.length ? undefined : runtime.latestRoot(project);
+  const latest = latestCandidate && (!needle || runtime.mission(latestCandidate.rootRunId)
+    .some((run) => activityMatches(run, needle))) ? latestCandidate : undefined;
+  const projectName = copilotPublicIdentifier(runtime.projectName(project), 80) ?? "project";
+  const snapshotLabel = options.budgetMs === undefined
+    ? "Bounded snapshot"
+    : `Degraded bounded snapshot (${options.budgetMs}ms budget)`;
+  const lines = [
+    `Agent Harbor Copilot ${options.title ?? "team"} · ${projectName} · 0 model tokens · degraded`,
+    `${snapshotLabel}: ${[...new Set(options.reasons ?? [])].join("; ") || "authoritative roster rendering unavailable"}.`,
+    ...(options.selectionGate
+      ? [`Selection gate: ${copilotPublicIdentifier(options.selectionGate, 240) ?? "selection is temporarily locked"}.`]
+      : []),
+    "",
+    "ACTIVITY (process-local)",
+    ...(runs.length ? runs.flatMap((run) => [
+      `${run.parentRunId ? "↳" : "●"} ${run.agent} · run ${run.id}${run.parentRunId ? ` · parent ${run.parentRunId}` : ""} · ${run.kind} · ${run.state} · ${formatCopilotElapsed(run.elapsedMs)}`,
+      `  Task: “${run.task}”`,
+      `  ${formatCopilotModel(run)} · ${formatCopilotReasoning(run)} · ${formatCopilotNativeTelemetry(run)}`,
+      ...(run.parentRunId && (run.durationMs !== undefined || run.totalToolCalls !== undefined)
+        ? [`  Native child: duration ${run.durationMs === undefined ? "—" : `${formatCopilotElapsed(run.durationMs)}.${String(Math.floor(run.durationMs % 1_000)).padStart(3, "0")}`} · tool calls ${run.totalToolCalls ?? "—"}`]
+        : []),
+    ]) : ["No tracked Agent Harbor work matches this bounded snapshot."]),
+    ...(omittedActive
+      ? [`+${omittedActive} matching active runs omitted by this bounded snapshot; filter or retry /team.`]
+      : []),
+    ...(latest ? ["", "LAST MISSION", ...formatCopilotMissionDetails(runtime, latest.rootRunId)] : []),
+    "",
+    "Retry /team for the authoritative roster after Copilot host RPC recovers.",
+  ];
+  return wrapPlainLines(lines).join("\n");
 }
 
 /** Formats roster, active hierarchy, and last mission without inference or durable activity storage. */
@@ -285,19 +352,39 @@ export async function formatCopilotTeamView(
   const latest = runtime.latestRoot(project);
   const latestMission = !allActive.length && latest ? runtime.mission(latest.rootRunId) : [];
   const historicalMatches = latestMission.filter((run) => activityMatches(run, filter));
-  if (!members.length && !activity.length && !historicalMatches.length) {
-    const shown = copilotPublicIdentifier(options.filter?.trim(), 80) || "the requested filter";
-    return wrapPlainLines([
-      `Agent Harbor Copilot ${(options.title ?? "team")} · 0 model tokens`,
-      `No team member or tracked activity matches “${shown}”.`,
-      "Try /team, /bench list, or search by member ID, role, tool, skill, model, reasoning, state, task label, or run ID.",
-    ]).join("\n");
-  }
-
   const activeMemberStates = new Map(allActive
     .filter((run) => run.kind !== "contractor")
     .map((run) => [run.agent, run.state] as const));
   const working = new Set(activeMemberStates.keys());
+  const activeChild = allActive.find((run) => run.parentRunId !== undefined);
+  const activeNonManagerRoot = allActive.find((run) => run.parentRunId === undefined && run.kind !== "manager");
+  const cleaningManagerRoot = allActive.find((run) =>
+    run.parentRunId === undefined && run.kind === "manager" && run.state === "cleaning");
+  const selectionGate = copilotPublicIdentifier(options.selectionGate, 240)
+    ?? (activeChild ? `child run ${activeChild.id} is active; wait for its terminal event`
+      : activeNonManagerRoot ? `${activeNonManagerRoot.kind} root ${activeNonManagerRoot.id} owns the session`
+        : cleaningManagerRoot ? `manager run ${cleaningManagerRoot.id} is cleaning; wait for its terminal event`
+          : undefined);
+  const globalNativeDiscoveryFailure = Boolean(options.native &&
+    (!options.native.discoveryAvailable || !options.native.coordinatorReady));
+  const globalWarnings = (options.native?.selectionRestoreUnverified)
+    ? ["Player selection restoration is unverified; no teammate can be selected. Reload the Copilot session."]
+    : globalNativeDiscoveryFailure
+      ? ["Native agent discovery/coordinator is not ready; no teammate can be selected. Reload the Copilot session."]
+      : [];
+  if (!members.length && !activity.length && !historicalMatches.length) {
+    const shown = copilotPublicIdentifier(options.filter?.trim(), 80) || "the requested filter";
+    const projectName = copilotPublicIdentifier(runtime.projectName(project), 80) ?? "project";
+    return wrapPlainLines([
+      `Agent Harbor Copilot ${(options.title ?? "team")} · ${projectName} · 0 model tokens`,
+      `No team member or tracked activity matches “${shown}”.`,
+      ...globalWarnings,
+      ...(selectionGate ? [`Selection gate: ${selectionGate}.`] : []),
+      "Try /team, /bench list, or search by member ID, description, role/kind, capability, tool, skill,",
+      "model/reasoning, status/state, task label, or run ID.",
+    ]).join("\n");
+  }
+
   const ready = allMembers.filter((member) => member.availability === "ready" && !working.has(member.id)).length;
   const benched = allMembers.filter((member) => member.availability === "bench").length;
   const unhealthy = allMembers.filter((member) => member.availability !== "ready" && member.availability !== "bench").length;
@@ -313,12 +400,11 @@ export async function formatCopilotTeamView(
     `Agent Harbor Copilot ${(options.title ?? "team")} · ${copilotPublicIdentifier(runtime.projectName(project), 80) ?? "project"} · 0 model tokens`,
     `${filter ? "Overall Team" : "Team"}: ${ready} ready · ${allActive.length} active${activeBreakdown ? ` (${activeBreakdown})` : ""} · ${benched} benched · ${unhealthy} unhealthy`,
     `${hostDefault}${options.nextMaxOutputTokens === undefined ? "" : ` · model max output per response ${formatCopilotTokenCount(options.nextMaxOutputTokens)} tokens`}`,
-    ...((options.native && (!options.native.discoveryAvailable || !options.native.coordinatorReady))
-      ? ["Native agent discovery/coordinator is not ready; no teammate is reported delegable. Reload the Copilot session."]
-      : []),
+    ...globalWarnings,
+    ...(selectionGate ? [`Selection gate: ${selectionGate}.`] : []),
     "",
     filter ? "LEAD ACCESS · OVERALL" : "LEAD ACCESS",
-    ...renderLeadAccess(allMembers, working),
+    ...renderLeadAccess(allMembers, working, selectionGate),
     "",
     "ACTIVITY",
     ...renderActivity(activity, allActive.length > 0),
@@ -326,7 +412,11 @@ export async function formatCopilotTeamView(
     "ROSTER",
     ...(members.length
       ? [
-          ...renderRoster(members.slice(0, maximumVisibleCopilotRosterMembers), activeMemberStates),
+          ...renderRoster(
+            members.slice(0, maximumVisibleCopilotRosterMembers),
+            activeMemberStates,
+            globalNativeDiscoveryFailure,
+          ),
           ...(members.length > maximumVisibleCopilotRosterMembers
             ? [`+${members.length - maximumVisibleCopilotRosterMembers} more roster members; use /team <filter> to narrow the view.`]
             : []),
@@ -344,7 +434,7 @@ export async function formatCopilotTeamView(
   }
   lines.push(
     "",
-    "Commands: /team [filter] · /team stop <run-id|all> · /player <id> <task> · /bench list [filter] · /bench on <id...> · /bench off <id...> · /join <json> · /retire <id> · /scout <need>",
+    "Commands: /team [filter] · /team stop <run-id|all> · /player <id> <task> · /contract <json> · /bench list [filter] · /bench on <id...> · /bench off <id...> · /join <json> · /retire <id> · /scout <need>",
   );
   return wrapPlainLines(lines).join("\n");
 }

@@ -5,6 +5,7 @@ import test from "node:test";
 
 const root = join(import.meta.dirname, "..");
 const extensionPath = join(root, "plugins", "agent-foundry", "extensions", "agent-harbor", "extension.mjs");
+const contractSkillPath = join(root, "plugins", "agent-foundry", "skills", "contract", "SKILL.md");
 
 test("Copilot extension exposes zero-model team controls and one explicit native send path", async () => {
   const source = await readFile(extensionPath, "utf8");
@@ -25,9 +26,17 @@ test("Copilot extension exposes zero-model team controls and one explicit native
   assert.match(runner, /Promise\.race\(\[terminal\.promise, delay\(directTimeoutMs/u);
   assert.match(runner, /await abort\(\)/u);
   assert.match(runner, /delay\(abortSettlementMs/u);
-  assert.match(runner, /selection is retained until Copilot reports idle or error/u);
+  assert.match(runner, /selection is retained until Copilot reports a terminal event/u);
   assert.match(runner, /if \(!lateSettlement\)[\s\S]*unsubscribe\(\)[\s\S]*restoreSelection\(previous\)/u);
   assert.match(runner, /AggregateError\([\s\S]*primaryFailure[\s\S]*restoreError/u);
+});
+
+test("Copilot contract skill auto-approves only deterministic control and cannot be model-invoked", async () => {
+  const source = await readFile(contractSkillPath, "utf8");
+  assert.match(source, /^allowed-tools: \["agent-harbor\(control\)"\]$/mu);
+  assert.match(source, /^user-invocable: true$/mu);
+  assert.match(source, /^disable-model-invocation: true$/mu);
+  assert.doesNotMatch(source, /^allowed-tools:.*\btask\b/mu);
 });
 
 test("Copilot extension scopes native lifecycle and child admission to the event project", async () => {

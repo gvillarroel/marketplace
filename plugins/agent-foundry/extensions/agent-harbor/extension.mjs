@@ -15,7 +15,10 @@ import {
   CopilotTeamRuntime,
   formatCopilotMissionReport,
 } from "../../runtime/dist/adapters/copilot-team-runtime.js";
-import { formatCopilotTeamView } from "../../runtime/dist/adapters/copilot-team-view.js";
+import {
+  formatCopilotDegradedTeamView,
+  formatCopilotTeamView,
+} from "../../runtime/dist/adapters/copilot-team-view.js";
 import { runDeterministicCommand } from "../../runtime/dist/adapters/direct.js";
 import { bundledPlayers, rolePlayers, scoutPlayer } from "../../runtime/dist/core/defaults.js";
 import { isHarborId } from "../../runtime/dist/core/identity.js";
@@ -31,6 +34,14 @@ const directTimeoutMs = boundedEnvironmentNumber("AGENT_HARBOR_COPILOT_TIMEOUT_M
 const abortSettlementMs = boundedEnvironmentNumber("AGENT_HARBOR_COPILOT_SETTLE_MS", 10_000, 250, 60_000);
 const hostRpcTimeoutMs = boundedEnvironmentNumber("AGENT_HARBOR_COPILOT_RPC_TIMEOUT_MS", 15_000, 250, 60_000);
 const logRpcTimeoutMs = boundedEnvironmentNumber("AGENT_HARBOR_COPILOT_LOG_TIMEOUT_MS", 3_000, 100, 15_000);
+const teamBudgetMs = boundedEnvironmentNumber("AGENT_HARBOR_COPILOT_TEAM_BUDGET_MS", 2_200, 500, 3_000);
+const teamFormatTimeoutMs = boundedEnvironmentNumber(
+  "AGENT_HARBOR_COPILOT_TEAM_FORMAT_TIMEOUT_MS",
+  teamBudgetMs,
+  1,
+  3_000,
+);
+const startupRefreshTimeoutMs = Math.min(300, teamBudgetMs);
 
 function boundedEnvironmentNumber(name, fallback, minimum, maximum) {
   const value = Number(process.env[name]);
@@ -66,9 +77,16 @@ async function boundedHostCall(label, action, timeoutMs = hostRpcTimeoutMs) {
   }
 }
 
+async function boundedTeamCall(label, action, deadline, maximumSliceMs) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new HostRpcTimeoutError(label, 0);
+  return boundedHostCall(label, action, Math.max(1, Math.min(remaining, maximumSliceMs)));
+}
+
 function activeProfileIds(project) { return listCopilotActiveProfileIds(project); }
 function errorMessage(error) { return error instanceof Error ? error.message : String(error); }
 function memberKind(id) {
+  if (id === "contract") return "utility";
   if (id === "team-lead") return "manager";
   if (rolePlayers.has(id)) return "fixed";
   if (id === scoutPlayer.name) return "utility";
@@ -128,6 +146,15 @@ let selectionRestoreHazard;
 let coordinatorReady = false;
 let selectionQueue = Promise.resolve();
 let notificationLogPending = false;
+let lastKnownProject;
+let projectScopeVerified = false;
+
+function rememberProjectScope(project) {
+  if (typeof project !== "string" || !project.trim()) return undefined;
+  lastKnownProject = project;
+  projectScopeVerified = true;
+  return project;
+}
 
 function safeLog(message, options = {}) {
   if (notificationLogPending) return Promise.resolve();
@@ -170,7 +197,10 @@ function delay(ms, value) {
 
 async function currentProject() {
   const metadata = await boundedHostCall("Copilot metadata snapshot", () => session.rpc.metadata.snapshot());
-  return metadata.workingDirectory ?? process.cwd();
+  const observed = rememberProjectScope(metadata.workingDirectory);
+  if (observed) return observed;
+  if (projectScopeVerified && lastKnownProject) return lastKnownProject;
+  throw new Error("Copilot project scope is unavailable; project-scoped controls fail closed");
 }
 
 async function currentModelSettings() {
@@ -194,7 +224,7 @@ async function restoreSelection(previous) {
       } else {
         await boundedHostCall("Copilot selection restore", () => session.rpc.agent.deselect());
       }
-      await boundedHostCall("Copilot coordinator refresh", () => coordinator.refresh());
+      await boundedHostCall("Copilot coordinator refresh", () => coordinator.refreshAuthoritative());
       coordinatorReady = true;
       return;
     } catch (error) {
@@ -227,6 +257,9 @@ async function runPlayer(id, rawTask, command = id) {
     if (selectionRestoreHazard) {
       throw new Error(`Agent Harbor could not prove selection restoration after ${selectionRestoreHazard}; reload the Copilot session before running another player`);
     }
+    if (coordinator.lifecycleIdentityUnverified()) {
+      throw new Error("Agent Harbor lifecycle identity is unverified; reload the Copilot session before running another player");
+    }
     if (unsettledSelection) {
       throw new Error(`Agent Harbor is still waiting for ${unsettledSelection.runId} to settle; run /team and wait before selecting another player`);
     }
@@ -248,7 +281,7 @@ async function runPlayer(id, rawTask, command = id) {
     await boundedHostCall("Copilot agent reload", () => session.rpc.agent.reload());
     const listed = await boundedHostCall("Copilot agent list", () => session.rpc.agent.list());
     if (!coordinatorReady) {
-      await boundedHostCall("Copilot coordinator refresh", () => coordinator.refresh());
+      await boundedHostCall("Copilot coordinator refresh", () => coordinator.refreshAuthoritative());
       coordinatorReady = true;
     }
     const agent = resolveCopilotPlayer(id, listed.agents, project);
@@ -298,8 +331,15 @@ async function runPlayer(id, rawTask, command = id) {
     const directEventBelongs = (event) => {
       if (!directTimestampIsCurrent(event)) return false;
       const parentId = directOpaqueId(event.parentId);
-      if (parentId === undefined || directEventIds.has(parentId)) return true;
-      return directEventIds.size === 0;
+      if (parentId !== undefined) return directEventIds.has(parentId) || directEventIds.size === 0;
+      const timestamp = directTimestamp(event);
+      if (Number.isFinite(timestamp)) return true;
+      // Untimed, unparented events can seed a run only with a new native ID.
+      // Anonymous events are indistinguishable from a previous run and remain
+      // unclaimed rather than inventing terminal or usage ownership.
+      if (!directOpaqueId(event.id)) return false;
+      if (directEventIds.size === 0) return true;
+      return false;
     };
     const rememberDirectEvent = (event) => {
       const eventId = directOpaqueId(event.id);
@@ -355,6 +395,10 @@ async function runPlayer(id, rawTask, command = id) {
     };
     const unsubscribe = session.on((event) => {
       if (!promptAttempted && !stopRequested) return;
+      const hostDisposition = coordinator.hostEventDisposition(event);
+      if (hostDisposition === "replay") return;
+      if (hostDisposition === "unverified") return;
+      if (coordinator.hostEventWasClaimed(event) === false) return;
       // Copilot may omit agentId on a child usage event while retaining the
       // deprecated-but-authoritative parent task correlation.
       const childScoped = Boolean(event.agentId || event.data?.parentToolCallId || event.data?.initiator === "sub-agent");
@@ -431,7 +475,7 @@ async function runPlayer(id, rawTask, command = id) {
         }
       });
       unsettledSelection = { runId, settlement: late };
-      const timeout = new Error(`${reason}; selection is retained until Copilot reports idle or error`);
+      const timeout = new Error(`${reason}; selection is retained until Copilot reports a terminal event`);
       if (abortFailure) throw new AggregateError([timeout, abortFailure], `${reason}; abort also failed and selection is retained`);
       throw timeout;
     };
@@ -560,27 +604,53 @@ function mapLifecycleState(state) {
   return undefined;
 }
 
+function registerAbortableRoot(runId) {
+  abortableRoots.set(runId, async () => {
+    runtime.setState(runId, "cleaning");
+    await boundedHostCall("Copilot abort", () => session.abort());
+  });
+}
+
+function currentTeamSelectionGate() {
+  if (coordinator.lifecycleIdentityUnverified()) {
+    return "lifecycle identity is unverified; reload Copilot before delegation";
+  }
+  if (selectionRestoreHazard) {
+    return `selection restoration is unverified after run ${selectionRestoreHazard}; reload Copilot`;
+  }
+  if (unsettledSelection) {
+    return `run ${unsettledSelection.runId} is still settling; wait for its terminal event`;
+  }
+  if (activeDirect) {
+    const state = runtime.get(activeDirect.runId)?.state;
+    const managerCanDelegate = activeDirect.id === "team-lead" &&
+      (state === "starting" || state === "working" || state === "waiting");
+    if (!managerCanDelegate) return `direct run ${activeDirect.runId} owns the Copilot session`;
+  }
+  return undefined;
+}
+
 function lifecycleHook(event) {
   try {
+    rememberProjectScope(event.project);
     if (event.type === "root.started") {
-      let runId;
+      let runId = correlationRuns.get(event.runId);
       const directRoot = activeDirect && activeDirect.sessionId === event.sessionId && activeDirect.id === event.agent;
       if (directRoot) {
         runId = activeDirect.runId;
-      } else {
+      } else if (!runId) {
         runId = runtime.begin({
           project: event.project,
           agent: event.agent,
-          kind: memberKind(event.agent),
+          kind: event.memberKind ?? memberKind(event.agent),
           task: event.taskLabel,
           model: event.model,
           modelSource: event.modelSource,
           reasoningEffort: event.reasoningEffort === null ? "none" : event.reasoningEffort,
         });
-        abortableRoots.set(runId, async () => {
-          runtime.setState(runId, "cleaning");
-          await boundedHostCall("Copilot abort", () => session.abort());
-        });
+      }
+      if (!directRoot) {
+        registerAbortableRoot(runId);
       }
       correlationRuns.set(event.runId, runId);
       return;
@@ -594,7 +664,7 @@ function lifecycleHook(event) {
         runId = runtime.begin({
           project: event.project,
           agent: event.agent,
-          kind: memberKind(event.agent),
+          kind: event.memberKind ?? memberKind(event.agent),
           task: event.taskLabel,
           parentRunId,
           model: event.model,
@@ -610,17 +680,22 @@ function lifecycleHook(event) {
     }
     const runId = correlationRuns.get(event.runId);
     if (!runId) return;
-    if (event.type === "run.state") {
+    if (event.type === "run.identity") {
+      runtime.relabelActiveRoot(runId, {
+        agent: event.agent,
+        kind: event.memberKind,
+        task: event.taskLabel,
+      });
+    } else if (event.type === "run.state") {
       const state = mapLifecycleState(event.state);
       if (state) runtime.setState(runId, state);
     } else if (event.type === "run.model") {
-      const initialDefault = !runtime.get(runId)?.parentRunId && !event.turnId;
-      const preserveConfigured = activeDirect?.runId === runId && runtime.get(runId)?.modelSource === "configured" && !event.turnId;
-      if (!initialDefault && !preserveConfigured) runtime.observeRootModel(runId, event.model);
+      const run = runtime.get(runId);
+      if (run?.model !== event.model || event.eventId) runtime.observeRootModel(runId, event.model);
     } else if (event.type === "run.reasoning") {
-      const initialDefault = !runtime.get(runId)?.parentRunId && !event.turnId;
-      const preserveConfigured = activeDirect?.runId === runId && runtime.get(runId)?.modelSource === "configured" && !event.turnId;
-      if (!initialDefault && !preserveConfigured) {
+      const run = runtime.get(runId);
+      const effort = event.reasoningEffort === null ? "none" : event.reasoningEffort;
+      if (run?.reasoningEffort !== effort || event.eventId) {
         runtime.observeRootModel(runId, undefined, event.reasoningEffort === null ? "none" : event.reasoningEffort);
       }
     } else if (event.type === "run.usage") {
@@ -630,6 +705,10 @@ function lifecycleHook(event) {
       // Lifecycle remains authoritative for delegated children and for roots
       // started outside the direct /player runner.
       const run = runtime.get(runId);
+      if (event.attributionUnverified) {
+        runtime.markUsageAttributionUnverified(runId);
+        return;
+      }
       if (!run?.parentRunId && activeDirect?.runId === runId) return;
       runtime.observeUsageEvent({
         type: "assistant.usage",
@@ -692,36 +771,53 @@ const coordinator = createCopilotCoordinatorGuard(() => session, (event) => {
     task: event.task,
   });
 }, lifecycleHook, (input) => {
-  const parentRunId = correlationRuns.get(input.parentRunId);
+  rememberProjectScope(input.project);
+  if (input.type === "root") {
+    const runId = runtime.begin({
+      project: input.project,
+      agent: input.agent,
+      kind: input.memberKind ?? memberKind(input.agent),
+      task: input.taskLabel,
+    });
+    correlationRuns.set(input.runId, runId);
+    registerAbortableRoot(runId);
+    return;
+  }
+  const parentRunId = input.parentRunId && correlationRuns.get(input.parentRunId);
   if (!parentRunId) throw new Error("Agent Harbor team activity is unavailable for this coordinator run; submit the task again");
   const runId = runtime.begin({
     project: input.project,
     agent: input.agent,
-    kind: memberKind(input.agent),
+    kind: input.memberKind ?? memberKind(input.agent),
     task: input.taskLabel,
     parentRunId,
   });
   correlationRuns.set(input.runId, runId);
 });
 
-async function refreshTeamDiscovery() {
+async function refreshTeamDiscovery(deadline) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      await boundedHostCall("Copilot authoritative team refresh", () => coordinator.refreshAuthoritative());
+      await boundedTeamCall(
+        "Copilot authoritative team refresh",
+        () => coordinator.refreshAuthoritative(),
+        deadline,
+        700,
+      );
       coordinatorReady = true;
       return true;
     } catch {
       coordinatorReady = false;
-      if (attempt === 0) await delay(25);
+      if (attempt === 0 && deadline - Date.now() > 50) await delay(25);
     }
   }
   return false;
 }
 
-async function listNativeTeamAgents() {
+async function listNativeTeamAgents(deadline, degraded) {
   const read = async () => {
     try {
-      const listed = await boundedHostCall("Copilot agent list", () => session.rpc.agent.list());
+      const listed = await boundedTeamCall("Copilot agent list", () => session.rpc.agent.list(), deadline, 350);
       if (!Array.isArray(listed?.agents)) throw new Error("Copilot agent list returned no registry array");
       return { agents: listed.agents, discoveryAvailable: true };
     } catch {
@@ -732,14 +828,87 @@ async function listNativeTeamAgents() {
   const fixedReady = [...copilotFixedAgentIds.values()].every((id) =>
     discovery.agents.some((agent) => agent?.id === id));
   if (!coordinatorReady || !discovery.discoveryAvailable || !fixedReady) {
-    if (await refreshTeamDiscovery()) discovery = await read();
+    if (await refreshTeamDiscovery(deadline)) discovery = await read();
+    else degraded.push("coordinator refresh unavailable");
   }
+  if (!discovery.discoveryAvailable) degraded.push("native roster unavailable");
   return discovery;
+}
+
+async function boundedTeamProject(deadline, degraded) {
+  try {
+    const metadata = await boundedTeamCall(
+      "Copilot team metadata snapshot",
+      () => session.rpc.metadata.snapshot(),
+      deadline,
+      350,
+    );
+    const observed = rememberProjectScope(metadata.workingDirectory);
+    if (!observed && !projectScopeVerified) throw new Error("Copilot metadata did not identify a project");
+  } catch {
+    degraded.push(projectScopeVerified ? "using cached project scope" : "project scope unavailable");
+  }
+  return projectScopeVerified ? lastKnownProject : undefined;
+}
+
+async function boundedTeamModel(deadline, degraded) {
+  try {
+    const current = await boundedTeamCall("Copilot team current model", () => session.rpc.model.getCurrent(), deadline, 400);
+    return {
+      model: current.modelId,
+      reasoningEffort: current.reasoningEffort === null ? "none" : current.reasoningEffort,
+    };
+  } catch {
+    degraded.push("host model settings unavailable");
+    return {};
+  }
 }
 
 async function showTeam(args, title = "team", allowStop = true) {
   const value = args?.trim() ?? "";
-  const project = await currentProject();
+  const deadline = Date.now() + teamBudgetMs;
+  if (title === "team" && (value === "help" || value === "--help")) {
+    const output = [
+      "Agent Harbor Copilot team help · 0 model tokens",
+      "/team                         Show roster, live work, telemetry, and last mission.",
+      "/team <filter>                Match member, description, role/kind, status/state, task, or run ID.",
+      "                               Also matches capability/tool/skill and model/reasoning.",
+      "/team stop <run-id|all>       Request cancellation for one mission or all active missions.",
+      "Limits: 32 concurrent roots per project; 6 sequential team-lead delegations per prompt.",
+      "Bounded views disclose omitted rows; tasks are lossy/redacted and activity is process-local.",
+    ].join("\n");
+    await boundedTeamCall(
+      "Copilot team help display",
+      () => displayLog(output, { level: "info" }),
+      deadline,
+      logRpcTimeoutMs,
+    );
+    return;
+  }
+  const observationDeadline = deadline - Math.min(250, Math.floor(teamBudgetMs / 4));
+  const degraded = [];
+  const project = await boundedTeamProject(observationDeadline, degraded);
+  if (!project) {
+    if (allowStop && /^stop(?:\s|$)/u.test(value)) {
+      throw new Error("Copilot project scope is unavailable; /team stop fails closed without inspecting another project");
+    }
+    const output = [
+      `Agent Harbor Copilot ${title} · project scope unavailable · 0 model tokens · degraded`,
+      `Degraded bounded snapshot (${teamBudgetMs}ms budget): project scope unavailable.`,
+      ...(coordinator.lifecycleIdentityUnverified()
+        ? ["Native lifecycle identity/attribution is unverified; reload Copilot before delegation."]
+        : []),
+      ...(selectionRestoreHazard
+        ? ["Player selection restoration is unverified; reload Copilot before delegation."]
+        : []),
+      "",
+      "ACTIVITY (process-local)",
+      "No project-scoped roster or activity is displayed until Copilot confirms the working directory.",
+      "Retry /team after host metadata recovers; project-scoped stop remains disabled meanwhile.",
+    ].join("\n");
+    await boundedTeamCall("Copilot team display", () => displayLog(output, { level: "warning" }), deadline, logRpcTimeoutMs);
+    return;
+  }
   if (allowStop && /^stop(?:\s|$)/u.test(value)) {
     const target = value.slice(4).trim();
     if (!target) throw new Error("usage: /team stop <run-id|all>");
@@ -749,7 +918,12 @@ async function showTeam(args, title = "team", allowStop = true) {
       .flatMap((rootRunId) => active.find((run) => run.id === rootRunId) ?? []);
     if (!roots.length) {
       if (target === "all") {
-        await displayLog("Agent Harbor Copilot stop · 0 model tokens\nNo Agent Harbor work is active in this project.", { level: "info" });
+        await boundedTeamCall(
+          "Copilot team stop display",
+          () => displayLog("Agent Harbor Copilot stop · 0 model tokens\nNo Agent Harbor work is active in this project.", { level: "info" }),
+          deadline,
+          logRpcTimeoutMs,
+        );
         return;
       }
       throw new Error(`unknown active Agent Harbor run: ${target}; run /team to inspect current IDs`);
@@ -757,26 +931,58 @@ async function showTeam(args, title = "team", allowStop = true) {
     await Promise.all(roots.map(async (run) => {
       const abort = abortableRoots.get(run.id);
       if (!abort) throw new Error(`Agent Harbor run is no longer controlled: ${run.id}`);
-      await abort();
+      await boundedTeamCall(`Copilot stop ${run.id}`, abort, deadline, teamBudgetMs);
     }));
-    await displayLog(`Agent Harbor Copilot stop · 0 model tokens\nStopping ${roots.length} root run(s): ${roots.map(({ id }) => id).join(", ")}.`, { level: "warning" });
+    await boundedTeamCall(
+      "Copilot team stop display",
+      () => displayLog(`Agent Harbor Copilot stop · 0 model tokens\nStopping ${roots.length} root run(s): ${roots.map(({ id }) => id).join(", ")}.`, { level: "warning" }),
+      deadline,
+      logRpcTimeoutMs,
+    );
     return;
   }
   const [model, nativeDiscovery] = await Promise.all([
-    currentModelSettings(),
-    listNativeTeamAgents(),
+    boundedTeamModel(observationDeadline, degraded),
+    listNativeTeamAgents(observationDeadline, degraded),
   ]);
-  const output = await formatCopilotTeamView(project, runtime, {
-    filter: value === "help" ? "" : value,
-    title,
-    nextModel: model.model,
-    nextReasoning: model.reasoningEffort,
-    native: {
-      ...nativeDiscovery,
-      coordinatorReady,
-    },
-  });
-  await displayLog(output, { level: "info" });
+  const selectionGate = currentTeamSelectionGate();
+  if (selectionRestoreHazard) degraded.push("player selection restoration unverified");
+  let output;
+  let usedFallback = false;
+  try {
+    output = await boundedTeamCall(
+      "Agent Harbor team view formatting",
+      () => formatCopilotTeamView(project, runtime, {
+        filter: value,
+        title,
+        nextModel: model.model,
+        nextReasoning: model.reasoningEffort,
+        selectionGate,
+        native: {
+          ...nativeDiscovery,
+          coordinatorReady: coordinatorReady && !selectionRestoreHazard,
+          selectionRestoreUnverified: Boolean(selectionRestoreHazard),
+        },
+      }),
+      deadline - 100,
+      teamFormatTimeoutMs,
+    );
+  } catch {
+    degraded.push("authoritative roster rendering unavailable");
+    usedFallback = true;
+    output = formatCopilotDegradedTeamView(project, runtime, {
+      title,
+      filter: value,
+      reasons: degraded,
+      budgetMs: teamBudgetMs,
+      selectionGate,
+    });
+  }
+  const reasons = [...new Set(degraded)];
+  if (reasons.length && !usedFallback) {
+    output += `\n\nDegraded bounded snapshot (${teamBudgetMs}ms budget): ${reasons.join("; ")}.`;
+  }
+  await boundedTeamCall("Copilot team display", () => displayLog(output, { level: "info" }), deadline, logRpcTimeoutMs);
 }
 
 const knownPlayers = new Map([...rolePlayers, ...bundledPlayers]);
@@ -788,11 +994,11 @@ session = await joinSession({
   commands: [
     {
       name: "team",
-      description: "0 model tokens · /team [filter|stop <run-id|all>] · Show roster, live work, model/reasoning, native usage, and last mission.",
+      description: "0 model tokens · /team [help|filter|stop <run-id|all>] · Show roster, live work, model/reasoning, native usage, and last mission.",
       handler: async ({ args }) => {
         try { await showTeam(args); }
         catch (error) {
-          await safeLog(`[Agent Harbor team · 0 model tokens]\n${errorMessage(error)}`, { level: "error" });
+          void safeLog(`[Agent Harbor team · 0 model tokens]\n${errorMessage(error)}`, { level: "error" });
           throw error;
         }
       },
@@ -835,7 +1041,7 @@ session = await joinSession({
           let refreshWarning = "";
           if (committed) {
             try {
-              await boundedHostCall("Copilot coordinator refresh", () => coordinator.refresh());
+              await boundedHostCall("Copilot coordinator refresh", () => coordinator.refreshAuthoritative());
               coordinatorReady = true;
             }
             catch {
@@ -889,6 +1095,7 @@ session = await joinSession({
 session.on((event) => {
   coordinator.observeEvent(event);
   if (event.type !== "hook.end" || event.data.hookType !== "preToolUse") return;
+  if (coordinator.hostEventDisposition(event) !== "claimed") return;
   const evidence = guardEvidenceQueue.shift();
   if (!evidence) return;
   const message = JSON.stringify(evidence);
@@ -910,7 +1117,11 @@ session.on((event) => {
   guardEvidenceLogging = guardEvidenceLogging.then(logEvidence, logEvidence);
 });
 try {
-  await boundedHostCall("Copilot coordinator startup refresh", () => coordinator.refresh());
+  await boundedHostCall(
+    "Copilot coordinator startup refresh",
+    () => coordinator.refreshAuthoritative(),
+    startupRefreshTimeoutMs,
+  );
   coordinatorReady = true;
 } catch {
   coordinatorReady = false;

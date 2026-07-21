@@ -1,4 +1,5 @@
 export declare const maximumConcurrentCopilotRoots = 32;
+export declare const maximumCopilotUsageIdentityKeys = 4096;
 export type CopilotTeamRunState = "starting" | "working" | "waiting" | "cleaning" | "completed" | "failed" | "cancelled" | "cleanup-error";
 export type CopilotTeamMemberKind = "manager" | "fixed" | "bundled" | "personal" | "contractor" | "utility";
 export interface CopilotNativeTokenUsage {
@@ -32,6 +33,9 @@ export interface CopilotTeamRunSnapshot {
     readonly observedReasoningEffortsTruncated: boolean;
     readonly usage: CopilotNativeTokenUsage;
     readonly usageLowerBounds: readonly CopilotNativeUsageField[];
+    readonly usageIdentityTruncated: boolean;
+    readonly usageIdentityAmbiguous: boolean;
+    readonly usageAttributionUnverified: boolean;
     readonly nativeCalls?: number;
     readonly durationMs?: number;
     readonly totalToolCalls?: number;
@@ -91,8 +95,15 @@ export declare class CopilotTeamRuntime {
         agentId?: string;
         model?: string;
     }): void;
+    /** Reclassifies one still-active root when an exact user-invoked wrapper is observed after prompt submission. */
+    relabelActiveRoot(runId: string, input: {
+        agent: string;
+        kind: Exclude<CopilotTeamMemberKind, "contractor">;
+        task: string;
+    }): void;
     observeRootModel(runId: string, model?: string, reasoningEffort?: string): void;
     observeUsageEvent(event: CopilotUsageEvent, rootRunId?: string): boolean;
+    markUsageAttributionUnverified(runId: string): void;
     childTerminal(runId: string, outcome: "completed" | "failed", summary?: {
         model?: string;
         durationMs?: number;
@@ -113,9 +124,12 @@ export declare class CopilotTeamRuntime {
     latestRoot(project: string): CopilotTeamRunSnapshot | undefined;
     missionUsage(rootRunId: string): CopilotNativeTokenUsage;
     missionUsageLowerBounds(rootRunId: string): CopilotNativeUsageField[];
+    missionUsageAttributionUnverified(rootRunId: string): boolean;
     projectName(project: string): string;
     private observeModel;
+    private rememberObservedModel;
     private observeEffort;
+    private rememberObservedEffort;
     private snapshot;
     private require;
     private emit;
@@ -127,6 +141,7 @@ export declare function formatCopilotTokenCount(value: number | undefined, lower
 export declare function formatCopilotModel(run: CopilotTeamRunSnapshot): string;
 export declare function formatCopilotReasoning(run: CopilotTeamRunSnapshot): string;
 export declare function formatCopilotUsage(usage: CopilotNativeTokenUsage, lowerBounds?: readonly CopilotNativeUsageField[]): string;
+export declare function formatCopilotNativeTelemetry(run: CopilotTeamRunSnapshot, detailed?: boolean): string;
 export declare function formatCopilotRunDetails(runs: readonly CopilotTeamRunSnapshot[]): string[];
 export declare function formatCopilotMissionDetails(runtime: CopilotTeamRuntime, rootRunId: string): string[];
 export declare function formatCopilotMissionReport(runtime: CopilotTeamRuntime, rootRunId: string): string;

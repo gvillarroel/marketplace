@@ -82,6 +82,9 @@ To send work to one exact agent in any runtime, use `/<id> <task>`, for example:
 /design Design the smallest change that supports this feature.
 ```
 
+To watch every command without spending model tokens, replay the
+[Asciinema demo](docs/ASCIINEMA-DEMO.md).
+
 You can also manage the roster without depending on the host interface:
 
 ```shell

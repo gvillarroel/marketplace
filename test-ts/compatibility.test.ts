@@ -677,6 +677,9 @@ test("compiled Copilot MCP servers are bounded and scope every player skill grou
     { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
     { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "control", arguments: { command: "destroy", args: "{}" } } },
     { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "skill", arguments: { reference: "{}" } } },
+    { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "control", arguments: { command: "contract", args: JSON.stringify({
+      name: "mcp-contractor", description: "One disposable reviewer", prompt: "Review only", tools: ["read"], task: "Review this fixture",
+    }) } } },
   ].map((message) => JSON.stringify(message)).join("\n") + "\n";
   const result = await run({ command: process.execPath, prefix: [] }, [join(dist, "adapters", "copilot-mcp.js")], {
     cwd: project,
@@ -694,6 +697,9 @@ test("compiled Copilot MCP servers are bounded and scope every player skill grou
   assert.match(responses.get(3).result.content[0].text, /invalid Agent Harbor control input/);
   assert.equal(responses.get(4).result.isError, true);
   assert.match(responses.get(4).result.content[0].text, /unknown Agent Harbor tool: skill/);
+  const contractText = responses.get(5).result.content[0].text;
+  assert.deepEqual(Object.keys(JSON.parse(contractText)), ["agent_type", "description", "prompt"]);
+  assert.deepEqual(responses.get(5).result.structuredContent, JSON.parse(contractText));
   assert.deepEqual(await readdir(project), []);
   await assert.rejects(() => access(home), /ENOENT/);
 

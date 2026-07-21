@@ -2,8 +2,9 @@
 name: contract
 description: User-invoked only. Run /contract with one JSON object to execute a disposable native Copilot subagent with requested-tool policy and optional skill guidance.
 argument-hint: "{contractor-json-with-task}"
-allowed-tools: ["agent-harbor(control)", task]
+allowed-tools: ["agent-harbor(control)"]
 user-invocable: true
+disable-model-invocation: true
 ---
 
 # Run a one-shot player

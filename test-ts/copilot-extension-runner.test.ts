@@ -25,6 +25,9 @@ function runScenario(scenario: string): Promise<ScenarioResult> {
         AGENT_HARBOR_COPILOT_SETTLE_MS: "250",
         AGENT_HARBOR_COPILOT_RPC_TIMEOUT_MS: scenario === "send-timeout-buffered-terminal" ? "750" : "250",
         AGENT_HARBOR_COPILOT_LOG_TIMEOUT_MS: "100",
+        ...(scenario.startsWith("team-") && scenario !== "team-default-budget"
+          ? { AGENT_HARBOR_COPILOT_TEAM_BUDGET_MS: "700" }
+          : {}),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -69,6 +72,9 @@ test("Copilot direct runner bounds host hangs and preserves terminal/restore ord
   assert.equal(sendLate.result.restoredAtReturn, 0, "selection restored before a terminal event");
   assert.equal(sendLate.result.restoredAfterLate, 1);
   assert.equal(sendLate.calls.abort, 1);
+  assert.equal(sendLate.result.team.ok, true);
+  assert.match(sendLate.result.teamOutput, /Selection gate: run copilot-run-1 is still settling/u);
+  assert.match(sendLate.result.teamOutput, /Can delegate now: none/u);
 
   assert.equal(bufferedTerminal.result.invocation.ok, true,
     "a terminal observed before send timeout was discarded and left selection pinned");
@@ -94,6 +100,8 @@ test("Copilot direct runner bounds host hangs and preserves terminal/restore ord
   assert.equal(restoreBlock.result.team.ok, true);
   assert.match(restoreBlock.result.teamOutput, /crafter · run copilot-run-1 · fixed · cleaning/u,
     "the coordinator hid a direct run before selection restore completed");
+  assert.match(restoreBlock.result.teamOutput, /Selection gate: direct run copilot-run-1 owns the Copilot session/u);
+  assert.match(restoreBlock.result.teamOutput, /Can delegate now: none/u);
   assert.equal(restoreBlock.result.invocation.ok, true);
 });
 
@@ -126,6 +134,9 @@ test("Copilot direct runner reports active work, provider errors, abort failures
   assert.match(errorText(restoreFailure.result.invocation.error), /session\.error/u);
   assert.match(errorText(restoreFailure.result.invocation.error), /selection restore failed/u);
   assert.match(errorText(restoreFailure.result.retry.error), /reload the Copilot session/u);
+  assert.equal(restoreFailure.result.team.ok, true);
+  assert.match(restoreFailure.result.teamOutput, /selection restoration is unverified after run copilot-run-1/u);
+  assert.match(restoreFailure.result.teamOutput, /Can delegate now: none/u);
   assert.equal(restoreFailure.calls.deselect, 3);
   assert.equal(restoreFailure.calls.send, 1);
 });
@@ -165,9 +176,9 @@ test("Copilot direct runner fences prior-run idle and usage events after prompt 
 
   assert.equal(usage.result.invocation.ok, true);
   const report = String(usage.result.missionOutput).replace(/\s+/gu, " ");
-  assert.match(report, /current-model \(observed\).*native usage events 1/u);
+  assert.match(report, /current-model \(observed\).*1 native usage event/u);
   assert.match(report, /in 20 · out 2 .* total 22/u);
-  assert.doesNotMatch(report, /old-model|mixed observed|native usage events 2|\b900\b|\b990\b|1,012/u);
+  assert.doesNotMatch(report, /old-model|mixed observed|2 native usage events|\b900\b|\b990\b|1,012/u);
 });
 
 test("Copilot stop cannot send after cancellation, selection syncs the guard, and child admission reserves the member", async () => {
@@ -218,12 +229,12 @@ test("Copilot direct roots count each native usage event once across raw and lif
   assert.equal(ownership.result.team.ok, true);
   const output = `${ownership.result.missionOutput}\n${ownership.result.teamOutput}`;
   const flattened = output.replace(/\s+/gu, " ");
-  assert.match(flattened, /native usage events 1/u);
-  assert.doesNotMatch(flattened, /native usage events 2/u);
+  assert.match(flattened, /1 native usage event/u);
+  assert.doesNotMatch(flattened, /2 native usage events/u);
   assert.match(flattened, /in 101 · out 7 · reason 3 · cache r\/w 11\/2 · total 108/u);
   assert.doesNotMatch(flattened, /in 202|out 14|reason 6|cache r\/w 22\/4|total 216/u);
   assert.match(flattened, /crafter · run copilot-run-2 · parent copilot-run-1/u);
-  assert.match(flattened, /child-model \(observed\).*native usage events 1.*in 31/u);
+  assert.match(flattened, /child-model \(observed\).*1 native usage event.*in 31/u);
   assert.match(flattened, /Mission total .*in 132 · out 12 · reason 5 · cache r\/w 15\/3 · total 144/u);
   assert.equal(ownership.calls.send, 1);
 });
@@ -236,10 +247,31 @@ test("Copilot counts metadata-only usage for manual roots, children, and direct 
   assert.equal(parity.result.direct.ok, true);
   const manual = String(parity.result.manualTeamOutput).replace(/\s+/gu, " ");
   const direct = String(parity.result.directMissionOutput).replace(/\s+/gu, " ");
-  assert.match(manual, /team-lead · run copilot-run-\d+ · manager · completed .*?native usage events 1 · in — · out —/u);
-  assert.match(manual, /crafter · run copilot-run-\d+ · parent copilot-run-\d+ · fixed · completed .*?native usage events 1 · in — · out —/u);
-  assert.match(direct, /crafter · run copilot-run-\d+ · fixed · completed .*?native usage events 1 · in — · out —/u);
+  assert.match(manual, /team-lead · run copilot-run-\d+ · manager · completed .*?1 native usage event · in — · out —/u);
+  assert.match(manual, /crafter · run copilot-run-\d+ · parent copilot-run-\d+ · fixed · completed .*?1 native usage event · in — · out —/u);
+  assert.match(direct, /crafter · run copilot-run-\d+ · fixed · completed .*?1 native usage event · in — · out —/u);
   assert.doesNotMatch(`${manual} ${direct}`, /\b(?:in|out|reason|total) 0\b|cache r\/w 0\/0/u);
+});
+
+test("Copilot manual roots prefer configured profile models and preserve explicit no-reasoning", async () => {
+  const [profile, direct] = await Promise.all([
+    runScenario("manual-profile-model"),
+    runScenario("direct-provider-confirmation"),
+  ]);
+
+  assert.equal(profile.result.initialTeam.ok, true);
+  assert.equal(profile.result.confirmedTeam.ok, true);
+  assert.equal(profile.result.observedTeam.ok, true);
+  const initial = String(profile.result.initialTeamOutput).replace(/\s+/gu, " ");
+  const confirmed = String(profile.result.confirmedTeamOutput).replace(/\s+/gu, " ");
+  const observed = String(profile.result.observedTeamOutput).replace(/\s+/gu, " ");
+  assert.match(initial, /crafter · run copilot-run-\d+ · fixed · working .*profile-model \(configured\) · reasoning effort none \(inherited\)/u);
+  assert.match(confirmed, /crafter · run copilot-run-\d+ · fixed · working .*profile-model \(observed\) · reasoning effort none \(observed\)/u);
+  assert.match(observed, /crafter · run copilot-run-\d+ · fixed · working .*provider-model \(observed; also profile-model\) · reasoning effort high \(observed; also none\)/u);
+
+  assert.equal(direct.result.invocation.ok, true);
+  const directReport = String(direct.result.missionOutput).replace(/\s+/gu, " ");
+  assert.match(directReport, /crafter · run copilot-run-\d+ · fixed · completed .*profile-model \(observed\) · reasoning effort none \(observed\)/u);
 });
 
 test("Copilot interactive output bypasses notification backlog and reports partial availability", async () => {
@@ -268,12 +300,117 @@ test("Copilot interactive output bypasses notification backlog and reports parti
   assert.match(errorText(startupFailure.result.player.error), /agent reload.*timed out/u);
   const startupLogs = startupFailure.logs.map(({ message }) => message).join("\n");
   assert.match(startupLogs, /Native agent discovery\/coordinator is not ready/u);
-  assert.match(startupLogs, /Delegable now: none/u);
-  assert.doesNotMatch(startupLogs, /Delegable now:.*crafter/u);
+  assert.match(startupLogs, /Can delegate now: none/u);
+  assert.doesNotMatch(startupLogs, /Can delegate now:.*crafter/u);
 
   const inferredLogs = inferredChild.logs.map(({ message }) => message).join("\n");
   assert.match(inferredLogs, /admitted \(inferred; native start not observed\)/u);
   assert.doesNotMatch(inferredLogs, /crafter started/u);
+});
+
+test("Copilot /team keeps one shared interactive deadline across startup, degraded reads, display, and stop", async () => {
+  const [degraded, defaultBudget, displayHang, stop] = await Promise.all([
+    runScenario("team-degraded-budget"),
+    runScenario("team-default-budget"),
+    runScenario("team-total-budget"),
+    runScenario("team-stop-budget"),
+  ]);
+
+  assert.equal(degraded.result.team.ok, true);
+  assert.ok(degraded.result.elapsedMs < 1_700, `degraded import + /team took ${degraded.result.elapsedMs}ms`);
+  assert.match(degraded.result.teamOutput, /Degraded bounded snapshot \(700ms budget\)/u);
+  assert.match(degraded.result.teamOutput, /project scope unavailable/u);
+  assert.doesNotMatch(degraded.result.teamOutput, /ROSTER|marketplace/u);
+  assert.equal(degraded.calls.send, 0);
+
+  assert.equal(defaultBudget.result.team.ok, false,
+    "a display that exceeded the shared default deadline was reported as successful");
+  assert.ok(defaultBudget.result.elapsedMs >= 1_900,
+    `late display did not exercise most of the 2200ms shared budget (${defaultBudget.result.elapsedMs}ms)`);
+  assert.ok(defaultBudget.result.elapsedMs < 2_700,
+    `default late display + /team took ${defaultBudget.result.elapsedMs}ms`);
+
+  assert.equal(displayHang.result.team.ok, false, "a hung display was reported as a successful /team output");
+  assert.ok(displayHang.result.elapsedMs < 1_700, `hung import + /team took ${displayHang.result.elapsedMs}ms`);
+
+  assert.equal(stop.result.stopped.ok, false, "a hung abort was reported as settled");
+  assert.ok(stop.result.elapsedMs < 950, `bounded /team stop took ${stop.result.elapsedMs}ms`);
+  assert.equal(stop.calls.abort, 1);
+  assert.equal(stop.result.team.ok, true);
+  assert.match(stop.result.teamOutput, /crafter · run copilot-run-1 · fixed · cleaning/u);
+});
+
+test("Copilot /team fails closed without project scope and clears transient discovery failures after recovery", async () => {
+  const [unverifiedStop, scope, read] = await Promise.all([
+    runScenario("team-unverified-stop"),
+    runScenario("team-scope-recovery"),
+    runScenario("team-read-recovery"),
+  ]);
+  assert.equal(unverifiedStop.result.stopped.ok, false);
+  assert.match(errorText(unverifiedStop.result.stopped.error), /project scope is unavailable.*stop fails closed/u);
+  assert.equal(unverifiedStop.calls.abort, 0);
+
+  assert.equal(scope.result.first.ok, true);
+  assert.match(scope.result.firstOutput, /project scope unavailable/u);
+  assert.doesNotMatch(scope.result.firstOutput, /ROSTER|marketplace/u);
+  assert.equal(scope.result.second.ok, true);
+  assert.match(scope.result.secondOutput, /Team: 3 ready · 0 active/u);
+  assert.doesNotMatch(scope.result.secondOutput, /degraded|project scope unavailable/u);
+
+  assert.equal(read.result.team.ok, true);
+  assert.ok(read.calls.list >= 2, "the native roster was not retried after refresh");
+  assert.doesNotMatch(read.result.teamOutput, /degraded|native roster unavailable/u);
+});
+
+test("Copilot /team help and --help are deterministic zero-token control guidance", async () => {
+  const help = await runScenario("team-help");
+  assert.equal(help.result.help.ok, true);
+  assert.equal(help.result.longHelp.ok, true);
+  assert.equal(help.result.outputs.length, 2);
+  for (const output of help.result.outputs) {
+    assert.match(output, /Agent Harbor Copilot team help · 0 model tokens/u);
+    assert.match(output, /\/team <filter>/u);
+    assert.match(output, /\/team stop <run-id\|all>/u);
+    assert.match(output, /32 concurrent roots.*6 sequential team-lead delegations/u);
+    assert.match(output, /omitted rows.*lossy\/redacted.*process-local/u);
+    assert.ok(output.split("\n").every((line) => line.length <= 96));
+  }
+  assert.equal(help.calls.send, 0);
+});
+
+test("Copilot /contract flows through the extension runtime into active and historical /team telemetry", async () => {
+  const contract = await runScenario("contract-team-observability");
+  assert.equal(contract.result.controlWasUndefined, true,
+    "the identity-free preTool hook auto-authorized the contract control");
+  assert.equal(contract.result.taskDecision?.permissionDecision, "allow");
+  assert.equal(contract.result.activeTeam.ok, true);
+  assert.equal(contract.result.historyTeam.ok, true);
+  const active = String(contract.result.activeTeamOutput).replace(/\s+/gu, " ");
+  assert.match(active, /contract · run copilot-run-1 · utility · waiting/u);
+  assert.match(active, /ephemeral-reviewer · run copilot-run-2 · parent copilot-run-1 · contractor · working/u);
+  assert.match(active, /root-model \(observed\) · reasoning effort low \(observed\).*1 native usage event · 13 native tokens/u);
+  assert.match(active, /child-model \(observed\) · reasoning effort high \(observed\).*1 native usage event · 24 native tokens/u);
+  assert.match(active, /Can delegate now: none · child run copilot-run-2 is active/u);
+
+  const history = String(contract.result.historyTeamOutput).replace(/\s+/gu, " ");
+  assert.match(history, /LAST MISSION/u);
+  assert.match(history, /contract · run copilot-run-1 · utility · completed/u);
+  assert.match(history, /ephemeral-reviewer · run copilot-run-2 · parent copilot-run-1 · contractor · completed/u);
+  assert.match(history, /Native child: duration 00:00\.750 · tool calls 2/u);
+  assert.match(history, /1 native usage event[\s\S]*in ≥20 · out ≥4[\s\S]*total 30/u);
+  assert.match(history, /Mission total[\s\S]*in ≥31 · out ≥6 · reason ≥3 · cache r\/w ≥8\/≥2 · total 43/u);
+  assert.doesNotMatch(history, /2 native usage events/u);
+  for (const secret of [
+    "PRIVATE-RAW-CONTRACT-SECRET",
+    "PRIVATE-TASK-SECRET",
+    "PRIVATE-VALIDATED-CONTRACT-SECRET",
+    "PRIVATE CHILD RESULT",
+    "private\\contract.ts",
+  ]) {
+    assert.equal(`${contract.result.activeTeamOutput}\n${contract.result.historyTeamOutput}`.includes(secret), false);
+  }
+  assert.ok(String(contract.result.activeTeamOutput).split("\n").every((line) => line.length <= 96));
+  assert.ok(String(contract.result.historyTeamOutput).split("\n").every((line) => line.length <= 96));
 });
 
 test("Copilot first team view recovers delayed discovery and lifecycle controls stay actionable and private", async () => {

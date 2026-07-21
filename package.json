@@ -17,7 +17,9 @@
   "files": [
     "docs/",
     "dist/",
-    "plugins/"
+    "plugins/",
+    "scripts/asciinema-demo.mjs",
+    "scripts/asciinema-replay.mjs"
   ],
   "engines": {
     "node": ">=22.19.0",
@@ -34,6 +36,7 @@
     "test:live:codex": "node scripts/run-live-codex-leads.mjs all",
     "test:installed:copilot": "node scripts/verify-installed-copilot.mjs",
     "test:installed:copilot:smoke": "node scripts/verify-installed-copilot.mjs --smoke",
+    "demo:commands": "node scripts/asciinema-demo.mjs",
     "prepack": "npm run build"
   },
   "keywords": [

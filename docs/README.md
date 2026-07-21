@@ -10,6 +10,8 @@
 - [Copilot team observability](COPILOT-TEAM-OBSERVABILITY.md): zero-model roster
   and activity views, dynamic player invocation, native lifecycle accounting,
   timeout/abort behavior, and selection restoration.
+- [Asciinema command demo](ASCIINEMA-DEMO.md): replay and regenerate a complete
+  tour of the plugin's deterministic and model-backed command boundaries.
 - [Simplification plan](SIMPLIFICATION-PLAN.md): scope and metrics for the core
   simplification.
 - [Test evidence](TEST-LOG.md): recorded validations and results.

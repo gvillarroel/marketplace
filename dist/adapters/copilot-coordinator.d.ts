@@ -30,6 +30,13 @@ interface ToolHookInput extends HookBaseInput {
     toolName: string;
     toolArgs: unknown;
 }
+interface PreMcpToolCallHookInput extends HookBaseInput {
+    toolCallId?: string;
+    serverName: string;
+    toolName: string;
+    arguments: unknown;
+    _meta?: Record<string, unknown>;
+}
 interface PostToolHookInput extends ToolHookInput {
     toolResult?: unknown;
 }
@@ -73,6 +80,8 @@ export interface CopilotCoordinatorRunCorrelation {
     timestamp?: string;
     /** Whether Copilot reported the lifecycle fact or the guard inferred it. */
     basis: "observed" | "inferred";
+    /** Runtime presentation kind for invocation-scoped wrappers and contractors. */
+    memberKind?: "utility" | "contractor";
 }
 export interface CopilotCoordinatorRootStartedEvent extends CopilotCoordinatorRunCorrelation {
     type: "root.started";
@@ -105,6 +114,13 @@ export interface CopilotCoordinatorRunReasoningEvent extends CopilotCoordinatorR
     /** A setting such as `low` or `high`; never model reasoning content. */
     reasoningEffort: string | null;
 }
+export interface CopilotCoordinatorRunIdentityEvent extends CopilotCoordinatorRunCorrelation {
+    type: "run.identity";
+    agent: string;
+    runtimeAgent: string;
+    taskLabel: string;
+    memberKind: "utility" | "contractor";
+}
 export interface CopilotCoordinatorNativeUsage {
     inputTokens?: number;
     outputTokens?: number;
@@ -121,6 +137,8 @@ export interface CopilotCoordinatorRunUsageEvent extends CopilotCoordinatorRunCo
     providerCallId?: string;
     model?: string;
     reasoningEffort?: string | null;
+    /** The host payload matched prior usage from another lifecycle owner, so no counters were attributed. */
+    attributionUnverified?: boolean;
     usage: CopilotCoordinatorNativeUsage;
 }
 export interface CopilotCoordinatorRunFinishedEvent extends CopilotCoordinatorRunCorrelation {
@@ -132,23 +150,25 @@ export interface CopilotCoordinatorRunFinishedEvent extends CopilotCoordinatorRu
     totalToolCalls?: number;
 }
 /** Content-free lifecycle stream consumed by the in-memory Copilot team runtime. */
-export type CopilotCoordinatorLifecycleEvent = CopilotCoordinatorRootStartedEvent | CopilotCoordinatorChildStartedEvent | CopilotCoordinatorRunStateEvent | CopilotCoordinatorRunModelEvent | CopilotCoordinatorRunReasoningEvent | CopilotCoordinatorRunUsageEvent | CopilotCoordinatorRunFinishedEvent;
+export type CopilotCoordinatorLifecycleEvent = CopilotCoordinatorRootStartedEvent | CopilotCoordinatorChildStartedEvent | CopilotCoordinatorRunStateEvent | CopilotCoordinatorRunIdentityEvent | CopilotCoordinatorRunModelEvent | CopilotCoordinatorRunReasoningEvent | CopilotCoordinatorRunUsageEvent | CopilotCoordinatorRunFinishedEvent;
 /** Best-effort observer; callback failures never change delegation behavior. */
 export type CopilotCoordinatorLifecycleHook = (event: CopilotCoordinatorLifecycleEvent) => void | Promise<void>;
 /** Synchronous child admission check; throwing denies the native `task` before model work starts. */
 export type CopilotCoordinatorAdmissionHook = (input: {
-    type: "child";
+    type: "root" | "child";
     project: string;
     rootRunId: string;
-    parentRunId: string;
+    parentRunId?: string;
     runId: string;
     agent: string;
     runtimeAgent: string;
     taskLabel: string;
+    memberKind?: "utility" | "contractor";
 }) => void;
 /** Hook callbacks installed into the Copilot extension session. */
 export interface CopilotCoordinatorHooks {
     onUserPromptSubmitted(input: UserPromptHookInput, invocation: HookInvocation): Promise<void>;
+    onPreMcpToolCall(input: PreMcpToolCallHookInput, invocation: HookInvocation): Promise<void>;
     onPreToolUse(input: ToolHookInput, invocation: HookInvocation): Promise<PreToolDecision | void>;
     onPostToolUse(input: PostToolHookInput, invocation: HookInvocation): Promise<void>;
     onPostToolUseFailure(input: PostToolFailureHookInput, invocation: HookInvocation): Promise<void>;
@@ -158,6 +178,12 @@ export interface CopilotCoordinatorGuard {
     hooks: CopilotCoordinatorHooks;
     refresh(expectedCurrentId?: string): Promise<void>;
     refreshAuthoritative(): Promise<void>;
+    lifecycleIdentityUnverified(): boolean;
+    /** @deprecated Use lifecycleIdentityUnverified; retained for compatible generated extensions. */
+    terminalIdentityUnverified(): boolean;
+    hostEventWasClaimed(event: CopilotCoordinatorHostEvent): boolean | undefined;
+    hostEventDisposition(event: CopilotCoordinatorHostEvent): "claimed" | "replay" | "unverified" | undefined;
+    terminalEventDisposition(event: CopilotCoordinatorHostEvent): "claimed" | "replay" | "unverified" | undefined;
     observeEvent(event: CopilotCoordinatorHostEvent): void;
 }
 /** Structural subset of Copilot SDK 1.0.6 session events used by the guard. */
@@ -173,20 +199,31 @@ export interface CopilotCoordinatorHostEvent {
         apiCallId?: string;
         cacheReadTokens?: number;
         cacheWriteTokens?: number;
+        arguments?: Record<string, unknown>;
         currentModel?: string;
         durationMs?: number;
         error?: unknown;
         inputTokens?: number;
+        initiator?: string;
+        interactionId?: string;
+        hookInvocationId?: string;
+        hookType?: string;
         model?: string;
+        mcpServerName?: string;
+        mcpToolName?: string;
+        messageId?: string;
+        name?: string;
         newModel?: string;
         outputTokens?: number;
         parentToolCallId?: string;
         providerCallId?: string;
+        pluginName?: string;
         reasoningEffort?: string | null;
         reasoningTokens?: number;
         result?: unknown;
         selectedModel?: string;
         serviceRequestId?: string;
+        source?: string;
         sessionId?: string;
         shutdownType?: string;
         success?: boolean;
@@ -198,6 +235,7 @@ export interface CopilotCoordinatorHostEvent {
         tools?: string[] | null;
         totalTokens?: number;
         totalToolCalls?: number;
+        trigger?: string;
         turnId?: string;
         /** Other SDK fields, including content-bearing fields, are deliberately ignored. */
         [key: string]: unknown;

@@ -4,6 +4,7 @@ import { basename, resolve } from "node:path";
 import { wrapPlainLines } from "../core/text-layout.js";
 
 export const maximumConcurrentCopilotRoots = 32;
+export const maximumCopilotUsageIdentityKeys = 4_096;
 
 export type CopilotTeamRunState =
   | "starting"
@@ -50,6 +51,9 @@ export interface CopilotTeamRunSnapshot {
   readonly observedReasoningEffortsTruncated: boolean;
   readonly usage: CopilotNativeTokenUsage;
   readonly usageLowerBounds: readonly CopilotNativeUsageField[];
+  readonly usageIdentityTruncated: boolean;
+  readonly usageIdentityAmbiguous: boolean;
+  readonly usageAttributionUnverified: boolean;
   readonly nativeCalls?: number;
   readonly durationMs?: number;
   readonly totalToolCalls?: number;
@@ -112,6 +116,9 @@ interface MutableRun {
   observedReasoningEffortsTruncated: boolean;
   usage: Partial<Record<CopilotNativeUsageField, number>>;
   usageLowerBounds: Set<CopilotNativeUsageField>;
+  usageIdentityTruncated: boolean;
+  usageIdentityAmbiguous: boolean;
+  usageAttributionUnverified: boolean;
   nativeCalls: number;
   durationMs?: number;
   totalToolCalls?: number;
@@ -121,6 +128,7 @@ interface MutableRun {
 
 const usageFields: readonly CopilotNativeUsageField[] = ["input", "output", "reasoning", "cacheRead", "cacheWrite", "total"];
 const activeStates = new Set<CopilotTeamRunState>(["starting", "working", "waiting", "cleaning"]);
+const childAdmissionStates = new Set<CopilotTeamRunState>(["starting", "working", "waiting"]);
 const terminalStates = new Set<CopilotTeamRunState>(["completed", "failed", "cancelled", "cleanup-error"]);
 
 function nativeNumber(value: unknown): number | undefined {
@@ -208,7 +216,7 @@ export class CopilotTeamRuntime {
     const parent = this.runs.get(parentRunId);
     if (!parent) throw new Error("unknown parent team run");
     if (parent.project !== projectKey(project)) throw new Error("child team run must use its parent's project");
-    if (!activeStates.has(parent.state)) throw new Error(`parent team run is not active: ${parentRunId}`);
+    if (!childAdmissionStates.has(parent.state)) throw new Error(`parent team run is not accepting children: ${parentRunId}`);
     if (kind === "contractor") return;
     const safeAgent = copilotPublicIdentifier(agent, 120) ?? "unknown-agent";
     const busy = this.activeProjectRuns(project).find((run) =>
@@ -249,6 +257,9 @@ export class CopilotTeamRuntime {
       observedReasoningEffortsTruncated: false,
       usage: {},
       usageLowerBounds: new Set(),
+      usageIdentityTruncated: false,
+      usageIdentityAmbiguous: false,
+      usageAttributionUnverified: false,
       nativeCalls: 0,
       seenUsageKeys: new Set(),
       agentKeys: new Set(),
@@ -277,8 +288,29 @@ export class CopilotTeamRuntime {
     this.setState(runId, "working");
   }
 
+  /** Reclassifies one still-active root when an exact user-invoked wrapper is observed after prompt submission. */
+  relabelActiveRoot(
+    runId: string,
+    input: { agent: string; kind: Exclude<CopilotTeamMemberKind, "contractor">; task: string },
+  ): void {
+    const run = this.require(runId);
+    if (run.parentRunId !== undefined || !childAdmissionStates.has(run.state)) {
+      throw new Error("only a root accepting work can be relabeled");
+    }
+    run.agent = copilotPublicIdentifier(input.agent, 120) ?? "unknown-agent";
+    run.kind = input.kind;
+    run.task = copilotTaskLabel(input.task);
+    this.emit(runId);
+  }
+
   observeRootModel(runId: string, model?: string, reasoningEffort?: string): void {
     const run = this.require(runId);
+    const nextModel = copilotPublicIdentifier(model, 200);
+    if (nextModel && run.model && run.model !== nextModel) this.rememberObservedModel(run, run.model);
+    const nextEffort = copilotPublicIdentifier(reasoningEffort, 80);
+    if (nextEffort && run.reasoningEffort && run.reasoningEffort !== nextEffort) {
+      this.rememberObservedEffort(run, run.reasoningEffort);
+    }
     this.observeModel(run, model);
     this.observeEffort(run, reasoningEffort);
     this.emit(runId);
@@ -302,20 +334,41 @@ export class CopilotTeamRuntime {
       event.data.providerCallId === undefined ? undefined : ["provider", event.data.providerCallId],
       event.id === undefined ? undefined : ["event", event.id],
     ].filter((value) => value !== undefined);
-    if (!identities.length) identities.push(["fallback", {
-      timestamp: event.timestamp,
-      agent: event.agentId ? privateKey(event.agentId, this.fingerprintKey) : "root",
-      model: event.data.model,
-      input: event.data.inputTokens,
-      output: event.data.outputTokens,
-      reasoning: event.data.reasoningTokens,
-      cacheRead: event.data.cacheReadTokens,
-      cacheWrite: event.data.cacheWriteTokens,
-    }]);
+    const usesFallbackIdentity = identities.length === 0;
+    if (usesFallbackIdentity) {
+      identities.push(["fallback", {
+        timestamp: event.timestamp,
+        agent: event.agentId ? privateKey(event.agentId, this.fingerprintKey) : "root",
+        model: event.data.model,
+        input: event.data.inputTokens,
+        output: event.data.outputTokens,
+        reasoning: event.data.reasoningTokens,
+        cacheRead: event.data.cacheReadTokens,
+        cacheWrite: event.data.cacheWriteTokens,
+      }]);
+      // Without any host/provider call identity, equal payloads cannot be
+      // distinguished from replays. Keep deduplication deterministic but make
+      // both the call count and every token counter an explicit lower bound.
+      run.usageIdentityAmbiguous = true;
+      for (const field of usageFields) run.usageLowerBounds.add(field);
+    }
     const keys = identities.map((identity) => privateKey(identity, this.fingerprintKey));
     const replay = keys.some((key) => run.seenUsageKeys.has(key));
-    for (const key of keys) run.seenUsageKeys.add(key);
-    if (replay) return false;
+    const unseenKeys = [...new Set(keys)].filter((key) => !run.seenUsageKeys.has(key));
+    if (run.usageIdentityTruncated ||
+        run.seenUsageKeys.size + unseenKeys.length > maximumCopilotUsageIdentityKeys) {
+      if (!run.usageIdentityTruncated) {
+        run.usageIdentityTruncated = true;
+        for (const field of usageFields) run.usageLowerBounds.add(field);
+        this.emit(runId);
+      }
+      return false;
+    }
+    for (const key of unseenKeys) run.seenUsageKeys.add(key);
+    if (replay) {
+      if (usesFallbackIdentity) this.emit(runId);
+      return false;
+    }
     this.observeModel(run, event.data.model);
     this.observeEffort(run, event.data.reasoningEffort);
     const input = nativeNumber(event.data.inputTokens);
@@ -338,6 +391,15 @@ export class CopilotTeamRuntime {
     if (run.state === "starting") run.state = "working";
     this.emit(runId);
     return true;
+  }
+
+  markUsageAttributionUnverified(runId: string): void {
+    const run = this.runs.get(runId);
+    if (!run || terminalStates.has(run.state) || run.usageAttributionUnverified) return;
+    // Deliberately do not increment nativeCalls, add counters, or synthesize a
+    // lower bound: the ambiguous host payload may belong to another root.
+    run.usageAttributionUnverified = true;
+    this.emit(runId);
   }
 
   childTerminal(
@@ -460,6 +522,10 @@ export class CopilotTeamRuntime {
       run.usage[field] === undefined || run.usageLowerBounds.includes(field)));
   }
 
+  missionUsageAttributionUnverified(rootRunId: string): boolean {
+    return this.mission(rootRunId).some((run) => run.usageAttributionUnverified);
+  }
+
   projectName(project: string): string {
     return basename(resolve(project)) || "project";
   }
@@ -469,6 +535,10 @@ export class CopilotTeamRuntime {
     if (!model) return;
     run.model = model;
     run.modelSource = "observed";
+    this.rememberObservedModel(run, model);
+  }
+
+  private rememberObservedModel(run: MutableRun, model: string): void {
     const key = privateKey(model, this.fingerprintKey);
     if (!run.observedModels.has(key)) {
       if (run.observedModels.size < 8) run.observedModels.set(key, model);
@@ -481,6 +551,10 @@ export class CopilotTeamRuntime {
     if (!effort) return;
     run.reasoningEffort = effort;
     run.reasoningSource = "observed";
+    this.rememberObservedEffort(run, effort);
+  }
+
+  private rememberObservedEffort(run: MutableRun, effort: string): void {
     const key = privateKey(effort, this.fingerprintKey);
     if (!run.observedReasoningEfforts.has(key)) {
       if (run.observedReasoningEfforts.size < 8) run.observedReasoningEfforts.set(key, effort);
@@ -512,6 +586,9 @@ export class CopilotTeamRuntime {
       observedReasoningEffortsTruncated: run.observedReasoningEffortsTruncated,
       usage: cloneUsage(run),
       usageLowerBounds: [...run.usageLowerBounds],
+      usageIdentityTruncated: run.usageIdentityTruncated,
+      usageIdentityAmbiguous: run.usageIdentityAmbiguous,
+      usageAttributionUnverified: run.usageAttributionUnverified,
       ...(run.nativeCalls > 0 ? { nativeCalls: run.nativeCalls } : {}),
       ...(run.durationMs === undefined ? {} : { durationMs: run.durationMs }),
       ...(run.totalToolCalls === undefined ? {} : { totalToolCalls: run.totalToolCalls }),
@@ -562,12 +639,22 @@ export function formatCopilotElapsed(milliseconds: number): string {
     : `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
+function formatCopilotNativeDuration(milliseconds: number): string {
+  return `${formatCopilotElapsed(milliseconds)}.${String(Math.floor(milliseconds % 1_000)).padStart(3, "0")}`;
+}
+
 export function formatCopilotTokenCount(value: number | undefined, lowerBound = false): string {
   return value === undefined ? "—" : `${lowerBound ? "≥" : ""}${new Intl.NumberFormat("en-US").format(value)}`;
 }
 
 export function formatCopilotModel(run: CopilotTeamRunSnapshot): string {
   if (run.observedModels.length > 1 || run.observedModelsTruncated) {
+    if (run.model) {
+      const also = run.observedModels.filter((model) => model !== run.model);
+      return `${run.model} (${run.modelSource ?? "observed"}${also.length || run.observedModelsTruncated
+        ? `; also ${also.join(", ")}${run.observedModelsTruncated ? `${also.length ? ", " : ""}+more` : ""}`
+        : ""})`;
+    }
     return `mixed observed: ${run.observedModels.join(", ")}${run.observedModelsTruncated ? ", +more" : ""}`;
   }
   return run.model ? `${run.model} (${run.modelSource ?? "inherited"})` : "unknown/default (unobserved)";
@@ -575,6 +662,13 @@ export function formatCopilotModel(run: CopilotTeamRunSnapshot): string {
 
 export function formatCopilotReasoning(run: CopilotTeamRunSnapshot): string {
   if (run.observedReasoningEfforts.length > 1 || run.observedReasoningEffortsTruncated) {
+    if (run.reasoningEffort) {
+      const also = run.observedReasoningEfforts.filter((effort) => effort !== run.reasoningEffort);
+      return `reasoning effort ${run.reasoningEffort}${run.reasoningSource ? ` (${run.reasoningSource}` : " (observed"}${
+        also.length || run.observedReasoningEffortsTruncated
+          ? `; also ${also.join(", ")}${run.observedReasoningEffortsTruncated ? `${also.length ? ", " : ""}+more` : ""}`
+          : ""})`;
+    }
     return `reasoning effort mixed: ${run.observedReasoningEfforts.join(", ")}${run.observedReasoningEffortsTruncated ? ", +more" : ""}`;
   }
   return `reasoning effort ${run.reasoningEffort ?? "unknown"}${run.reasoningSource ? ` (${run.reasoningSource})` : ""}`;
@@ -594,6 +688,47 @@ export function formatCopilotUsage(
   ].join(" · ");
 }
 
+export function formatCopilotNativeTelemetry(
+  run: CopilotTeamRunSnapshot,
+  detailed = true,
+): string {
+  const hasCounters = Object.values(run.usage).some((value) => value !== undefined);
+  const identityNotes = [
+    ...(run.usageIdentityAmbiguous
+      ? ["native usage identity unavailable; indistinguishable events deduplicated"]
+      : []),
+    ...(run.usageIdentityTruncated
+      ? ["identity capacity reached; later events omitted"]
+      : []),
+    ...(run.usageAttributionUnverified
+      ? ["native usage attribution unverified; ambiguous counters omitted"]
+      : []),
+  ];
+  if (run.usageAttributionUnverified && (run.nativeCalls ?? 0) === 0 && !hasCounters) {
+    return identityNotes.join(" · ");
+  }
+  if (run.nativeCalls === undefined && !hasCounters) {
+    return [
+      run.usageIdentityTruncated
+        ? "native telemetry identity capacity reached; later events omitted"
+        : "native telemetry not observed yet",
+      ...identityNotes.filter((note) => note !== "identity capacity reached; later events omitted"),
+    ].join(" · ");
+  }
+  const eventLabel = run.nativeCalls === undefined
+    ? "native aggregate"
+    : run.usageIdentityTruncated || run.usageIdentityAmbiguous
+      ? `${formatCopilotTokenCount(run.nativeCalls, true)} native usage ${run.nativeCalls === 1 ? "event" : "events"}`
+      : `${formatCopilotTokenCount(run.nativeCalls)} native usage ${run.nativeCalls === 1 ? "event" : "events"}`;
+  if (!hasCounters) {
+    return [eventLabel, "token counters unavailable", ...identityNotes].join(" · ");
+  }
+  const summary = detailed
+    ? `${eventLabel} · ${formatCopilotUsage(run.usage, run.usageLowerBounds)}`
+    : `${eventLabel} · ${formatCopilotTokenCount(run.usage.total, run.usageLowerBounds.includes("total"))} native tokens`;
+  return [summary, ...identityNotes].join(" · ");
+}
+
 export function formatCopilotRunDetails(runs: readonly CopilotTeamRunSnapshot[]): string[] {
   const lines: string[] = [];
   for (const run of runs) {
@@ -601,7 +736,10 @@ export function formatCopilotRunDetails(runs: readonly CopilotTeamRunSnapshot[])
     const detail = run.parentRunId ? "     " : "  ";
     lines.push(`${branch} ${run.agent} · run ${run.id}${run.parentRunId ? ` · parent ${run.parentRunId}` : ""} · ${run.kind} · ${run.state} · ${formatCopilotElapsed(run.elapsedMs)}`);
     lines.push(`${detail}Task: “${run.task}”`);
-    lines.push(`${detail}${formatCopilotModel(run)} · ${formatCopilotReasoning(run)} · native usage events ${run.nativeCalls ?? "—"} · ${formatCopilotUsage(run.usage, run.usageLowerBounds)}`);
+    lines.push(`${detail}${formatCopilotModel(run)} · ${formatCopilotReasoning(run)} · ${formatCopilotNativeTelemetry(run)}`);
+    if (run.parentRunId && (run.durationMs !== undefined || run.totalToolCalls !== undefined)) {
+      lines.push(`${detail}Native child: duration ${run.durationMs === undefined ? "—" : formatCopilotNativeDuration(run.durationMs)} · tool calls ${run.totalToolCalls ?? "—"}`);
+    }
   }
   return wrapPlainLines(lines);
 }
@@ -611,7 +749,10 @@ export function formatCopilotMissionDetails(runtime: CopilotTeamRuntime, rootRun
   if (!runs.length) return ["Team run unavailable."];
   const root = runs.find((run) => run.id === rootRunId) ?? runs[0];
   const lines = formatCopilotRunDetails(runs);
-  lines.push(`Mission total · ${formatCopilotElapsed(root.elapsedMs)} · ${formatCopilotUsage(runtime.missionUsage(rootRunId), runtime.missionUsageLowerBounds(rootRunId))}`);
+  const attributionNote = runtime.missionUsageAttributionUnverified(rootRunId)
+    ? " · native usage attribution unverified; mission counters incomplete"
+    : "";
+  lines.push(`Mission total · ${formatCopilotElapsed(root.elapsedMs)} · ${formatCopilotUsage(runtime.missionUsage(rootRunId), runtime.missionUsageLowerBounds(rootRunId))}${attributionNote}`);
   return wrapPlainLines(lines);
 }
 

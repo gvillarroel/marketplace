@@ -109,6 +109,14 @@ async function callTool(params, signal) {
         if (!commandNames.includes(args.command) || typeof args.args !== "string")
             throw new Error("invalid Agent Harbor control input");
         const text = await runCopilotControl(args.command, args.args, process.cwd(), signal);
+        if (args.command === "contract") {
+            const structuredContent = object(JSON.parse(text));
+            requireKeys(structuredContent, ["agent_type", "description", "prompt"]);
+            if (typeof structuredContent.agent_type !== "string" || typeof structuredContent.description !== "string" ||
+                typeof structuredContent.prompt !== "string")
+                throw new Error("invalid Agent Harbor contract descriptor");
+            return { content: [{ type: "text", text }], structuredContent, isError: false };
+        }
         return { content: [{ type: "text", text }], isError: false };
     }
     const playerId = mode.kind === "skills" && request.name === "skills"
