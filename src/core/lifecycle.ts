@@ -17,7 +17,7 @@ import { decodePlayer, isCanonicalPlayerProfile } from "./profiles.js";
 import { validateSkillReference } from "./skills.js";
 
 const legacyBundledIds = new Set<string>(legacyBundledPlayerIds);
-const reserved = new Set([...bundledPlayers.keys(), ...legacyBundledPlayerIds, "team-lead", "repo-cartographer", "crafter", "bench", "join", "retire", "contract", "list-skills"]);
+const reserved = new Set([...bundledPlayers.keys(), ...legacyBundledPlayerIds, "team-lead", "crafter", "talent-scout", "bench", "join", "retire", "contract", "list-skills"]);
 const allowedTools = new Set(["read", "search", "edit", "execute"]);
 
 type BenchAction = "on" | "off";

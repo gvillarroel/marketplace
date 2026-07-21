@@ -21,7 +21,7 @@ function message(error: unknown): string {
 export function openCodeDirectCommands(api: TuiPluginApi): DirectTuiCommand[] {
   const execute = async (command: DeterministicCommandName, args: string): Promise<void> => {
     try {
-      const result = await runDeterministicCommand("opencode", command, args, api.state.path.directory, undefined, command === "list-skills");
+      const result = await runDeterministicCommand("opencode", command, args, api.state.path.directory, undefined, command === "list-skills" ? "ansi" : "plain");
       api.ui.toast({ variant: "success", title: "Agent Harbor · 0 model tokens", message: result, duration: 10_000 });
     } catch (error) {
       api.ui.toast({ variant: "error", title: "Agent Harbor", message: message(error), duration: 10_000 });

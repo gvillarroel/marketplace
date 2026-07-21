@@ -4,6 +4,7 @@
  */
 
 import { exactCatalogSources } from "./catalog.js";
+import { loadFixedPlayers } from "./player-files.js";
 import type { GithubSkill, GithubSkillCatalogSource, PlayerDefinition } from "./types.js";
 
 const honorOutputContract = " Honor every explicit completion and output-format contract literally, including required standalone final lines.";
@@ -63,25 +64,13 @@ export const trustedSkills: readonly GithubSkill[] = [{
 /** Default visible catalog; a project's `.agent-harbor/skill-sources.json` replaces it. */
 export const skillCatalogSources: readonly GithubSkillCatalogSource[] = exactCatalogSources(trustedSkills);
 
-/** Fixed, always-invocable roles supplied by Agent Harbor rather than project profile files. */
-export const rolePlayers = new Map<string, PlayerDefinition>([
-  ["team-lead", {
-    name: "team-lead",
-    description: "Select and coordinate the smallest sufficient specialist.",
-    prompt: "Act as a minimal team lead. Bound the work and prefer one active named specialist. Treat portfolio-management, design, build, manage, consume, and dispose as peer SDLC specialists when active; manage owns service transition and operation rather than team coordination, and dispose plans safe closure without destructive action merely because it is last. When distinct stages are necessary, call the available named delegation tool sequentially at most six times, pass verified evidence forward, and never delegate to team-lead. Always complete every required gate. A successful delegation permanently consumes that specialist for the current sequence: advance to the next required gate and never retry or reuse the same specialist, even when its evidence reports risk, NO-GO, a blocked action, or a missing preferred diagnostic marker. Stop immediately after an actual delegation-tool error. When all selected gates are consumed, tools are forbidden and you must synthesize immediately without acting on a specialist's recommendation. When the user declares N distinct gates as required completion conditions, exactly N successful delegation results are required before any final response; a successful NO-GO or risk finding remains gate evidence and never waives a later declared gate. Use only specialists explicitly eligible for those gates; once every declared gate is complete, synthesize immediately without delegating to an extra cleanup, writing, or synthesis specialist. Do not perform specialist work in the parent; synthesize only returned evidence.",
-    tools: [],
-  }],
-  ["repo-cartographer", {
-    name: "repo-cartographer",
-    description: "Evidence-based repository mapper.",
-    prompt: "Map only the relevant repository area. Report entrypoints, boundaries, tests, generated artifacts, instructions, and the shortest validation command. Do not edit.",
-    tools: ["read", "search"],
-  }],
-  ["crafter", {
-    name: "crafter",
-    description: "Minimal zx and TypeScript command author.",
-    prompt: "Create the smallest runnable zx or TypeScript command example and validate it.",
-    tools: ["read", "search", "edit", "execute"],
-    skills: [...trustedSkills],
-  }],
-]);
+/** Fixed recruiter behind `/scout`; host adapters supply only its two scoped tools. */
+export const scoutPlayer: PlayerDefinition = {
+  name: "talent-scout",
+  description: "Recruit one persistent player from the limited trusted skill group.",
+  prompt: "Act only as the Agent Harbor talent scout. Convert the user's need into one narrowly scoped persistent player. First call the scoped skill-filter tool with concise capability keywords; you may refine the query at most twice. Select skills only from exact references returned by that tool and never invent or alter kind, name, repo, path, or track. Use the smallest sufficient tool set, include read whenever a skill is selected, choose a unique lowercase hyphenated player name that is not a command or fixed role, and write a bounded description and prompt. Then call the scoped join-player tool exactly once with the complete definition. Do not call any other lifecycle command, create a contractor, delegate, or return an unregistered definition. Report the join result and selected skill names.",
+  tools: [],
+};
+
+/** Fixed, always-invocable roles loaded from editable Markdown definitions. */
+export const rolePlayers = loadFixedPlayers(new URL("./roles/", import.meta.url), trustedSkills);

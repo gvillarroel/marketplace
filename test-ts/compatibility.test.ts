@@ -208,9 +208,11 @@ async function inspectCopilotDirectExtension(launch: Launch, sandbox: string, wo
     assert.ok(direct, `Copilot must discover the direct /bench extension command: ${JSON.stringify(listed.commands)}`);
     const expectedCommands = [...rolePlayers.keys(), ...bundledPlayers.keys()].map((id) => `harbor-${id}`);
     assert.ok(expectedCommands.every((name) => listed.commands.some((command) => command.name === name && command.kind === "client")));
+    assert.ok(listed.commands.some((command) => command.name === "scout" && command.kind === "client"));
 
     const initial = await session.rpc.agent.list();
     for (const id of rolePlayers.keys()) assert.ok(initial.agents.some((agent) => agent.name === id || agent.id.endsWith(`:${id}`)), id);
+    assert.ok(initial.agents.some((agent) => agent.id === "agent-foundry:talent-scout"), "talent-scout");
     for (const id of bundledPlayers.keys()) assert.ok(!initial.agents.some((agent) => agent.name === id || agent.id === id), `${id} must start on the bench`);
     await assert.rejects(() => session!.rpc.commands.invoke({ name: "harbor-portfolio-management", input: "must not reach a model" }), /not active/i);
 
@@ -371,6 +373,8 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
   assert.match(extension, /joinSession/);
   assert.match(extension, /runDeterministicCommand/);
   assert.match(extension, /name === "list-skills"/);
+  assert.match(extension, /\? "copilot" : "plain"/);
+  assert.match(extension, /Agent Harbor · skill catalog · 0 model tokens/);
   assert.match(extension, /createCopilotCoordinatorGuard/);
   assert.match(extension, /hooks: coordinator\.hooks/);
   assert.match(extension, /coordinator\.observeEvent/);
@@ -392,6 +396,12 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
   assert.match(crafter, /`skills` from the player-scoped `repo-cartographer-crafter-skills` MCP server/);
   assert.doesNotMatch(crafter, /"agent-harbor\/skill"/);
   assert.doesNotMatch(crafter, /agent_harbor_skill/);
+  const scout = await readFile(join(plugins, "agent-foundry", "agents", "talent-scout.agent.md"), "utf8");
+  assert.match(scout, /"agent-harbor-scout\/filter_skills"/);
+  assert.match(scout, /"agent-harbor-scout\/join_player"/);
+  assert.match(scout, /"--scout"/);
+  assert.match(scout, /^tools: \["agent-harbor-scout\/filter_skills", "agent-harbor-scout\/join_player"\]$/mu);
+  assert.doesNotMatch(scout, /^tools: .*\b(?:read|search|edit|execute|task)\b/mu);
 });
 
 test("Copilot runtimes contain exact physical byte copies of their shared build inputs", async () => {
@@ -412,7 +422,8 @@ test("Copilot runtimes contain exact physical byte copies of their shared build 
     const coreRoot = join(runtimeDist, "core");
     const adapterRoot = join(runtimeDist, "adapters");
     assert.deepEqual((await readdir(runtimeDist)).sort(), ["adapters", "core"]);
-    assert.deepEqual((await readdir(coreRoot)).sort(), coreFiles, `${runtime.name} must contain all and only dist/core JavaScript`);
+    assert.deepEqual((await readdir(coreRoot)).sort(), [...coreFiles, "roles"].sort(), `${runtime.name} must contain generated core JavaScript and fixed role Markdown`);
+    assert.deepEqual((await readdir(join(coreRoot, "roles"))).sort(), ["crafter.md", "repo-cartographer.md", "team-lead.md"]);
     assert.deepEqual((await readdir(adapterRoot)).sort(), [...runtime.adapters].sort(), `${runtime.name} adapter inventory`);
 
     for (const directory of [runtimeDist, coreRoot, adapterRoot]) {
@@ -559,6 +570,26 @@ test("compiled Copilot MCP servers are bounded and scope every player skill grou
   succeeded(crafterScoped);
   const crafterResponses = new Map(crafterScoped.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)).map((message) => [message.id, message]));
   assert.deepEqual(crafterResponses.get(2).result.tools.map((tool: any) => tool.name), ["skills"]);
+
+  const scoutInput = [
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } },
+    { jsonrpc: "2.0", method: "notifications/initialized" },
+    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "control", arguments: { command: "bench", args: "list" } } },
+    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "join_player", arguments: { definition: {
+      name: "scouted-worker", description: "Scouted worker", prompt: "Perform bounded work.", tools: ["read"],
+    } } } },
+  ].map((message) => JSON.stringify(message)).join("\n") + "\n";
+  const scoutServer = await run({ command: process.execPath, prefix: [] }, [join(dist, "adapters", "copilot-mcp.js"), "--scout"], {
+    cwd: project, env: { ...process.env, COPILOT_HOME: home, PATH: join(sandbox, "no-executables") }, input: scoutInput, timeout: 10_000,
+  });
+  succeeded(scoutServer);
+  const scoutResponses = new Map(scoutServer.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)).map((message) => [message.id, message]));
+  assert.deepEqual(scoutResponses.get(2).result.tools.map((tool: any) => tool.name), ["filter_skills", "join_player"]);
+  assert.equal(scoutResponses.get(3).result.isError, true);
+  assert.match(scoutResponses.get(3).result.content[0].text, /unknown Agent Harbor tool: control/);
+  assert.equal(scoutResponses.get(4).result.isError, false);
+  assert.match(scoutResponses.get(4).result.content[0].text, /joined scouted-worker/);
 
   await Promise.all([
     mkdir(join(project, "skills", "mcp-fixture"), { recursive: true }),

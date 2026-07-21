@@ -13,14 +13,6 @@
       "source": "./plugins/agent-foundry",
       "category": "productivity",
       "tags": ["agents", "roster", "orchestration", "sdlc", "bench", "skills", "trust", "markdown"]
-    },
-    {
-      "name": "repo-cartographer",
-      "description": "Repository mapping plus zx and TypeScript command crafting through a player-scoped GitHub skill group.",
-      "version": "0.6.0",
-      "source": "./plugins/repo-cartographer",
-      "category": "development",
-      "tags": ["repositories", "zx", "typescript", "external-skill", "reference-only"]
     }
   ]
 }

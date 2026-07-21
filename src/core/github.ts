@@ -91,7 +91,17 @@ function text(value: string | Uint8Array): string {
  * Validates a bounded UTF-8 `SKILL.md` document and returns its non-empty instruction body.
  * The single top-level frontmatter name must match the canonical configured reference.
  */
-export function parseSkillBody(raw: string | Uint8Array, expectedName: string, sourceLabel = "GitHub"): string {
+function parseScalar(value: string, field: string, sourceLabel: string): string {
+  try {
+    const parsed = value.startsWith('"') ? JSON.parse(value) : value.startsWith("'") && value.endsWith("'")
+      ? value.slice(1, -1).replace(/''/g, "'") : value;
+    if (typeof parsed !== "string" || parsed.includes("\0") || parsed.includes("\n")) throw new Error();
+    return parsed;
+  } catch { throw new Error(`${sourceLabel} skill has invalid ${field} frontmatter`); }
+}
+
+/** Parses bounded public frontmatter and the private instruction body. */
+export function parseSkillDocument(raw: string | Uint8Array, expectedName?: string, sourceLabel = "GitHub"): { name: string; description: string; body: string } {
   const source = bytes(raw);
   if (source.length === 0 || source.length > 18_000) throw new Error(`${sourceLabel} skill body must be 1..18000 UTF-8 bytes`);
   const document = text(source).replace(/\r\n/g, "\n");
@@ -100,16 +110,22 @@ export function parseSkillBody(raw: string | Uint8Array, expectedName: string, s
   if (end < 0 || end > 4_096) throw new Error(`${sourceLabel} skill has invalid frontmatter`);
   const names = document.slice(4, end).split("\n").filter((line) => line.startsWith("name:"));
   if (names.length !== 1) throw new Error(`${sourceLabel} skill must declare exactly one top-level name`);
-  const scalar = names[0].slice("name:".length).trim();
-  let name: string;
-  try {
-    name = scalar.startsWith('"') ? JSON.parse(scalar) : scalar.startsWith("'") && scalar.endsWith("'")
-      ? scalar.slice(1, -1).replace(/''/g, "'") : scalar;
-  } catch { throw new Error(`${sourceLabel} skill has invalid name frontmatter`); }
-  if (name !== expectedName) throw new Error(`${sourceLabel} skill name does not match its canonical reference`);
+  const name = parseScalar(names[0].slice("name:".length).trim(), "name", sourceLabel);
+  if (!isHarborId(name)) throw new Error(`${sourceLabel} skill has invalid name frontmatter`);
+  if (expectedName !== undefined && name !== expectedName) throw new Error(`${sourceLabel} skill name does not match its canonical reference`);
+  const descriptions = document.slice(4, end).split("\n").filter((line) => line.startsWith("description:"));
+  if (descriptions.length > 1) throw new Error(`${sourceLabel} skill must declare at most one top-level description`);
+  const description = descriptions.length
+    ? parseScalar(descriptions[0].slice("description:".length).trim(), "description", sourceLabel).trim()
+    : "";
+  if (description.length > 1_000) throw new Error(`${sourceLabel} skill description exceeds 1000 characters`);
   const body = document.slice(end + 5).trim();
   if (!body) throw new Error(`${sourceLabel} skill body is empty`);
-  return body;
+  return { name, description, body };
+}
+
+export function parseSkillBody(raw: string | Uint8Array, expectedName: string, sourceLabel = "GitHub"): string {
+  return parseSkillDocument(raw, expectedName, sourceLabel).body;
 }
 
 /** Returns whether all security-relevant coordinates exactly match an allowlisted skill reference. */
@@ -166,6 +182,22 @@ export class GhResolver implements GithubResolver {
     return { commit, body: parseSkillBody(raw, skill.name) };
   }
 
+  /** Loads only bounded frontmatter metadata for one exact allowlisted reference. */
+  async describe(skill: GithubSkill, signal?: AbortSignal): Promise<{ commit: string; description: string }> {
+    validateGithubSkill(skill);
+    const commit = await this.resolveCoordinates(skill.repo, skill.track, signal);
+    const raw = await this.rawSkill(skill.repo, skill.path, commit, signal);
+    return { commit, description: parseSkillDocument(raw, skill.name).description };
+  }
+
+  private async rawSkill(repo: string, path: string, commit: string, signal?: AbortSignal): Promise<string | Uint8Array> {
+    if (!safeRepo(repo) || !safeSegments(path, false) || !/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid GitHub catalog coordinates");
+    return this.run(this.executable, [
+      "api", "--hostname", "github.com", "--method", "GET", "-H", "Accept: application/vnd.github.raw+json",
+      `repos/${repo}/contents/${path}`, "-f", `ref=${commit}`,
+    ], signal, this.timeoutMs);
+  }
+
   /** Enumerates only `SKILL.md` blobs within one validated catalog scope. */
   async listCatalog(value: GithubSkillCatalogSource, signal?: AbortSignal): Promise<readonly GithubSkillCatalogEntry[]> {
     const source = validateGithubSkillCatalogSource(value);
@@ -177,7 +209,7 @@ export class GhResolver implements GithubResolver {
       ], signal, this.timeoutMs)).trim();
       if (!/^[a-f0-9]{40}$/.test(blob)) throw new Error("invalid blob SHA from gh");
       const inferred = source.path === "SKILL.md" ? source.repo.slice(source.repo.indexOf("/") + 1) : posix.basename(posix.dirname(source.path!));
-      return [{ repo: source.repo, path: source.path!, name: source.name ?? inferred }];
+      return [{ repo: source.repo, path: source.path!, name: source.name ?? inferred, track: source.track, commit }];
     }
     const raw = text(await this.run(this.executable, [
       "api", "--hostname", "github.com", "--method", "GET",
@@ -196,9 +228,18 @@ export class GhResolver implements GithubResolver {
       if (seen.has(path)) throw new Error("duplicate skill path in repository tree");
       seen.add(path);
       const inferred = path === "SKILL.md" ? source.repo.slice(source.repo.indexOf("/") + 1) : posix.basename(posix.dirname(path));
-      entries.push({ repo: source.repo, path, name: inferred });
+      entries.push({ repo: source.repo, path, name: inferred, track: source.track, commit });
       if (entries.length > 500) throw new Error("skill catalog scope exceeds 500 entries; choose a narrower folder");
     }
     return entries;
+  }
+
+  /** Loads a catalog row's description from the immutable commit that produced it. */
+  async describeCatalog(entry: GithubSkillCatalogEntry, signal?: AbortSignal): Promise<string> {
+    if (!entry.commit || !entry.track) throw new Error("catalog row lacks pinned metadata");
+    const raw = await this.rawSkill(entry.repo, entry.path, entry.commit, signal);
+    // Catalog `name` may intentionally be a display override. Execution-trusted
+    // references use describe(), which still enforces the canonical name.
+    return parseSkillDocument(raw).description;
   }
 }

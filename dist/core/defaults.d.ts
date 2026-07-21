@@ -11,5 +11,7 @@ export declare const bundledPlayers: Map<string, PlayerDefinition>;
 export declare const trustedSkills: readonly GithubSkill[];
 /** Default visible catalog; a project's `.agent-harbor/skill-sources.json` replaces it. */
 export declare const skillCatalogSources: readonly GithubSkillCatalogSource[];
-/** Fixed, always-invocable roles supplied by Agent Harbor rather than project profile files. */
-export declare const rolePlayers: Map<string, PlayerDefinition>;
+/** Fixed recruiter behind `/scout`; host adapters supply only its two scoped tools. */
+export declare const scoutPlayer: PlayerDefinition;
+/** Fixed, always-invocable roles loaded from editable Markdown definitions. */
+export declare const rolePlayers: ReadonlyMap<string, PlayerDefinition>;

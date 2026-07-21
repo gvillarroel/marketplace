@@ -14,7 +14,7 @@ import { isHarborId } from "./identity.js";
 import { decodePlayer, isCanonicalPlayerProfile } from "./profiles.js";
 import { validateSkillReference } from "./skills.js";
 const legacyBundledIds = new Set(legacyBundledPlayerIds);
-const reserved = new Set([...bundledPlayers.keys(), ...legacyBundledPlayerIds, "team-lead", "repo-cartographer", "crafter", "bench", "join", "retire", "contract", "list-skills"]);
+const reserved = new Set([...bundledPlayers.keys(), ...legacyBundledPlayerIds, "team-lead", "repo-cartographer", "crafter", "talent-scout", "bench", "join", "retire", "contract", "list-skills"]);
 const allowedTools = new Set(["read", "search", "edit", "execute"]);
 /** Parses bench syntax without touching roster state or the filesystem. */
 function parseBenchCommand(args, bundled) {

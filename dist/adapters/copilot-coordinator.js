@@ -4,14 +4,18 @@
  */
 import { resolve } from "node:path";
 import { listManagedActiveIds } from "../core/active.js";
+import { rolePlayers } from "../core/defaults.js";
 import { emitHarborEvidence, fingerprintHarborEvidence } from "../core/evidence.js";
 import { harnessProfileLayout } from "../core/harnesses.js";
 /** Maps stable Harbor role IDs to Copilot's plugin-qualified runtime IDs. */
-export const copilotFixedAgentIds = new Map([
+const specializedCopilotRoles = new Map([
     ["team-lead", "agent-foundry:team-lead"],
     ["repo-cartographer", "repo-cartographer:repo-cartographer"],
     ["crafter", "repo-cartographer:crafter"],
 ]);
+export const copilotFixedAgentIds = new Map([...rolePlayers.keys()].map((id) => [id, specializedCopilotRoles.get(id) ?? `agent-foundry:${id}`]));
+/** Plugin-qualified identity used only by the explicit `/scout` command. */
+export const copilotScoutAgentId = "agent-foundry:talent-scout";
 function samePath(left, right) {
     const normalize = (value) => process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value);
     return normalize(left) === normalize(right);
@@ -26,7 +30,7 @@ export function listCopilotActiveProfileIds(project) {
 }
 /** Resolves one logical ID to exactly one currently invocable Copilot identity. */
 export function resolveCopilotPlayer(id, agents, project) {
-    const fixedId = copilotFixedAgentIds.get(id);
+    const fixedId = id === "talent-scout" ? copilotScoutAgentId : copilotFixedAgentIds.get(id);
     if (fixedId) {
         const exact = agents.find((agent) => agent.id === fixedId);
         if (exact)

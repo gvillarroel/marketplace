@@ -12,7 +12,7 @@ function noModelOrchestrator(harness) {
  * The injected orchestrator is a tripwire: deterministic commands must never
  * cross the inference boundary, even if command routing regresses.
  */
-export function runDeterministicCommand(harness, command, args, project = process.cwd(), signal, color = false) {
-    return harborContext(harness, project, noModelOrchestrator(harness), color)
+export function runDeterministicCommand(harness, command, args, project = process.cwd(), signal, catalogStyle = "plain") {
+    return harborContext(harness, project, noModelOrchestrator(harness), catalogStyle)
         .then((context) => executeCommand(command, args, context, signal));
 }

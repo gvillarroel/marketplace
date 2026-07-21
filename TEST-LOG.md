@@ -76,3 +76,42 @@ exact-skill discovery, immutable GitHub branch resolution, no remote body
 download during listing, ANSI presentation in native terminal surfaces, and the
 absence of model-routed Copilot skill wrappers for all four deterministic
 controls.
+
+## Copilot catalog presentation gate
+
+Recorded at `2026-07-20T23:26:14-04:00` from published commit `557f103` plus
+the presentation changes under review.
+
+| Command | Result |
+| --- | --- |
+| `npm test` | Passed: 91 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 17,210.488 ms |
+| Authenticated Copilot-style catalog preview | Passed; bordered Unicode table with exactly `REPOSITORY`, `PATH`, and `SKILL` |
+| `git diff --check` | Passed |
+
+The Copilot extension selects its dedicated `copilot` presentation in the
+zero-model command handler and labels the ephemeral timeline entry with
+`0 model tokens`. ANSI color remains adaptive through `NO_COLOR` and `TERM`.
+
+## Talent scout and description-filter gate
+
+Recorded at `2026-07-20T23:42:21-04:00` from published commit `557f103` plus
+the scout, catalog-description, editable-role, and presentation changes under
+review.
+
+| Command | Result |
+| --- | --- |
+| `npm test` | Passed: 95 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 21,110.807 ms |
+| `npm run typecheck` | Passed |
+| Authenticated `node dist/cli.js copilot list-skills --descriptions` | Passed; four-column metadata-only output with the real `zx-example-author` description |
+| Authenticated trusted-skill filter for `scripts zx automatizar` | Passed; returned only the exact allowlisted `zx-example-author` coordinates and public description |
+| Native CLI discovery inside `npm test` | Passed: Copilot CLI, OpenCode and Pi; Copilot discovered `/scout` and `agent-foundry:talent-scout` |
+| `npm audit --audit-level=high` | Passed: 0 vulnerabilities |
+| `npm pack --dry-run --json` | Passed: 112 entries, 107,453 bytes packed, 595,391 bytes unpacked; includes the scout agent, generated scout core, and fixed role Markdown |
+| `git diff --check` | Passed |
+
+The suite proves that the scout tools are unavailable to ordinary OpenCode
+agents, invocation-scoped in Pi, and isolated in a Copilot `--scout` MCP
+process that rejects the general lifecycle control. Its join still passes
+through the shared validation and ownership transaction. Catalog description
+tests verify opt-in rendering and filtering without exposing instruction
+bodies, commits, or blobs.

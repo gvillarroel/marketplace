@@ -3,7 +3,7 @@
  *
  * With no arguments it exposes only the global `control` tool. With
  * `--skills-player <id>` it exposes only that player's no-argument `skills`
- * tool, preventing one persistent profile from querying another skill group.
+ * tool. `--scout` exposes only allowlist filtering and one deterministic join.
  */
 import { Buffer } from "node:buffer";
 import { createInterface } from "node:readline";
@@ -13,6 +13,7 @@ import { trustedSkills } from "../core/defaults.js";
 import { GhResolver } from "../core/github.js";
 import { isHarborId } from "../core/identity.js";
 import { formatLoadedSkillGroup, loadConfiguredSkills } from "../core/skills.js";
+import { filterTrustedSkills, formatScoutSkillMatches } from "../core/scout.js";
 import { commandNames, type CommandName } from "../core/types.js";
 
 type JsonRpcId = number | string;
@@ -31,15 +32,16 @@ const supportedProtocolVersions = ["2025-11-25", "2025-06-18", "2025-03-26", "20
 const activeRequests = new Map<JsonRpcId, AbortController>();
 let initializeSeen = false;
 let initialized = false;
-function scopedPlayerArgument(args: readonly string[]): string | undefined {
-  if (!args.length) return undefined;
+function scopedMode(args: readonly string[]): { kind: "control" } | { kind: "skills"; player: string } | { kind: "scout" } {
+  if (!args.length) return { kind: "control" };
+  if (args.length === 1 && args[0] === "--scout") return { kind: "scout" };
   if (args.length !== 2 || args[0] !== "--skills-player" || !isHarborId(args[1])) {
-    throw new Error("usage: copilot-mcp.js [--skills-player <player-id>]");
+    throw new Error("usage: copilot-mcp.js [--skills-player <player-id>|--scout]");
   }
-  return args[1];
+  return { kind: "skills", player: args[1] };
 }
 
-const scopedPlayer = scopedPlayerArgument(process.argv.slice(2));
+const mode = scopedMode(process.argv.slice(2));
 
 const controlTool = {
   name: "control",
@@ -61,8 +63,29 @@ const isolatedSkillTool = {
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
 } as const;
 
+const scoutFilterTool = {
+  name: "filter_skills",
+  description: "Search only the exact Agent Harbor execution allowlist by name, coordinates, and bounded frontmatter description.",
+  inputSchema: {
+    type: "object", properties: { query: { type: "string", minLength: 1, maxLength: 500 } },
+    required: ["query"], additionalProperties: false,
+  },
+} as const;
+
+const scoutJoinTool = {
+  name: "join_player",
+  description: "Validate, register, and activate exactly one persistent Agent Harbor player.",
+  inputSchema: {
+    type: "object",
+    properties: { definition: { type: "object", description: "Complete closed-schema Agent Harbor player definition" } },
+    required: ["definition"], additionalProperties: false,
+  },
+} as const;
+
 function listedTools() {
-  return scopedPlayer ? [isolatedSkillTool] : [controlTool];
+  if (mode.kind === "skills") return [isolatedSkillTool];
+  if (mode.kind === "scout") return [scoutFilterTool, scoutJoinTool];
+  return [controlTool];
 }
 
 function write(message: unknown): void {
@@ -97,14 +120,14 @@ async function callTool(params: unknown, signal: AbortSignal): Promise<unknown> 
   const request = object(params);
   if (typeof request.name !== "string") throw new Error("tool name must be a string");
   const args = request.arguments === undefined ? {} : object(request.arguments);
-  if (!scopedPlayer && request.name === "control") {
+  if (mode.kind === "control" && request.name === "control") {
     requireKeys(args, ["command", "args"]);
     if (!commandNames.includes(args.command as CommandName) || typeof args.args !== "string") throw new Error("invalid Agent Harbor control input");
     const text = await runCopilotControl(args.command as CommandName, args.args, process.cwd(), signal);
     return { content: [{ type: "text", text }], isError: false };
   }
-  const playerId = scopedPlayer && request.name === "skills"
-    ? scopedPlayer
+  const playerId = mode.kind === "skills" && request.name === "skills"
+    ? mode.player
     : undefined;
   if (playerId) {
     requireKeys(args, []);
@@ -117,6 +140,18 @@ async function callTool(params: unknown, signal: AbortSignal): Promise<unknown> 
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`configured-skill-bootstrap: blocked (${message})`);
     }
+  }
+  if (mode.kind === "scout" && request.name === "filter_skills") {
+    requireKeys(args, ["query"]);
+    if (typeof args.query !== "string") throw new Error("skill filter query must be a string");
+    const matches = await filterTrustedSkills(args.query, trustedSkills, new GhResolver(), signal);
+    return { content: [{ type: "text", text: formatScoutSkillMatches(matches) }], isError: false };
+  }
+  if (mode.kind === "scout" && request.name === "join_player") {
+    requireKeys(args, ["definition"]);
+    const definition = object(args.definition);
+    const joined = await runCopilotControl("join", JSON.stringify(definition), process.cwd(), signal);
+    return { content: [{ type: "text", text: joined }], isError: false };
   }
   throw new Error(`unknown Agent Harbor tool: ${request.name}`);
 }

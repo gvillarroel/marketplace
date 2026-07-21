@@ -39,6 +39,9 @@ sus métricas están en [SIMPLIFICATION-PLAN.md](SIMPLIFICATION-PLAN.md).
    ambiental implícito ni persistencia de cuerpos remotos.
 10. **Artefactos reproducibles.** `dist/` y `plugins/*/runtime/dist/` se generan
     desde `src/` con `scripts/build.mjs`; nunca son la fuente que se edita.
+11. **Reclutamiento acotado.** `/scout` consume un turno del agente fijo
+    `talent-scout`, que sólo puede filtrar metadata de `trustedSkills` y hacer
+    un `join`; no forma parte de los targets delegables del coordinador.
 
 ## Capas y dirección de dependencias
 
@@ -80,9 +83,9 @@ mismo layout.
 | --- | --- | --- |
 | Copilot marketplace | `.github/plugin/marketplace.json` y los `plugin.json` | Instala `agent-foundry` y `repo-cartographer`. |
 | Copilot extensión | `plugins/agent-foundry/extensions/agent-harbor/extension.mjs` | Comandos client deterministas, `/harbor-<id>`, cambio/restauración de agente y guard de `team-lead`. |
-| Copilot MCP | `plugins/agent-foundry/.mcp.json` → runtime generado `adapters/copilot-mcp.js` | Tool global `control`; un proceso `--skills-player <id>` publica sólo `skills` para ese player. |
+| Copilot MCP | `plugins/agent-foundry/.mcp.json` → runtime generado `adapters/copilot-mcp.js` | Tool global `control`; `--skills-player <id>` publica sólo `skills`; `--scout` publica sólo `filter_skills` y `join_player`. |
 | Copilot model-backed | `plugins/agent-foundry/skills/contract/SKILL.md` | Único wrapper Markdown: `/contract` hace preflight y crea exactamente un child. Los cuatro controles deterministas no tienen fallback skill. |
-| OpenCode server | export `.`/`./server` → `dist/adapters/opencode.js` | Plugin `AgentHarborPlugin`: commands, agents y tools `harbor`, `harbor_contract`, `harbor_delegate`, `agent_harbor_skills`. |
+| OpenCode server | export `.`/`./server` → `dist/adapters/opencode.js` | Plugin `AgentHarborPlugin`: commands, agents y tools lifecycle, delegación, skills y las dos tools aisladas del scout. |
 | OpenCode TUI | export `./tui` → `dist/adapters/opencode-tui.js` | Paleta y diálogos directos sin modelo. |
 | Pi | manifest `package.json.pi.extensions` y export `./pi` → `dist/adapters/pi.js` | `ExtensionAPI.registerCommand`/`registerTool`; players reales mediante sesiones SDK en memoria. |
 | CLI universal | `package.json.bin.agent-harbor` → `dist/cli.js` | `agent-harbor <harness> <command> [args]`. |
@@ -160,7 +163,9 @@ enviar el prompt.
 
 ### `team-lead`
 
-El contrato del coordinador está en `src/core/defaults.ts:rolePlayers` y, para
+El contrato del coordinador está en `src/core/roles/team-lead.md`; el cargador
+cerrado de `src/core/player-files.ts` construye `rolePlayers` desde todos los
+Markdown de ese directorio. Para
 Copilot, en `plugins/agent-foundry/agents/team-lead.agent.md`. Debe elegir el
 subconjunto mínimo, no hacer trabajo de especialista en el parent, consumir
 cada especialista exitoso una sola vez y sintetizar sólo la evidencia devuelta.
@@ -190,7 +195,7 @@ Las clases tienen lifecycle diferente:
 
 | Clase | Fuente | Persistencia | Activación |
 | --- | --- | --- | --- |
-| Fija | `rolePlayers` y assets Copilot | No usa roster de usuario. | Siempre invocable. |
+| Fija | `src/core/roles/*.md` → `rolePlayers` y assets Copilot | No usa roster de usuario. | Siempre invocable. |
 | Bundled SDLC | `bundledPlayers` | Sólo copia activa de proyecto. | `bench on`; `bench off` la elimina. |
 | Personal | JSON de `join` | Registro en home + copia activa inicial. | `bench off` conserva registro; `bench on` re-renderiza desde revisión 4; `retire` elimina registro y copia actual. |
 | Legacy | IDs `scout`, `sage`, `smith`, `probe`, `guard`, `pilot` | Sólo se reconoce para cleanup seguro. | Nunca se reactiva ni se acepta como target. |

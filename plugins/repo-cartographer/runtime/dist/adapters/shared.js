@@ -15,7 +15,7 @@ export function defaultHome(harness) {
     return resolve(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"));
 }
 /** Builds the shared command context while keeping the SDK orchestrator injectable. */
-export async function harborContext(harness, project, orchestrator, color = false) {
+export async function harborContext(harness, project, orchestrator, catalogStyle = "plain") {
     const absoluteProject = resolve(project);
     return {
         roster: new Roster(harnessSpec(harness, defaultHome(harness), absoluteProject)),
@@ -24,6 +24,6 @@ export async function harborContext(harness, project, orchestrator, color = fals
         github: new GhResolver(),
         trustedSkills,
         catalogSources: await loadSkillCatalogSources(absoluteProject, skillCatalogSources),
-        color,
+        catalogStyle,
     };
 }

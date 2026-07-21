@@ -2,7 +2,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { Roster } from "../core/lifecycle.js";
-import { loadSkillCatalogSources } from "../core/catalog.js";
+import { loadSkillCatalogSources, type SkillCatalogStyle } from "../core/catalog.js";
 import { bundledPlayers, skillCatalogSources, trustedSkills } from "../core/defaults.js";
 import { GhResolver } from "../core/github.js";
 import { harnessSpec } from "../core/profiles.js";
@@ -17,7 +17,7 @@ export function defaultHome(harness: HarnessName): string {
 }
 
 /** Builds the shared command context while keeping the SDK orchestrator injectable. */
-export async function harborContext(harness: HarnessName, project: string, orchestrator: Orchestrator, color = false): Promise<HarborContext> {
+export async function harborContext(harness: HarnessName, project: string, orchestrator: Orchestrator, catalogStyle: SkillCatalogStyle = "plain"): Promise<HarborContext> {
   const absoluteProject = resolve(project);
   return {
     roster: new Roster(harnessSpec(harness, defaultHome(harness), absoluteProject)),
@@ -26,6 +26,6 @@ export async function harborContext(harness: HarnessName, project: string, orche
     github: new GhResolver(),
     trustedSkills,
     catalogSources: await loadSkillCatalogSources(absoluteProject, skillCatalogSources),
-    color,
+    catalogStyle,
   };
 }

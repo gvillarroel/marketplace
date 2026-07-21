@@ -442,11 +442,35 @@ ruta cero modelo.
   scope `repository`, `folder` o `skill`.
 - Resuelve cada rama mediante el `gh` autenticado del usuario y enumera como
   máximo 500 `SKILL.md` por scope desde ese snapshot.
-- Reporta una tabla compacta con sólo `REPOSITORY`, `PATH` y `SKILL`; las
-  superficies terminales **DEBEN** solicitar color ANSI cuando lo soporten.
+- Reporta por defecto una tabla compacta con sólo `REPOSITORY`, `PATH` y
+  `SKILL`. `--descriptions`/`-d` **DEBE** añadir `DESCRIPTION` usando sólo el
+  frontmatter acotado, permitir filtrar también por esa descripción y no
+  mostrar el body, commit ni blob; las
+  superficies terminales **DEBEN** solicitar color ANSI cuando lo soporten y
+  Copilot **DEBE** añadir bordes Unicode y una cabecera explícita de cero tokens.
 - La visibilidad **NO DEBE** ampliar `trustedSkills`: repositorios y folders son
   discovery read-only; la ejecución conserva referencias exactas.
 - No clona, instala, cachea, escribe, ejecuta ni muestra el cuerpo remoto.
+
+### `/scout`
+
+- `/scout <necesidad>` **DEBE** seleccionar un agente fijo interno
+  `talent-scout` y consumir exactamente una sesión de modelo reclutador.
+- El agente **DEBE** recibir sólo dos tools scoped: un filtro read-only de
+  metadata y un `join` cerrado. No recibe filesystem, shell, delegación,
+  `/contract`, skills ambientales ni el control lifecycle general.
+- El filtro **DEBE** consultar sólo referencias exactas de `trustedSkills`, no
+  `.agent-harbor/skill-sources.json`; devuelve nombre, repo, path, track y
+  descripción, nunca body ni commit. Admite como máximo tres consultas por la
+  instrucción del agente.
+- El agente puede seleccionar únicamente referencias devueltas sin modificar
+  sus coordenadas, **DEBE** incluir `read` si selecciona una skill y **DEBE**
+  llamar `join` exactamente una vez. La mutación conserva toda la validación,
+  ownership, locking, colisiones y rollback de `/join`.
+- Copilot lo publica como `/scout` mediante extensión y MCP por agente; Pi usa
+  tools custom de la invocación; OpenCode aplica `execution.agent ===
+  "talent-scout"`. El recruiter no entra en el roster delegable del
+  `team-lead`.
 
 ## 5. GitHub y skills privadas
 

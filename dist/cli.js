@@ -23,7 +23,7 @@ else {
     const args = rest.join(" ");
     try {
         if (deterministicCommandNames.includes(command)) {
-            console.log(await runDeterministicCommand(harness, command, args, process.cwd(), undefined, Boolean(process.stdout.isTTY && !process.env.NO_COLOR)));
+            console.log(await runDeterministicCommand(harness, command, args, process.cwd(), undefined, process.stdout.isTTY ? "ansi" : "plain"));
         }
         else if (harness === "copilot") {
             const { CopilotOrchestrator } = await import("./orchestrators/copilot.js");

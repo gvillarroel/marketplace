@@ -5,13 +5,14 @@ import { join } from "node:path";
 import test from "node:test";
 import { listInvocablePlayerIds, listManagedActiveIds, requireInvocablePlayer } from "../src/core/active.js";
 import { executeCommand } from "../src/core/commands.js";
-import { loadSkillCatalogSources, skillCatalogConfigPath } from "../src/core/catalog.js";
+import { formatSkillCatalog, loadSkillCatalogSources, skillCatalogConfigPath } from "../src/core/catalog.js";
 import { bundledPlayers, legacyBundledPlayerIds, skillCatalogSources, trustedSkills } from "../src/core/defaults.js";
 import { GhResolver, validateGithubSkill, validateGithubSkillCatalogSource } from "../src/core/github.js";
 import { Roster } from "../src/core/lifecycle.js";
 import { validatePlayer } from "../src/core/lifecycle.js";
 import { harnessSpec } from "../src/core/profiles.js";
 import { createSkillCapsule, loadConfiguredSkills, validateRepositorySkill } from "../src/core/skills.js";
+import { filterTrustedSkills, formatScoutSkillMatches } from "../src/core/scout.js";
 import type { GithubResolver, HarnessName, Orchestrator } from "../src/core/types.js";
 
 for (const harness of ["copilot", "opencode", "pi"] as const) {
@@ -314,12 +315,56 @@ test("skill catalog enumerates repository, folder, and exact-skill scopes withou
   assert.deepEqual((await resolver.listCatalog({ ...base, scope: "repository" })).map((entry) => entry.name), ["alpha", "beta", "gamma"]);
   assert.deepEqual((await resolver.listCatalog({ ...base, scope: "folder", path: "skills" })).map((entry) => entry.name), ["alpha", "beta"]);
   assert.deepEqual(await resolver.listCatalog({ ...base, scope: "skill", path: "skills/alpha/SKILL.md", name: "chosen-name" }), [{
-    repo: "owner/repo", path: "skills/alpha/SKILL.md", name: "chosen-name",
+    repo: "owner/repo", path: "skills/alpha/SKILL.md", name: "chosen-name", track: "refs/heads/main", commit: "a".repeat(40),
   }]);
   assert.equal(observed.length, 6);
   assert.equal(observed.filter((args) => args.some((arg) => arg.includes("/git/trees/"))).length, 2);
   assert.equal(observed.filter((args) => args.some((arg) => arg.includes("/contents/"))).length, 1);
   assert.ok(observed.every((args) => !args.some((arg) => arg.includes("Accept: application/vnd.github.raw"))), "catalog listing must not download skill bodies");
+});
+
+test("description view is explicit, searchable, and still omits skill bodies and commits", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-catalog-description-"));
+  const github: GithubResolver = {
+    resolve: async () => ({ commit: "a".repeat(40), blob: "b".repeat(40) }),
+    load: async () => { throw new Error("skill bodies must not be loaded for catalog descriptions"); },
+    listCatalog: async (source) => [{
+      name: "zx-example-author", repo: source.repo, path: source.path!, track: source.track, commit: "a".repeat(40),
+    }],
+    describeCatalog: async () => "Author small zx scripts for automation.",
+  };
+  const context = {
+    roster: new Roster(harnessSpec("copilot", join(root, "home"), join(root, "project"))),
+    bundled: bundledPlayers,
+    orchestrator: { harness: "copilot", run: async () => "unused" } as Orchestrator,
+    github, trustedSkills, catalogStyle: "copilot" as const,
+  };
+  const output = (await executeCommand("list-skills", "--descriptions automation", context)).replace(/\x1b\[[0-9;]*m/gu, "");
+  assert.match(output, /REPOSITORY.*PATH.*SKILL.*DESCRIPTION/u);
+  assert.match(output, /Author small zx scripts for automation\./u);
+  assert.doesNotMatch(output, /a{40}|b{40}|instruction body/u);
+  assert.equal((await executeCommand("list-skills", "--descriptions kubernetes", context)).split("\n").length, 4);
+  await assert.rejects(() => executeCommand("list-skills", "--unknown", context), /usage/);
+});
+
+test("talent scout filters only exact trusted skills by bounded public descriptions", async () => {
+  const loaded: string[] = [];
+  const resolver: GithubResolver = {
+    resolve: async () => { throw new Error("resolve is not used"); },
+    load: async () => { throw new Error("instruction bodies must remain private"); },
+    describe: async (skill) => {
+      loaded.push(`${skill.repo}/${skill.path}`);
+      return { commit: "c".repeat(40), description: "Author small zx examples and automation scripts." };
+    },
+  };
+  const matches = await filterTrustedSkills("scripts zx automatizar", trustedSkills, resolver);
+  assert.deepEqual(matches.map((match) => match.name), ["zx-example-author"]);
+  assert.deepEqual(loaded, ["gvillarroel/zx-harness/skills/zx-example-author/SKILL.md"]);
+  const serialized = formatScoutSkillMatches(matches);
+  assert.match(serialized, /"description":"Author small zx examples/);
+  assert.doesNotMatch(serialized, /c{40}|instruction/);
+  assert.deepEqual(await filterTrustedSkills("kubernetes", trustedSkills, resolver), []);
+  await assert.rejects(() => filterTrustedSkills("", trustedSkills, resolver), /1\.\.500/);
 });
 
 test("project skill catalog config replaces defaults with a closed schema", async (t) => {
@@ -338,6 +383,18 @@ test("project skill catalog config replaces defaults with a closed schema", asyn
   assert.throws(() => validateGithubSkillCatalogSource({ ...sources[0], path: "skills" }), /cannot define path/);
   await writeFile(config, JSON.stringify({ version: 1, sources, extra: true }), "utf8");
   await assert.rejects(() => loadSkillCatalogSources(project, skillCatalogSources), /requires exactly version 1 and sources/);
+});
+
+test("Copilot skill catalog uses a bordered three-column terminal view", () => {
+  const output = formatSkillCatalog([{
+    repo: "owner/repo", path: "skills/example/SKILL.md", name: "example",
+  }], "copilot");
+  const plain = output.replace(/\x1b\[[0-9;]*m/gu, "");
+  assert.match(plain, /^╭─+┬─+┬─+╮$/mu);
+  assert.match(plain, /│ REPOSITORY\s+│ PATH\s+│ SKILL\s+│/u);
+  assert.match(plain, /│ owner\/repo\s+│ skills\/example\/SKILL\.md\s+│ example\s+│/u);
+  assert.match(plain, /^╰─+┴─+┴─+╯$/mu);
+  assert.doesNotMatch(plain, /COMMIT|BLOB|TRACK/u);
 });
 
 test("GitHub skill loading stops after one invalid branch SHA without fetching content", async () => {
@@ -405,6 +462,7 @@ test("validation rejects every non-canonical player shape before mutation", () =
     [],
     { ...base, name: "portfolio-management" },
     { ...base, name: "scout" },
+    { ...base, name: "talent-scout" },
     { ...base, name: "sage" },
     { ...base, name: "smith" },
     { ...base, name: "probe" },

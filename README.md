@@ -348,6 +348,7 @@ The suite also exercises exact dispatch of all nine OpenCode IDs, direct Pi invo
 | `/retire` | Remove one personal registration and its managed local copy. |
 | `/contract` | Run one synchronous, invocation-scoped subagent without registration. |
 | `/list-skills` | List trusted GitHub skill references; distinct from built-in `/skills`. |
+| `/scout <need>` | Use one restricted recruiter turn to create and join a persistent player from the execution-trusted skill group. |
 
 The inference budget is part of the executable contract:
 
@@ -355,6 +356,7 @@ The inference budget is part of the executable contract:
 | --- | --- |
 | View or change the bench, join, retire | 0 model requests on a direct surface |
 | List trusted skills | 0 model requests; authenticated `gh` network I/O is allowed |
+| Scout and join a player | One recruiter model session; skill filtering and the final join are deterministic scoped tools |
 | Valid contract | Exactly one child model session |
 | Explicit non-coordinator player command | One prompt to the exact player; 0 routing prompts |
 | Coordinated mission | One coordinator prompt plus 1..6 sequential named children |
@@ -393,7 +395,12 @@ bundled companion profiles:
 
 `portfolio-management → design → build → manage → consume → dispose`
 
-The three fixed roles are active without this command. The six companion names
+The three fixed roles are active without this command. Their editable source is
+`src/core/roles/*.md`: each file declares `name`, `description`, `order`,
+`tools`, and trusted skill names in closed JSON frontmatter, while its Markdown
+body is the prompt. Add a file and rebuild to include another fixed definition;
+duplicate names/orders, symlinks, unknown fields, and untrusted skills fail the
+build or startup closed. The six companion names
 above are only included definitions until activated; discovery and direct
 invocation reject them while they remain on the bench.
 
@@ -415,6 +422,20 @@ same legacy cleanup in its transaction. An unmanaged legacy collision aborts
 the whole mutation and is never overwritten or deleted.
 
 ## Personal players
+
+The model-assisted shortcut is:
+
+```text
+/scout alguien que escriba scripts en zx para automatizar usando sub agentes
+```
+
+`/scout` selects the fixed internal `talent-scout` agent. That agent receives
+no filesystem, shell, ambient skill, delegation, contract, or general
+lifecycle tools. It can only filter the exact `trustedSkills` group by public
+frontmatter metadata and call one closed-schema `join`. It may issue at most
+three filter queries and one join. The generated player is persistent and
+otherwise follows the same validation, ownership, collision, and activation
+rules as a literal `/join`.
 
 ```text
 /join {"name":"reviewer","description":"Read-only reviewer","prompt":"Return three evidence-backed findings.","tools":["read","search"],"skills":[]}
@@ -516,10 +537,14 @@ so you can show a whole repository, one folder, or one exact skill:
 }
 ```
 
-`/list-skills [filter]` displays only `REPOSITORY`, `PATH`, and `SKILL`; Pi,
-Copilot, the OpenCode TUI, and an interactive package CLI request colored
-terminal output. Repository and folder scopes enumerate `SKILL.md` paths from
-one immutable branch snapshot without downloading their bodies. The optional
+`/list-skills [filter]` displays only `REPOSITORY`, `PATH`, and `SKILL`. Add
+`--descriptions` (or `-d`) to append `DESCRIPTION`; description text comes
+only from bounded `SKILL.md` frontmatter and the instruction body remains
+private. Copilot
+uses a dedicated bordered table with aligned colored cells and a zero-token
+heading; Pi, the OpenCode TUI, and an interactive package CLI use the compact
+colored table. Repository and folder scopes enumerate `SKILL.md` paths from one
+immutable branch snapshot without downloading their bodies. The optional
 `name` field overrides the folder-derived name only for an exact `skill` scope.
 Use `"sources": []` to display an empty catalog.
 
@@ -536,11 +561,22 @@ their bodies:
 ```text
 /list-skills
 /list-skills zx
+/list-skills --descriptions
+/list-skills --descriptions automation
 ```
 
 The command uses the developer's authenticated `gh` CLI. It resolves the
 configured branch before listing but keeps commit/blob details out of the
 compact table.
+
+There are therefore two deliberately separate lists to edit:
+
+- `.agent-harbor/skill-sources.json` in the current project controls what
+  `/list-skills` shows and accepts repository, folder, or exact-skill scopes.
+- `trustedSkills` in `src/core/defaults.ts` controls the exact skills that may
+  be assigned to a player and that `/scout` is allowed to return. It accepts
+  only exact `SKILL.md` references; changing it requires rebuilding the
+  package. A broad visible repository never becomes executable implicitly.
 
 ## Agents
 

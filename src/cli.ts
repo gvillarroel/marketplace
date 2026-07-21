@@ -24,7 +24,7 @@ if (!(harnesses as readonly string[]).includes(harnessRaw) || !(commands as read
   const args = rest.join(" ");
   try {
     if ((deterministicCommandNames as readonly string[]).includes(command)) {
-      console.log(await runDeterministicCommand(harness, command as (typeof deterministicCommandNames)[number], args, process.cwd(), undefined, Boolean(process.stdout.isTTY && !process.env.NO_COLOR)));
+      console.log(await runDeterministicCommand(harness, command as (typeof deterministicCommandNames)[number], args, process.cwd(), undefined, process.stdout.isTTY ? "ansi" : "plain"));
     } else if (harness === "copilot") {
       const { CopilotOrchestrator } = await import("./orchestrators/copilot.js");
       console.log(await executeCommand(command, args, await harborContext(harness, process.cwd(), new CopilotOrchestrator())));

@@ -3,10 +3,11 @@ import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { assertInvocablePlayer, listInvocablePlayerIds, listManagedActiveIds, listOwnedActiveIds, loadManagedActivePlayer, requireInvocablePlayer } from "../core/active.js";
 import { executeCommand } from "../core/commands.js";
-import { bundledPlayers, rolePlayers, trustedSkills } from "../core/defaults.js";
+import { bundledPlayers, rolePlayers, scoutPlayer, trustedSkills } from "../core/defaults.js";
 import { GhResolver } from "../core/github.js";
 import { composePlayerInstructions, normalizeDelegatedTaskPaths, openCodePermissionPolicy, openCodeToolPolicy } from "../core/profiles.js";
 import { formatLoadedSkillGroup, loadConfiguredSkills } from "../core/skills.js";
+import { filterTrustedSkills, formatScoutSkillMatches } from "../core/scout.js";
 import { commandNames, type CommandName } from "../core/types.js";
 import { OpenCodeOrchestrator, type OpenCodeModel } from "../orchestrators/opencode.js";
 import { harborContext } from "./shared.js";
@@ -17,7 +18,6 @@ import { harborContext } from "./shared.js";
  */
 export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
   const teamLead = rolePlayers.get("team-lead")!;
-  const repoCartographer = rolePlayers.get("repo-cartographer")!;
   const crafter = rolePlayers.get("crafter")!;
   const delegationTargets = listInvocablePlayerIds("opencode", directory).filter((id) => id !== "team-lead");
   const delegationRoster = delegationTargets.map((id) => {
@@ -30,6 +30,7 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
   const directAgentCommands = new Map<string, string>();
   const turnModels = new Map<string, OpenCodeModel>();
   for (const id of [...rolePlayers.keys(), ...bundledPlayers.keys()]) directAgentCommands.set(`harbor-${id}`, id);
+  directAgentCommands.set("scout", scoutPlayer.name);
   const originatingUserMessage = async (
     sessionID: string,
     messageID: string,
@@ -113,6 +114,12 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
           subtask: false,
         };
       }
+      config.command.scout = {
+        description: "Recruit and join one player from Agent Harbor's limited trusted skill group",
+        template: "$ARGUMENTS",
+        agent: scoutPlayer.name,
+        subtask: false,
+      };
       config.agent = {
         ...(config.agent ?? {}),
         "team-lead": {
@@ -122,13 +129,6 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
           tools: { ...openCodeToolPolicy([]), harbor_delegate: true },
           permission: openCodePermissionPolicy([], ["harbor_delegate"], directory),
         },
-        "repo-cartographer": {
-          description: repoCartographer.description, mode: "subagent",
-          steps: 4,
-          prompt: composePlayerInstructions(repoCartographer),
-          tools: { ...openCodeToolPolicy(repoCartographer.tools), harbor_delegate: false },
-          permission: openCodePermissionPolicy(repoCartographer.tools, [], directory),
-        },
         crafter: {
           description: crafter.description, mode: "subagent",
           steps: 4,
@@ -136,7 +136,27 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
           tools: { ...openCodeToolPolicy(crafter.tools, ["agent_harbor_skills"]), harbor_delegate: false },
           permission: openCodePermissionPolicy(crafter.tools, ["agent_harbor_skills"], directory),
         },
+        [scoutPlayer.name]: {
+          description: scoutPlayer.description, mode: "subagent",
+          steps: 5,
+          prompt: `${composePlayerInstructions(scoutPlayer)} In OpenCode, call harbor_filter_skills with a query string, then call harbor_join_player exactly once with the complete player definition serialized as JSON.`,
+          tools: openCodeToolPolicy([], ["harbor_filter_skills", "harbor_join_player"]),
+          permission: openCodePermissionPolicy([], ["harbor_filter_skills", "harbor_join_player"], directory),
+        },
       };
+      for (const [id, player] of rolePlayers) {
+        if (Object.hasOwn(config.agent, id)) continue;
+        const additional = player.skills?.length ? ["agent_harbor_skills"] : [];
+        config.agent[id] = {
+          description: player.description,
+          mode: "subagent",
+          steps: 4,
+          ...(player.model ? { model: player.model } : {}),
+          prompt: composePlayerInstructions(player, "opencode"),
+          tools: openCodeToolPolicy(player.tools, additional),
+          permission: openCodePermissionPolicy(player.tools, additional, directory),
+        };
+      }
       const managedIds = new Set(listManagedActiveIds("opencode", directory));
       // Owned-but-stale profiles must be removed from host discovery. Leaving
       // an old host entry could silently retain broader tools than revision 4.
@@ -161,7 +181,7 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
       const id = directAgentCommands.get(command);
       if (!id) return;
       if (!args.trim()) throw new Error(`/${command} requires a non-empty task`);
-      assertInvocablePlayer("opencode", directory, id);
+      if (id !== scoutPlayer.name) assertInvocablePlayer("opencode", directory, id);
     },
     tool: {
       harbor: tool({
@@ -180,6 +200,24 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
           const currentDirectory = execution.directory || directory;
           const context = await harborContext("opencode", currentDirectory, new OpenCodeOrchestrator(client, currentDirectory));
           return executeCommand("contract", definition, context, execution.abort);
+        },
+      }),
+      harbor_filter_skills: tool({
+        description: "Talent-scout only: filter the exact execution-trusted skill group by public metadata.",
+        args: { query: tool.schema.string() },
+        execute: async ({ query }, execution) => {
+          if (execution.agent !== scoutPlayer.name) throw new Error("harbor_filter_skills is available only to talent-scout");
+          return formatScoutSkillMatches(await filterTrustedSkills(query, trustedSkills, new GhResolver(), execution.abort));
+        },
+      }),
+      harbor_join_player: tool({
+        description: "Talent-scout only: validate, register, and activate exactly one persistent player.",
+        args: { definition: tool.schema.string() },
+        execute: async ({ definition }, execution) => {
+          if (execution.agent !== scoutPlayer.name) throw new Error("harbor_join_player is available only to talent-scout");
+          const currentDirectory = execution.directory || directory;
+          const context = await harborContext("opencode", currentDirectory, new OpenCodeOrchestrator(client, currentDirectory));
+          return executeCommand("join", definition, context, execution.abort);
         },
       }),
       harbor_delegate: tool({

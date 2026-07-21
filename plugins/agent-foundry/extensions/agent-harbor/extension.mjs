@@ -11,7 +11,7 @@ import {
   resolveCopilotPlayer,
 } from "../../runtime/dist/adapters/copilot-coordinator.js";
 import { runDeterministicCommand } from "../../runtime/dist/adapters/direct.js";
-import { bundledPlayers, rolePlayers } from "../../runtime/dist/core/defaults.js";
+import { bundledPlayers, rolePlayers, scoutPlayer } from "../../runtime/dist/core/defaults.js";
 
 const controls = [
   ["bench", "List, activate, or deactivate Agent Harbor players without a model request."],
@@ -33,14 +33,14 @@ function withSelectionLock(action) {
 
 let session;
 
-async function runPlayer(id, rawTask) {
+async function runPlayer(id, rawTask, command = `harbor-${id}`) {
   const task = rawTask?.trim() ?? "";
-  if (!task) throw new Error(`usage: /harbor-${id} <task>`);
+  if (!task) throw new Error(`usage: /${command} <task>`);
 
   return withSelectionLock(async () => {
     const metadata = await session.rpc.metadata.snapshot();
     const project = metadata.workingDirectory ?? process.cwd();
-    if (!copilotFixedAgentIds.has(id) && !(await activeProfileIds(project)).includes(id)) {
+    if (id !== scoutPlayer.name && !copilotFixedAgentIds.has(id) && !(await activeProfileIds(project)).includes(id)) {
       throw new Error(`Agent Harbor player is not active: ${id}; run /bench on ${id}`);
     }
 
@@ -107,18 +107,30 @@ session = await joinSession({
       handler: async ({ args }) => {
         try {
           const metadata = await session.rpc.metadata.snapshot();
-          const result = await runDeterministicCommand("copilot", name, args ?? "", metadata.workingDirectory ?? process.cwd(), undefined, name === "list-skills");
+          const result = await runDeterministicCommand("copilot", name, args ?? "", metadata.workingDirectory ?? process.cwd(), undefined, name === "list-skills" ? "copilot" : "plain");
           const value = (args ?? "").trim();
           if (name === "join" || name === "retire" || (name === "bench" && /^(on|off)\b/.test(value))) {
             await coordinator.refresh();
           }
-          await session.log(`[Agent Harbor direct · 0 model tokens]\n${result || "Done."}`, { level: "info", ephemeral: true });
+          const heading = name === "list-skills" ? "Agent Harbor · skill catalog · 0 model tokens" : "Agent Harbor direct · 0 model tokens";
+          await session.log(`[${heading}]\n${result || "Done."}`, { level: "info", ephemeral: true });
         } catch (error) {
           await session.log(`[Agent Harbor direct · no model request]\n${error instanceof Error ? error.message : String(error)}`, { level: "error", ephemeral: true });
           throw error;
         }
       },
     })),
+    {
+      name: "scout",
+      description: "Recruit and join one player from Agent Harbor's limited trusted skill group.",
+      handler: async ({ args }) => {
+        try { await runPlayer(scoutPlayer.name, args, "scout"); }
+        catch (error) {
+          await session.log(`[Agent Harbor scout]\n${error instanceof Error ? error.message : String(error)}`, { level: "error", ephemeral: true });
+          throw error;
+        }
+      },
+    },
     ...callableIds.map((id) => ({
       name: `harbor-${id}`,
       description: knownPlayers.get(id)?.description ?? `Run active Agent Harbor player ${id} for one explicit task.`,

@@ -9,10 +9,12 @@ export declare function validateGithubSkill(value: unknown): GithubSkill;
 /** Validates one repository, folder, or exact-skill scope used only for visible discovery. */
 export declare function validateGithubSkillCatalogSource(value: unknown): GithubSkillCatalogSource;
 type GhCommand = (file: string, args: readonly string[], signal?: AbortSignal, timeoutMs?: number) => Promise<string | Uint8Array>;
-/**
- * Validates a bounded UTF-8 `SKILL.md` document and returns its non-empty instruction body.
- * The single top-level frontmatter name must match the canonical configured reference.
- */
+/** Parses bounded public frontmatter and the private instruction body. */
+export declare function parseSkillDocument(raw: string | Uint8Array, expectedName?: string, sourceLabel?: string): {
+    name: string;
+    description: string;
+    body: string;
+};
 export declare function parseSkillBody(raw: string | Uint8Array, expectedName: string, sourceLabel?: string): string;
 /** Returns whether all security-relevant coordinates exactly match an allowlisted skill reference. */
 export declare function isTrustedGithubSkill(skill: GithubSkill, trusted: readonly GithubSkill[]): boolean;
@@ -41,7 +43,15 @@ export declare class GhResolver implements GithubResolver {
         commit: string;
         body: string;
     }>;
+    /** Loads only bounded frontmatter metadata for one exact allowlisted reference. */
+    describe(skill: GithubSkill, signal?: AbortSignal): Promise<{
+        commit: string;
+        description: string;
+    }>;
+    private rawSkill;
     /** Enumerates only `SKILL.md` blobs within one validated catalog scope. */
     listCatalog(value: GithubSkillCatalogSource, signal?: AbortSignal): Promise<readonly GithubSkillCatalogEntry[]>;
+    /** Loads a catalog row's description from the immutable commit that produced it. */
+    describeCatalog(entry: GithubSkillCatalogEntry, signal?: AbortSignal): Promise<string>;
 }
 export {};

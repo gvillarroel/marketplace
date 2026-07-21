@@ -67,6 +67,17 @@ export interface GithubSkillCatalogEntry {
     name: string;
     repo: string;
     path: string;
+    /** Mutable branch originally selected for this row. */
+    track?: string;
+    /** Immutable commit used to enumerate this row. */
+    commit?: string;
+    /** Optional bounded frontmatter description, loaded only on request. */
+    description?: string;
+}
+/** Public metadata for one exact allowlisted skill; its instruction body is never exposed. */
+export interface GithubSkillDescription {
+    commit: string;
+    description: string;
 }
 /** Reference to one exact, project-root-relative `SKILL.md` file. */
 export interface RepositorySkill {
@@ -87,5 +98,7 @@ export interface GithubResolver {
         commit: string;
         body: string;
     }>;
+    describe?(skill: GithubSkill, signal?: AbortSignal): Promise<GithubSkillDescription>;
     listCatalog?(source: GithubSkillCatalogSource, signal?: AbortSignal): Promise<readonly GithubSkillCatalogEntry[]>;
+    describeCatalog?(entry: GithubSkillCatalogEntry, signal?: AbortSignal): Promise<string>;
 }

@@ -70,8 +70,9 @@ export interface CopilotCoordinatorGuard {
         };
     }): void;
 }
-/** Maps stable Harbor role IDs to Copilot's plugin-qualified runtime IDs. */
 export declare const copilotFixedAgentIds: ReadonlyMap<string, string>;
+/** Plugin-qualified identity used only by the explicit `/scout` command. */
+export declare const copilotScoutAgentId = "agent-foundry:talent-scout";
 /** Lists canonical active project profile IDs without trusting arbitrary files. */
 export declare function listCopilotActiveProfileIds(project: string): string[];
 /** Resolves one logical ID to exactly one currently invocable Copilot identity. */

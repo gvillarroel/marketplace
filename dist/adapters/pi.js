@@ -3,10 +3,12 @@ import * as hostPiSdk from "@earendil-works/pi-coding-agent";
 import { listInvocablePlayerIds, listManagedActiveIds, loadPiActivePlayer } from "../core/active.js";
 import { executeCommand } from "../core/commands.js";
 import { runDeterministicCommand } from "./direct.js";
-import { bundledPlayers, rolePlayers } from "../core/defaults.js";
+import { bundledPlayers, rolePlayers, scoutPlayer, trustedSkills } from "../core/defaults.js";
+import { GhResolver } from "../core/github.js";
 import { isHarborId } from "../core/identity.js";
 import { commandNames } from "../core/types.js";
 import { normalizeDelegatedTaskPaths } from "../core/profiles.js";
+import { filterTrustedSkills, formatScoutSkillMatches } from "../core/scout.js";
 import { PiOrchestrator } from "../orchestrators/pi.js";
 import { harborContext } from "./shared.js";
 /**
@@ -71,11 +73,42 @@ export default function agentHarbor(pi) {
             },
         };
     };
+    const createScoutTools = (cwd) => [{
+            name: "harbor_filter_skills",
+            label: "Agent Harbor Skill Filter",
+            description: "Search only the exact execution-trusted skill group by public metadata.",
+            executionMode: "sequential",
+            parameters: {
+                type: "object",
+                properties: { query: { type: "string", description: "Concise capability keywords" } },
+                required: ["query"], additionalProperties: false,
+            },
+            execute: async (_id, params, signal) => {
+                const text = formatScoutSkillMatches(await filterTrustedSkills(params.query, trustedSkills, new GhResolver(), signal));
+                return { content: [{ type: "text", text }], details: { harness: "pi", scope: "trusted-skills" } };
+            },
+        }, {
+            name: "harbor_join_player",
+            label: "Agent Harbor Join Player",
+            description: "Validate, register, and activate exactly one persistent player.",
+            executionMode: "sequential",
+            parameters: {
+                type: "object",
+                properties: { definition: { type: "string", description: "Complete player definition serialized as JSON" } },
+                required: ["definition"], additionalProperties: false,
+            },
+            execute: async (_id, params, signal, _update, context) => {
+                const project = context?.cwd || cwd;
+                const text = await runDeterministicCommand("pi", "join", params.definition, project, signal);
+                return { content: [{ type: "text", text }], details: { harness: "pi", action: "join" } };
+            },
+        }];
     const runPlayer = async (player, task, cwd, model, thinkingLevel) => {
         if (!task.trim())
             throw new Error(`/${player.name} requires a non-empty task`);
         const sessionOptions = { ...(model === undefined ? {} : { model }), thinkingLevel };
-        const customTools = player.name === "team-lead" ? [createDelegateTool(cwd, sessionOptions)] : [];
+        const customTools = player.name === "team-lead" ? [createDelegateTool(cwd, sessionOptions)]
+            : player.name === scoutPlayer.name ? createScoutTools(cwd) : [];
         const additionalTools = customTools.map((tool) => tool.name);
         return createOrchestrator(cwd, sessionOptions, additionalTools, customTools).run({ ...player, task });
     };
@@ -121,7 +154,7 @@ export default function agentHarbor(pi) {
                 try {
                     const result = name === "contract"
                         ? await executeCommand(name, args, await harborContext("pi", ctx.cwd, createOrchestrator(ctx.cwd, currentSessionOptions(ctx.model))))
-                        : await runDeterministicCommand("pi", name, args, ctx.cwd, undefined, name === "list-skills");
+                        : await runDeterministicCommand("pi", name, args, ctx.cwd, undefined, name === "list-skills" ? "ansi" : "plain");
                     if (name === "join" || name === "bench")
                         syncActivePlayers(ctx.cwd);
                     ctx.ui.notify(result, "info");
@@ -135,5 +168,19 @@ export default function agentHarbor(pi) {
     }
     for (const [id, player] of rolePlayers)
         registerPlayer(id, player);
+    pi.registerCommand("scout", {
+        description: scoutPlayer.description,
+        handler: async (args, ctx) => {
+            try {
+                const text = await runPlayer(scoutPlayer, args, ctx.cwd, ctx.model, pi.getThinkingLevel());
+                syncActivePlayers(ctx.cwd);
+                ctx.ui.notify(text, "info");
+            }
+            catch (error) {
+                ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+            }
+        },
+    });
+    registered.add("scout");
     syncActivePlayers(process.cwd());
 }

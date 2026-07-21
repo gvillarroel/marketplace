@@ -16,7 +16,7 @@ const toolMap: Record<HarnessName, Record<HarborTool, string[]>> = {
   opencode: { read: ["read"], search: ["grep", "glob"], edit: ["apply_patch"], execute: ["bash"] },
   pi: { read: ["read"], search: ["grep", "find", "ls"], edit: ["edit", "write"], execute: ["bash"] },
 };
-const openCodeToolNames = ["*", "invalid", "question", "bash", "read", "glob", "grep", "task", "webfetch", "websearch", "todowrite", "todoread", "skill", "apply_patch", "edit", "write", "list", "harbor", "harbor_contract", "harbor_delegate", "agent_harbor_skills"];
+const openCodeToolNames = ["*", "invalid", "question", "bash", "read", "glob", "grep", "task", "webfetch", "websearch", "todowrite", "todoread", "skill", "apply_patch", "edit", "write", "list", "harbor", "harbor_contract", "harbor_delegate", "harbor_filter_skills", "harbor_join_player", "agent_harbor_skills"];
 type OpenCodePermissionAction = "allow" | "deny";
 type OpenCodePermissionValue = OpenCodePermissionAction | Record<string, OpenCodePermissionAction>;
 

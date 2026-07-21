@@ -8,7 +8,7 @@ import { copilotFixedAgentIds, createCopilotCoordinatorGuard } from "../src/adap
 import { AgentHarborPlugin } from "../src/adapters/opencode.js";
 import openCodeTui, { openCodeDirectCommands } from "../src/adapters/opencode-tui.js";
 import { commandNames } from "../src/core/types.js";
-import { bundledPlayers, rolePlayers, trustedSkills } from "../src/core/defaults.js";
+import { bundledPlayers, rolePlayers, scoutPlayer, trustedSkills } from "../src/core/defaults.js";
 import { GhResolver } from "../src/core/github.js";
 import type { HarborEvidenceEvent } from "../src/core/evidence.js";
 import { Roster } from "../src/core/lifecycle.js";
@@ -668,7 +668,7 @@ test("contract skills are validated and materialized before any SDK child is cre
   assert.equal(children, 1, "skill validation must finish before creating a child");
 });
 
-test("OpenCode plugin exposes five commands and the deterministic harbor tool", async () => {
+test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-opencode-adapter-"));
   const previous = process.env.OPENCODE_CONFIG_DIR;
   process.env.OPENCODE_CONFIG_DIR = join(root, "home");
@@ -710,6 +710,13 @@ test("OpenCode plugin exposes five commands and the deterministic harbor tool", 
   assert.equal(config.agent.crafter.permission.edit, "allow");
   assert.equal(config.agent.crafter.tools.agent_harbor_skills, true);
   assert.equal(config.agent.crafter.tools.skill, false);
+  assert.equal(config.command.scout.agent, "talent-scout");
+  assert.equal(config.agent["talent-scout"].tools.harbor_filter_skills, true);
+  assert.equal(config.agent["talent-scout"].tools.harbor_join_player, true);
+  assert.equal(config.agent["talent-scout"].tools.read, false);
+  assert.equal(config.agent["talent-scout"].permission.task, "deny");
+  assert.ok(plugin.tool?.harbor_filter_skills);
+  assert.ok(plugin.tool?.harbor_join_player);
   assert.ok(plugin.tool?.harbor);
   assert.ok(plugin.tool?.harbor_contract);
   assert.ok(plugin.tool?.harbor_delegate);
@@ -719,6 +726,10 @@ test("OpenCode plugin exposes five commands and the deterministic harbor tool", 
     { command: "harbor-team-lead", sessionID: "session", arguments: "   " }, { parts: [] },
   ), /non-empty/);
   await directPreflight({ command: "harbor-team-lead", sessionID: "session", arguments: "coordinate" }, { parts: [] });
+  await assert.rejects(() => directPreflight(
+    { command: "scout", sessionID: "session", arguments: "   " }, { parts: [] },
+  ), /non-empty/);
+  await directPreflight({ command: "scout", sessionID: "session", arguments: "zx automation" }, { parts: [] });
   await directPreflight({ command: "bench", sessionID: "session", arguments: "list" }, { parts: [] });
   await mkdir(join(current, "skills", "native"), { recursive: true });
   await writeFile(join(current, "skills", "native", "SKILL.md"), [
@@ -743,6 +754,25 @@ test("OpenCode plugin exposes five commands and the deterministic harbor tool", 
     {},
     { directory: current, agent: "team-lead", abort: new AbortController().signal } as any,
   ), /no configured skills/);
+  const originalDescribe = GhResolver.prototype.describe;
+  try {
+    GhResolver.prototype.describe = async () => ({ commit: "e".repeat(40), description: "Author zx automation scripts." });
+    await assert.rejects(() => plugin.tool!.harbor_filter_skills.execute(
+      { query: "zx scripts" }, { directory: current, agent: "team-lead", abort: new AbortController().signal } as any,
+    ), /only to talent-scout/);
+    const matches = await plugin.tool!.harbor_filter_skills.execute(
+      { query: "zx scripts" }, { directory: current, agent: "talent-scout", abort: new AbortController().signal } as any,
+    );
+    assert.match(String(matches), /zx-example-author/);
+    await assert.rejects(() => plugin.tool!.harbor_join_player.execute(
+      { definition: "{}" }, { directory: current, agent: "crafter", abort: new AbortController().signal } as any,
+    ), /only to talent-scout/);
+    const scouted = await plugin.tool!.harbor_join_player.execute(
+      { definition: JSON.stringify({ name: "open-scouted", description: "Scouted", prompt: "Work narrowly.", tools: ["read"] }) },
+      { directory: current, agent: "talent-scout", abort: new AbortController().signal } as any,
+    );
+    assert.match(String(scouted), /joined open-scouted/);
+  } finally { GhResolver.prototype.describe = originalDescribe; }
   if (previous === undefined) delete process.env.OPENCODE_CONFIG_DIR; else process.env.OPENCODE_CONFIG_DIR = previous;
 });
 
@@ -971,9 +1001,57 @@ test("Pi extension registers lifecycle and fixed roles through ExtensionAPI", ()
     registerTool: (tool: any) => tools.push(tool),
     getThinkingLevel: () => "minimal",
   } as any);
-  assert.deepEqual(names, [...commandNames, ...rolePlayers.keys()]);
+  assert.deepEqual(names, [...commandNames, ...rolePlayers.keys(), "scout"]);
   assert.deepEqual(tools.map((tool) => tool.name), ["harbor_contract"]);
   assert.equal(tools[0].executionMode, "sequential");
+});
+
+test("Pi /scout receives only filtering and one deterministic join tool", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-scout-"));
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, "home");
+  const project = join(root, "project");
+  const commands = new Map<string, any>(); const notices: string[] = [];
+  piExtension({
+    registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerTool: () => {},
+    getThinkingLevel: () => "minimal",
+  } as any);
+  const originalRun = PiOrchestrator.prototype.run;
+  const originalDescribe = GhResolver.prototype.describe;
+  let captured: any;
+  try {
+    PiOrchestrator.prototype.run = async function (definition: any) {
+      captured = { definition, customTools: [...(this as any).customTools], additionalTools: [...(this as any).additionalTools] };
+      return "scout-complete";
+    };
+    GhResolver.prototype.describe = async () => ({
+      commit: "d".repeat(40), description: "Author zx automation scripts.",
+    });
+    await commands.get("scout").handler("alguien que escriba scripts en zx", {
+      cwd: project, model: undefined, ui: { notify: (message: string) => notices.push(message) },
+    });
+    assert.equal(captured.definition.name, scoutPlayer.name);
+    assert.deepEqual(captured.additionalTools, ["harbor_filter_skills", "harbor_join_player"]);
+    assert.deepEqual(captured.customTools.map((entry: any) => entry.name), captured.additionalTools);
+    const filtered = await captured.customTools[0].execute(
+      "filter", { query: "zx scripts" }, new AbortController().signal, undefined, { cwd: project },
+    );
+    assert.match(filtered.content[0].text, /zx-example-author/);
+    const joined = await captured.customTools[1].execute(
+      "join", { definition: JSON.stringify({
+        name: "zx-automator", description: "Writes zx automation", prompt: "Write bounded zx automation scripts.",
+        tools: ["read", "edit", "execute"], skills: [trustedSkills[0]],
+      }) }, new AbortController().signal, undefined, { cwd: project },
+    );
+    assert.match(joined.content[0].text, /joined zx-automator/);
+    assert.match(await readFile(join(project, ".pi", "agents", "zx-automator.md"), "utf8"), /zx-example-author/);
+    assert.equal(notices.at(-1), "scout-complete");
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    GhResolver.prototype.describe = originalDescribe;
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
 });
 
 test("Pi contract entrypoints inherit the host SDK model and thinking level", async () => {

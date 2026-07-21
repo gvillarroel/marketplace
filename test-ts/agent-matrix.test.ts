@@ -3,11 +3,13 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { AgentHarborPlugin } from "../src/adapters/opencode.js";
 import { listInvocablePlayerIds, listManagedActiveIds, loadPiActivePlayer, requireInvocablePlayer } from "../src/core/active.js";
-import { bundledPlayers, rolePlayers } from "../src/core/defaults.js";
+import { bundledPlayers, rolePlayers, trustedSkills } from "../src/core/defaults.js";
 import { harnessProfileLayout } from "../src/core/harnesses.js";
 import { Roster } from "../src/core/lifecycle.js";
+import { loadFixedPlayers } from "../src/core/player-files.js";
 import { harnessSpec, nativeTools, openCodeToolPolicy } from "../src/core/profiles.js";
 import type { HarnessName, Orchestrator } from "../src/core/types.js";
 import { CopilotOrchestrator } from "../src/orchestrators/copilot.js";
@@ -57,6 +59,34 @@ test("the factory roster has exactly three active roles and six opt-in SDLC play
     assert.equal(player.description.length > 0, true);
     assert.equal(player.prompt.trim().length > 0, true);
   }
+});
+
+test("fixed role Markdown files are editable, ordered, and fail closed", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-fixed-roles-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const definition = (name: string, order: number, skills: string[] = []) => [
+    "---",
+    `name: ${JSON.stringify(name)}`,
+    `description: ${JSON.stringify(`${name} description`)}`,
+    `order: ${order}`,
+    `tools: ${JSON.stringify(skills.length ? ["read"] : [])}`,
+    `skills: ${JSON.stringify(skills)}`,
+    "---",
+    `${name} prompt.`,
+    "",
+  ].join("\n");
+  await Promise.all([
+    writeFile(join(root, "later.md"), definition("later", 20), "utf8"),
+    writeFile(join(root, "first.md"), definition("first", 10, ["zx-example-author"]), "utf8"),
+  ]);
+  const directory = new URL("./", pathToFileURL(join(root, "placeholder")));
+  const loaded = loadFixedPlayers(directory, trustedSkills);
+  assert.deepEqual([...loaded.keys()], ["first", "later"]);
+  assert.deepEqual(loaded.get("first")!.skills, trustedSkills);
+  await writeFile(join(root, "later.md"), definition("later", 10), "utf8");
+  assert.throws(() => loadFixedPlayers(directory, trustedSkills), /duplicate fixed player order/);
+  await writeFile(join(root, "later.md"), definition("wrong-name", 20), "utf8");
+  assert.throws(() => loadFixedPlayers(directory, trustedSkills), /name must match its filename/);
 });
 
 test("each harness keeps its literal active-profile layout and join writes exactly there", async (t) => {
