@@ -247,9 +247,7 @@ test("distribution declares native TypeScript entrypoints", async () => {
   assert.equal(manifest.main, "./dist/adapters/opencode.js");
   assert.equal(manifest.exports["./server"], "./dist/adapters/opencode.js");
   assert.equal(manifest.exports["./tui"], "./dist/adapters/opencode-tui.js");
-  assert.ok(manifest.files.includes("REQUIREMENTS.md"));
-  assert.ok(manifest.files.includes("ARCHITECTURE.md"));
-  assert.ok(manifest.files.includes("SIMPLIFICATION-PLAN.md"));
+  assert.ok(manifest.files.includes("docs/"));
   assert.deepEqual(manifest.pi.extensions, ["./dist/adapters/pi.js"]);
   assert.ok(!("prompts" in manifest.pi));
   assert.equal(manifest.engines.node, ">=22.19.0");
@@ -749,8 +747,8 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
         await resourceLoader.reload();
         const delegateProbe = {
           name: "harbor_delegate_probe",
-          label: "Harbor delegate probe",
-          description: "Native registration probe only",
+          label: "Harbor delegate check",
+          description: "Native registration check only",
           executionMode: "sequential",
           parameters: { type: "object", properties: {}, additionalProperties: false },
           execute: async () => ({ content: [{ type: "text", text: "unused" }] }),

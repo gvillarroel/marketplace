@@ -331,7 +331,42 @@ ruta cero modelo.
   sin tools, borrar ni deshacer el build.
 - Cada smoke live **DEBE** activar y desactivar los seis compañeros bundled mediante el CLI
   determinista antes y después de inferencia, comprobar cleanup positivo y no
-  reutilizar esa activación como prueba de gasto: `bench list` *…634 tokens truncated…ir el
+  reutilizar esa activación como prueba de gasto: `bench list` **DEBE** seguir
+  demostrando cero tokens por separado.
+- Cada smoke live **DEBE** limitar cada prompt delegado a 4 KiB, prohibir routers
+  y delegación recursiva, y aplicar presupuestos ejecutables: turnos raíz <=
+  etapas + 2, 36 turnos, 60 tools y 180 segundos en total, 200.000 tokens
+  observados en total,
+  y por child como máximo 35.000 tokens y 12 tools. También **DEBE** acotar la
+  suma de prompts y evidencias por los límites individuales. Copilot guarda
+  `work/live-team-lead-report.json`; OpenCode y Pi guardan, respectivamente,
+  `work/live-opencode-team-lead-report.json` y
+  `work/live-pi-team-lead-report.json`. Esos reportes sólo **PUEDEN** persistir
+  orden, hashes, tamaños, conteos acotados, duraciones, presupuestos, identidad
+  runtime y uso raíz/children/total por separado. Tasks, respuestas, IDs
+  ocultos, paths, comandos y errores **NO DEBEN** persistirse en claro. La
+  totalización **DEBE** usar los eventos nativos de uso y terminación de cada
+  harness, exigir uso positivo raíz/children y no dejar huecos entre turnos y
+  uso. En Copilot, por child se suma el máximo entre `assistant.usage`
+  correlacionado y `subagent.completed.totalTokens`. Estos límites miden
+  routing, handoff y recursos de la corrida; no se presentan como
+  una comparación universal de eficiencia entre modelos. Su ejecución es
+  opt-in porque necesariamente consume inferencia.
+- Los smokes OpenCode y Pi **DEBEN** usar autenticación Codex del usuario. El
+  modelo preferido exacto es `gpt-5.3-codex-spark`; sólo si el catálogo lo
+  declara ausente antes de toda inferencia **PUEDE** elegirse
+  `gpt-5.6-luna`. Un fallo de proveedor, routing, fixture o verificación después
+  de empezar **NO DEBE** disparar fallback ni una segunda corrida. OpenCode usa
+  provider `openai` y reasoning `medium`; Pi usa provider `openai-codex` y
+  reasoning `low`. El modelo y reasoning raíz **DEBEN** propagarse a todos los
+  children y quedar verificados por eventos nativos.
+- El CLI live **DEBE** tener un safety ceiling de 60 AI credits compartidos para
+  que seis children no sean truncados por el host; ese techo no sustituye los
+  límites más estrictos y asertados de 36 turnos, 200.000 tokens y 180 segundos.
+- Antes de inferencia, el smoke live **DEBE** comprobar la extensión
+  `plugin:agent-foundry:agent-harbor` en estado `running`, con proceso vivo y
+  `/bench` registrado como comando `client`; también **DEBE** solicitar mediante
+  RPC un sandbox limitado a la fixture, sin red saliente ni local, exigir el
   acuse exitoso de la actualización y reportar por separado si la solicitud se
   intentó, la política pedida desde el mismo objeto RPC y ese acuse. El handler
   de permisos sólo puede aprobar lecturas dentro de la fixture, la escritura
@@ -585,4 +620,3 @@ reúnen simultáneamente roster persistente, ownership transaccional, child
 desechable, snapshots privados y paridad nativa. Sólo se reabre esa decisión
 ante un cambio material upstream y un POC que cubra colisiones, actualización,
 cleanup y descubrimiento real en los tres harnesses.
-

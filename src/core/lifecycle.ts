@@ -16,7 +16,7 @@ import { isHarborId } from "./identity.js";
 import { decodePlayer, isCanonicalPlayerProfile } from "./profiles.js";
 import { validateSkillReference } from "./skills.js";
 
-const reserved = new Set([...bundledPlayers.keys(), "team-lead", "crafter", "talent-scout", "bench", "join", "retire", "contract", "list-skills"]);
+const reserved = new Set([...bundledPlayers.keys(), "team-lead", "crafter", "talent-scout", "bench", "join", "retire", "contract", "list-skills", "scout"]);
 const allowedTools = new Set(["read", "search", "edit", "execute"]);
 
 type BenchAction = "on" | "off";
@@ -183,7 +183,7 @@ export class Roster {
         if (error?.code !== "EEXIST") throw error;
         let lockStat: Awaited<ReturnType<typeof lstat>>;
         try { lockStat = await lstat(path); }
-        catch (probe: any) { if (probe?.code === "ENOENT") continue; throw probe; }
+        catch (lockError: any) { if (lockError?.code === "ENOENT") continue; throw lockError; }
         if (!lockStat.isFile() || lockStat.isSymbolicLink()) throw new Error(`unmanaged roster lock collision: ${path}`);
         const current = await existing(path);
         let owner: { owner?: unknown; pid?: unknown; token?: unknown };
@@ -194,7 +194,7 @@ export class Roster {
         }
         if (owner.owner !== "agent-harbor" || typeof owner.pid !== "number" || typeof owner.token !== "string") throw new Error(`unmanaged roster lock collision: ${path}`);
         let alive = true;
-        try { process.kill(owner.pid, 0); } catch (probe: any) { if (probe?.code === "ESRCH") alive = false; }
+        try { process.kill(owner.pid, 0); } catch (signalError: any) { if (signalError?.code === "ESRCH") alive = false; }
         if (!alive) {
           if ((await existing(path)) === current) await rm(path, { force: true });
           continue;

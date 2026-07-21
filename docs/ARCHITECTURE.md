@@ -415,4 +415,3 @@ el smoke live del harness afectado.
 10. **Valide en proporción al riesgo.** Añada regresiones para los tres
     harnesses cuando toque core; use el live correspondiente sólo cuando cambie
     comportamiento que requiera inferencia real.
-

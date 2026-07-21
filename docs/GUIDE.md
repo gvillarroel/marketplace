@@ -1,4 +1,4 @@
-# Agent Harbor
+# Guía completa de Agent Harbor
 
 Agent Harbor is a TypeScript library with native adapters for GitHub Copilot CLI, OpenCode, and Pi. Copilot consumes plugin manifests directly; OpenCode loads a compiled plugin and Pi loads a compiled extension. All three share the same executable command contracts.
 
@@ -582,4 +582,3 @@ skills. It is not a filesystem or network ACL. A player that already has
 `read` can still open another ordinary repository file if it knows the path,
 and a player explicitly granted `execute` can run authorized shell/network
 commands. Strong information isolation requires a separate harness sandbox.
-

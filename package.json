@@ -15,9 +15,7 @@
     "agent-harbor": "./dist/cli.js"
   },
   "files": [
-    "ARCHITECTURE.md",
-    "REQUIREMENTS.md",
-    "SIMPLIFICATION-PLAN.md",
+    "docs/",
     "dist/",
     "plugins/"
   ],

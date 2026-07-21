@@ -134,3 +134,20 @@ repository-mapping skill are absent. `crafter` remains functional as
 `agent-foundry:crafter` with its player-scoped skill MCP, and the startup roster
 now contains exactly `team-lead` and `crafter` plus the six opt-in SDLC peers.
 
+## Current-profile-only roster gate
+
+Recorded at `2026-07-20T23:55:10-04:00`.
+
+| Command | Result |
+| --- | --- |
+| `npm test` | Passed: 91 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 13,020.698 ms |
+| `npm run typecheck` | Passed |
+| `npm audit --audit-level=high` | Passed: 0 vulnerabilities |
+| `npm pack --dry-run --json` | Passed: 87 entries, 102,472 bytes packed, 469,555 bytes unpacked; contains only `agent-foundry` |
+| Removed-reference scan across source, generated runtime, tests, scripts, plugin and documentation | Passed |
+| `git diff --check` | Passed |
+
+Ownership now recognizes only the canonical revision-4 structure. Other
+metadata fails closed as an unmanaged collision: it is neither activated,
+overwritten nor deleted. Bench inventory and mutation planning contain no
+retired-roster discovery, reservation, cleanup or reporting paths.

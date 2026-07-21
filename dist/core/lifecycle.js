@@ -13,7 +13,7 @@ import { isTrustedGithubSkill } from "./github.js";
 import { isHarborId } from "./identity.js";
 import { decodePlayer, isCanonicalPlayerProfile } from "./profiles.js";
 import { validateSkillReference } from "./skills.js";
-const reserved = new Set([...bundledPlayers.keys(), "team-lead", "crafter", "talent-scout", "bench", "join", "retire", "contract", "list-skills"]);
+const reserved = new Set([...bundledPlayers.keys(), "team-lead", "crafter", "talent-scout", "bench", "join", "retire", "contract", "list-skills", "scout"]);
 const allowedTools = new Set(["read", "search", "edit", "execute"]);
 /** Parses bench syntax without touching roster state or the filesystem. */
 function parseBenchCommand(args, bundled) {
@@ -216,10 +216,10 @@ export class Roster {
                 try {
                     lockStat = await lstat(path);
                 }
-                catch (probe) {
-                    if (probe?.code === "ENOENT")
+                catch (lockError) {
+                    if (lockError?.code === "ENOENT")
                         continue;
-                    throw probe;
+                    throw lockError;
                 }
                 if (!lockStat.isFile() || lockStat.isSymbolicLink())
                     throw new Error(`unmanaged roster lock collision: ${path}`);
@@ -241,8 +241,8 @@ export class Roster {
                 try {
                     process.kill(owner.pid, 0);
                 }
-                catch (probe) {
-                    if (probe?.code === "ESRCH")
+                catch (signalError) {
+                    if (signalError?.code === "ESRCH")
                         alive = false;
                 }
                 if (!alive) {

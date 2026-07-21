@@ -1,5 +1,18 @@
 # Instrucciones del proyecto
 
+## Política del README y la documentación
+
+El `README.md` de la raíz es deliberadamente breve y está reservado al
+onboarding: qué hace Agent Harbor, cómo instalarlo en los runtimes soportados y
+cómo ejecutar los primeros flujos útiles. No volver a agregar allí arquitectura,
+requisitos exhaustivos, detalles internos, matrices de pruebas, evidencia de
+aceptación ni historial de decisiones.
+
+Todo contenido de referencia o explicación extensa debe vivir en `docs/`. Al
+agregar o mover documentación, mantener actualizado `docs/README.md` como
+índice y enlazar desde el README principal sólo lo necesario para continuar la
+lectura. No devolver a la raíz los documentos trasladados a `docs/`.
+
 ## Alternativas OSS ya evaluadas
 
 Al 2026-07-19, las siguientes alternativas fueron investigadas, fijadas a una

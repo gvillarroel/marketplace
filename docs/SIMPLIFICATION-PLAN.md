@@ -125,4 +125,3 @@ verifican con `--verify-report-only`.
   intervenidos;
 - diff funcionalmente acotado y trazable a las seis etapas anteriores;
 - rama publicada sin modificar nuevamente `main`.
-
