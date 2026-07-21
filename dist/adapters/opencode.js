@@ -16,18 +16,13 @@ import { harborContext } from "./shared.js";
 export const AgentHarborPlugin = async ({ client, directory }) => {
     const teamLead = rolePlayers.get("team-lead");
     const crafter = rolePlayers.get("crafter");
-    const delegationTargets = listInvocablePlayerIds("opencode", directory).filter((id) => id !== "team-lead");
-    const delegationRoster = delegationTargets.map((id) => {
-        const definition = rolePlayers.get(id) ?? bundledPlayers.get(id);
-        return `${id}: ${definition?.description ?? "active personal Agent Harbor player"}`;
-    }).join("; ");
     const delegationCounts = new Map();
     const delegatedAgents = new Map();
     const delegationsInFlight = new Set();
     const directAgentCommands = new Map();
     const turnModels = new Map();
     for (const id of [...rolePlayers.keys(), ...bundledPlayers.keys()])
-        directAgentCommands.set(`harbor-${id}`, id);
+        directAgentCommands.set(id, id);
     directAgentCommands.set("scout", scoutPlayer.name);
     const originatingUserMessage = async (sessionID, messageID, currentDirectory) => {
         // SDK-created assistant messages do not reliably repeat the root model.
@@ -100,9 +95,8 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                     template: `Call the harbor tool exactly once with command ${JSON.stringify(name)} and args $ARGUMENTS. Return its result verbatim.`,
                 };
             for (const id of listInvocablePlayerIds("opencode", directory)) {
-                const command = `harbor-${id}`;
-                directAgentCommands.set(command, id);
-                config.command[command] = {
+                directAgentCommands.set(id, id);
+                config.command[id] = {
                     description: `Run Agent Harbor player ${id} in the current session`,
                     template: "$ARGUMENTS",
                     agent: id,
@@ -120,7 +114,7 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                 "team-lead": {
                     description: teamLead.description, mode: "subagent",
                     steps: 7,
-                    prompt: `${composePlayerInstructions(teamLead)} In OpenCode, harbor_delegate is the named delegation tool; select only an exact active target from its enum and provide a complete non-empty task.`,
+                    prompt: `${composePlayerInstructions(teamLead)} In OpenCode, harbor_delegate is the named delegation tool; provide an exact active player ID and a complete non-empty task. The tool validates the target against the live roster at invocation time.`,
                     tools: { ...openCodeToolPolicy([]), harbor_delegate: true },
                     permission: openCodePermissionPolicy([], ["harbor_delegate"], directory),
                 },
@@ -223,8 +217,8 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                 },
             }),
             harbor_delegate: tool({
-                description: `Team-lead only: run one exact active Agent Harbor player in a child session. Active targets: ${delegationRoster}.`,
-                args: { agent: tool.schema.enum(delegationTargets), task: tool.schema.string() },
+                description: "Team-lead only: run one exact active Agent Harbor player in a child session. The target is ownership-validated against the live roster at invocation time, including players added by /join during this session.",
+                args: { agent: tool.schema.string(), task: tool.schema.string() },
                 execute: async ({ agent, task }, execution) => {
                     if (execution.agent !== "team-lead")
                         throw new Error("harbor_delegate is available only to team-lead");

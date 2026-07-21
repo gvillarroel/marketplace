@@ -30,6 +30,11 @@ export declare function validateRepositorySkill(value: unknown): RepositorySkill
 /** Dispatches strict validation according to the skill reference discriminator. */
 export declare function validateSkillReference(value: unknown): SkillReference;
 /**
+ * Validates the canonical player skill array used by JSON commands and Markdown definitions.
+ * Local references are project-relative; GitHub references must match the execution allowlist.
+ */
+export declare function validateConfiguredSkillReferences(value: unknown, tools: readonly unknown[], trusted: readonly GithubSkill[]): SkillReference[];
+/**
  * Loads every explicitly configured skill after validating unique names and source trust.
  * Repository sources are confined to the project, GitHub sources are pinned by the resolver, and
  * the combined instruction bodies are capped before being exposed to a child.

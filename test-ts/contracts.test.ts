@@ -467,6 +467,7 @@ test("validation rejects every non-canonical player shape before mutation", () =
     { ...base, tools: ["network"] },
     { ...base, model: 1 },
     { ...base, replace: "yes" },
+    { ...base, skills: ["zx-example-author"] },
     { ...base, unknown: true },
   ];
   for (const value of invalid) assert.throws(() => validatePlayer(value));

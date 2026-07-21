@@ -33,7 +33,7 @@ function withSelectionLock(action) {
 
 let session;
 
-async function runPlayer(id, rawTask, command = `harbor-${id}`) {
+async function runPlayer(id, rawTask, command = id) {
   const task = rawTask?.trim() ?? "";
   if (!task) throw new Error(`usage: /${command} <task>`);
 
@@ -132,7 +132,7 @@ session = await joinSession({
       },
     },
     ...callableIds.map((id) => ({
-      name: `harbor-${id}`,
+      name: id,
       description: knownPlayers.get(id)?.description ?? `Run active Agent Harbor player ${id} for one explicit task.`,
       handler: async ({ args }) => {
         try {

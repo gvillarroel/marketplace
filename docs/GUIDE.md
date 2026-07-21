@@ -42,11 +42,11 @@ for `team-lead`, `crafter`, or players activated through
 `/bench`.
 
 For a prompt sent straight to one named player, use
-`/harbor-<id> <task>`—for example `/harbor-design design the bounded change`.
+`/<id> <task>`—for example `/design design the bounded change`.
 This selects that exact agent and sends one prompt without a separate routing
 inference. Fixed and bundled aliases are registered at startup; an inactive
 bundled player is rejected before inference. Restart the session after adding
-a personal player so its alias can be discovered. `/harbor-team-lead` is
+a personal player so its alias can be discovered. `/team-lead` is
 deliberately different: the coordinator may run the smallest necessary
 sequence of one to six named children. The extension guards Copilot's native
 `task` calls in code: only exact active Agent Harbor targets are accepted,
@@ -115,7 +115,7 @@ CLI, for example `agent-harbor opencode bench on portfolio-management`. Select `
 `crafter` or an activated player through OpenCode's native
 agent interface.
 
-OpenCode also exposes `/harbor-<id> <task>`. Its command configuration uses the
+OpenCode also exposes `/<id> <task>`. Its command configuration uses the
 exact agent, passes `$ARGUMENTS` unchanged and sets `subtask: false`, avoiding a
 router turn and OpenCode's extra parent-summary inference. Invocation-time
 preflight rejects an empty task or an alias whose ownership/activity changed
@@ -123,10 +123,10 @@ after configuration. Start a new session after changing the roster so newly
 active aliases are added; a stale deactivated alias is blocked before inference.
 
 The OpenCode `team-lead` can use only `harbor_delegate`. It resolves an exact
-active target, creates and cleans one child at a time, and enforces six calls per
+target against the live active roster at each invocation, creates and cleans one child at a time, and enforces six calls per
 originating user turn even though OpenCode creates intermediate assistant
-messages. Its tool enum and description expose the exact startup-active targets,
-so the model does not have to guess the roster. Every generated agent policy starts
+messages. This live validation allows delegation to a player added by `/join`
+during the session while still rejecting inactive or unmanaged IDs. Every generated agent policy starts
 with `"*": false` before enabling its explicit least-privilege tools.
 
 OpenCode does not accept Pi's `git:github.com/…` shorthand, but its current package installer accepts the repository archive URL. The equivalent npm-ready command is `opencode plugin @gvillarroel/agent-harbor --global` once that package is published. The package registers Agent Harbor commands and agents through OpenCode's plugin configuration hook.
@@ -391,16 +391,29 @@ bundled companion profiles:
 
 `portfolio-management → design → build → manage → consume → dispose`
 
-The two fixed roles are active without this command. Their editable source is
-`src/core/roles/*.md`: each file declares `name`, `description`, `order`,
-`tools`, and trusted skill names in closed JSON frontmatter, while its Markdown
-body is the prompt. Add a file and rebuild to include another fixed definition;
-duplicate names/orders, symlinks, unknown fields, and untrusted skills fail the
-build or startup closed. The six companion names
-above are only included definitions until activated; discovery and direct
-invocation reject them while they remain on the bench.
+Both roster groups have editable Markdown sources:
 
-Their canonical definitions live once in `src/core/defaults.ts` and are rendered directly into the current harness's native agent directory when activated. A batch is serialized, fully preflighted, written file-atomically, verified, and rolled back byte-for-byte on failure.
+- `src/core/roles/*.md` contains the two always-active fixed roles;
+- `src/core/bundled/*.md` contains the opt-in companion roster shown above.
+
+Each file declares `name`, `description`, `order`, `tools`, and `skills` in
+closed JSON frontmatter, while its Markdown body is the prompt. `skills` uses
+the same structured references as `/join`; string-name shortcuts are rejected:
+
+```yaml
+skills: [{"kind":"repo","name":"local-review","path":"skills/local-review/SKILL.md"}]
+skills: [{"kind":"github","name":"zx-example-author","repo":"gvillarroel/zx-harness","path":"skills/zx-example-author/SKILL.md","track":"refs/heads/main"}]
+```
+
+`repo` paths are relative to the project where the player runs. GitHub
+references must match the exact trusted execution allowlist. Add or edit a file
+and rebuild to change the corresponding roster; duplicate names/orders,
+symlinks, unknown fields, duplicate skill references, and untrusted GitHub
+skills fail the build or startup closed. Bundled definitions remain
+undiscoverable and non-invocable until activated. When activated, they are
+rendered directly into the current harness's native agent directory. A batch is
+serialized, fully preflighted, written file-atomically, verified, and rolled
+back byte-for-byte on failure.
 
 ## Personal players
 
@@ -437,6 +450,11 @@ That folder is user-level but is not a Copilot agent discovery directory. The id
 Here `current-folder` is the Copilot process working directory, resolved independently of `COPILOT_HOME`.
 
 Consequently the player is active where it joined and remains available from every other project through `bench on reviewer`. `bench off reviewer` removes only the active project copy. `retire reviewer` removes the user registration and the managed copy in the current project; copies in other projects remain intentionally untouched.
+
+The join result includes `command: /reviewer <request>`. Pi registers that
+command immediately in the current session. Copilot and OpenCode discover it
+automatically from the active profile when their session/configuration reloads;
+no separate command file or manual registration is needed.
 
 The canonical profile format uses revision 4 and stores the validated definition
 in every harness profile so the adapter can recover and enforce that exact

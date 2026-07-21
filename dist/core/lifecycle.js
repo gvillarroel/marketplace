@@ -9,10 +9,9 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { bundledPlayers, trustedSkills } from "./defaults.js";
-import { isTrustedGithubSkill } from "./github.js";
 import { isHarborId } from "./identity.js";
 import { decodePlayer, isCanonicalPlayerProfile } from "./profiles.js";
-import { validateSkillReference } from "./skills.js";
+import { validateConfiguredSkillReferences } from "./skills.js";
 const reserved = new Set([...bundledPlayers.keys(), "team-lead", "crafter", "talent-scout", "bench", "join", "retire", "contract", "list-skills", "scout"]);
 const allowedTools = new Set(["read", "search", "edit", "execute"]);
 /** Parses bench syntax without touching roster state or the filesystem. */
@@ -141,28 +140,8 @@ export function validatePlayer(value, allowReserved = false) {
         throw new Error("invalid model");
     if (input.replace !== undefined && typeof input.replace !== "boolean")
         throw new Error("invalid replace");
-    if (input.skills !== undefined) {
-        if (!Array.isArray(input.skills) || input.skills.length > 3)
-            throw new Error("skills must be an array of at most three repository or GitHub references");
-        const seenIdentities = new Set();
-        const seenNames = new Set();
-        for (const value of input.skills) {
-            const skill = validateSkillReference(value);
-            const identity = skill.kind === "repo"
-                ? `repo\0${skill.path}`
-                : `github\0${skill.repo.toLowerCase()}\0${skill.path}\0${skill.track}`;
-            if (seenIdentities.has(identity))
-                throw new Error("duplicate skill reference");
-            if (seenNames.has(skill.name))
-                throw new Error(`duplicate configured skill name: ${skill.name}`);
-            if (skill.kind === "github" && !isTrustedGithubSkill(skill, trustedSkills))
-                throw new Error("untrusted GitHub skill reference");
-            seenIdentities.add(identity);
-            seenNames.add(skill.name);
-        }
-        if (input.skills.length && !input.tools.includes("read"))
-            throw new Error("configured skills require read");
-    }
+    if (input.skills !== undefined)
+        validateConfiguredSkillReferences(input.skills, input.tools, trustedSkills);
     return input;
 }
 /**
@@ -358,7 +337,7 @@ export class Roster {
                 throw new Error("replace:true required");
             }
             await this.transaction([{ path: paths.registration, content }, { path: paths.active, content }]);
-            return `joined ${player.name}\nregistration: ${paths.registration}\nactive: ${paths.active}`;
+            return `joined ${player.name}\ncommand: /${player.name} <request>\nregistration: ${paths.registration}\nactive: ${paths.active}`;
         });
     }
     async bundledBenchInventory(bundled, filter) {

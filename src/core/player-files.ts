@@ -4,6 +4,7 @@ import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isHarborId } from "./identity.js";
+import { validateConfiguredSkillReferences } from "./skills.js";
 import type { GithubSkill, HarborTool, PlayerDefinition } from "./types.js";
 
 const allowedKeys = new Set(["name", "description", "order", "tools", "model", "skills"]);
@@ -42,7 +43,7 @@ function parsePlayerFile(path: string, trustedSkills: readonly GithubSkill[]): P
   const order = parseJsonField(frontmatter, "order");
   const tools = parseJsonField(frontmatter, "tools");
   const model = parseJsonField(frontmatter, "model");
-  const skillNames = parseJsonField(frontmatter, "skills") ?? [];
+  const skillValues = parseJsonField(frontmatter, "skills") ?? [];
   if (!isHarborId(name) || basename(path, ".md") !== name) throw new Error(`fixed player name must match its filename: ${path}`);
   if (typeof description !== "string" || !description.trim() || description.length > 500) throw new Error(`fixed player has invalid description: ${path}`);
   if (!Number.isInteger(order) || (order as number) < 0 || (order as number) > 10_000) throw new Error(`fixed player has invalid order: ${path}`);
@@ -50,15 +51,7 @@ function parsePlayerFile(path: string, trustedSkills: readonly GithubSkill[]): P
     throw new Error(`fixed player has invalid tools: ${path}`);
   }
   if (model !== undefined && (typeof model !== "string" || !model.trim() || model.length > 200)) throw new Error(`fixed player has invalid model: ${path}`);
-  if (!Array.isArray(skillNames) || skillNames.length > 3 || skillNames.some((skill) => !isHarborId(skill)) || new Set(skillNames).size !== skillNames.length) {
-    throw new Error(`fixed player has invalid skills: ${path}`);
-  }
-  const skills = skillNames.map((skillName) => {
-    const match = trustedSkills.find((skill) => skill.name === skillName);
-    if (!match) throw new Error(`fixed player references an untrusted skill: ${skillName}`);
-    return match;
-  });
-  if (skills.length && !(tools as string[]).includes("read")) throw new Error(`fixed player skills require read: ${path}`);
+  const skills = validateConfiguredSkillReferences(skillValues, tools as unknown[], trustedSkills);
   const prompt = source.slice(end + 5).trim();
   if (!prompt || prompt.length > 18_000) throw new Error(`fixed player has invalid prompt: ${path}`);
   return {

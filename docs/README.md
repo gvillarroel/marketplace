@@ -1,11 +1,10 @@
-# Documentación de Agent Harbor
+# Agent Harbor documentation
 
-- [Guía completa](GUIDE.md): runtimes, comandos, roster, agentes personales,
-  contratos desechables y skills confiables.
-- [Requisitos](REQUIREMENTS.md): contrato normativo del producto, seguridad,
-  lifecycle y aceptación entre runtimes.
-- [Arquitectura](ARCHITECTURE.md): diseño técnico y operativo.
-- [Plan de simplificación](SIMPLIFICATION-PLAN.md): alcance y métricas de la
-  simplificación del core.
-- [Evidencia de pruebas](TEST-LOG.md): validaciones y resultados registrados.
-
+- [Complete guide](GUIDE.md): runtimes, commands, roster, personal agents,
+  disposable contracts, and trusted skills.
+- [Requirements](REQUIREMENTS.md): normative product, security, lifecycle, and
+  cross-runtime acceptance contract.
+- [Architecture](ARCHITECTURE.md): technical and operational design.
+- [Simplification plan](SIMPLIFICATION-PLAN.md): scope and metrics for the core
+  simplification.
+- [Test evidence](TEST-LOG.md): recorded validations and results.

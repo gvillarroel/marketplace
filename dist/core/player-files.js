@@ -3,6 +3,7 @@ import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isHarborId } from "./identity.js";
+import { validateConfiguredSkillReferences } from "./skills.js";
 const allowedKeys = new Set(["name", "description", "order", "tools", "model", "skills"]);
 const allowedTools = new Set(["read", "search", "edit", "execute"]);
 const maxFiles = 32;
@@ -42,7 +43,7 @@ function parsePlayerFile(path, trustedSkills) {
     const order = parseJsonField(frontmatter, "order");
     const tools = parseJsonField(frontmatter, "tools");
     const model = parseJsonField(frontmatter, "model");
-    const skillNames = parseJsonField(frontmatter, "skills") ?? [];
+    const skillValues = parseJsonField(frontmatter, "skills") ?? [];
     if (!isHarborId(name) || basename(path, ".md") !== name)
         throw new Error(`fixed player name must match its filename: ${path}`);
     if (typeof description !== "string" || !description.trim() || description.length > 500)
@@ -54,17 +55,7 @@ function parsePlayerFile(path, trustedSkills) {
     }
     if (model !== undefined && (typeof model !== "string" || !model.trim() || model.length > 200))
         throw new Error(`fixed player has invalid model: ${path}`);
-    if (!Array.isArray(skillNames) || skillNames.length > 3 || skillNames.some((skill) => !isHarborId(skill)) || new Set(skillNames).size !== skillNames.length) {
-        throw new Error(`fixed player has invalid skills: ${path}`);
-    }
-    const skills = skillNames.map((skillName) => {
-        const match = trustedSkills.find((skill) => skill.name === skillName);
-        if (!match)
-            throw new Error(`fixed player references an untrusted skill: ${skillName}`);
-        return match;
-    });
-    if (skills.length && !tools.includes("read"))
-        throw new Error(`fixed player skills require read: ${path}`);
+    const skills = validateConfiguredSkillReferences(skillValues, tools, trustedSkills);
     const prompt = source.slice(end + 5).trim();
     if (!prompt || prompt.length > 18_000)
         throw new Error(`fixed player has invalid prompt: ${path}`);

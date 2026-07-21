@@ -677,7 +677,7 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
   const config: any = {};
   await plugin.config?.(config);
   assert.deepEqual(Object.keys(config.command).slice(0, commandNames.length), [...commandNames]);
-  for (const id of rolePlayers.keys()) assert.deepEqual(config.command[`harbor-${id}`], {
+  for (const id of rolePlayers.keys()) assert.deepEqual(config.command[id], {
     description: `Run Agent Harbor player ${id} in the current session`,
     template: "$ARGUMENTS",
     agent: id,
@@ -718,9 +718,9 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
   assert.ok(plugin.tool?.agent_harbor_skills);
   const directPreflight = plugin["command.execute.before"]!;
   await assert.rejects(() => directPreflight(
-    { command: "harbor-team-lead", sessionID: "session", arguments: "   " }, { parts: [] },
+    { command: "team-lead", sessionID: "session", arguments: "   " }, { parts: [] },
   ), /non-empty/);
-  await directPreflight({ command: "harbor-team-lead", sessionID: "session", arguments: "coordinate" }, { parts: [] });
+  await directPreflight({ command: "team-lead", sessionID: "session", arguments: "coordinate" }, { parts: [] });
   await assert.rejects(() => directPreflight(
     { command: "scout", sessionID: "session", arguments: "   " }, { parts: [] },
   ), /non-empty/);
@@ -738,7 +738,17 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
     { directory: current, abort: new AbortController().signal } as any,
   );
   assert.match(String(result), /joined native/);
+  assert.match(String(result), /command: \/native <request>/);
   assert.match(String(result), new RegExp(current.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  const reloadedPlugin = await AgentHarborPlugin({ client: { session: {} }, directory: current } as any, {});
+  const reloadedConfig: any = {};
+  await reloadedPlugin.config?.(reloadedConfig);
+  assert.deepEqual(reloadedConfig.command.native, {
+    description: "Run Agent Harbor player native in the current session",
+    template: "$ARGUMENTS",
+    agent: "native",
+    subtask: false,
+  });
   const guidance = await plugin.tool!.agent_harbor_skills.execute(
     {},
     { directory: current, agent: "native", abort: new AbortController().signal } as any,
@@ -840,14 +850,14 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
   const config: any = {};
   await plugin.config?.(config);
   for (const id of [...rolePlayers.keys(), ...bundledPlayers.keys()]) {
-    assert.equal(config.command[`harbor-${id}`].agent, id);
-    assert.equal(config.command[`harbor-${id}`].subtask, false);
-    assert.equal(config.command[`harbor-${id}`].template, "$ARGUMENTS");
+    assert.equal(config.command[id].agent, id);
+    assert.equal(config.command[id].subtask, false);
+    assert.equal(config.command[id].template, "$ARGUMENTS");
   }
   const directPreflight = plugin["command.execute.before"]!;
-  await directPreflight({ command: "harbor-portfolio-management", sessionID: "parent", arguments: "prioritize" }, { parts: [] });
+  await directPreflight({ command: "portfolio-management", sessionID: "parent", arguments: "prioritize" }, { parts: [] });
   await assert.rejects(() => directPreflight(
-    { command: "harbor-portfolio-management", sessionID: "parent", arguments: "   " }, { parts: [] },
+    { command: "portfolio-management", sessionID: "parent", arguments: "   " }, { parts: [] },
   ), /non-empty/);
 
   const execution: any = {
@@ -856,13 +866,8 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
     metadata: () => {}, ask: async () => {},
   };
   const delegate = plugin.tool!.harbor_delegate;
-  assert.deepEqual(
-    new Set((delegate.args.agent as any).options),
-    new Set([...rolePlayers.keys(), ...bundledPlayers.keys()].filter((id) => id !== "team-lead")),
-  );
-  for (const id of [...rolePlayers.keys(), ...bundledPlayers.keys()].filter((name) => name !== "team-lead")) {
-    assert.match(delegate.description, new RegExp(`${id}:`));
-  }
+  assert.equal((delegate.args.agent as any).options, undefined);
+  assert.match(delegate.description, /live roster at invocation time/);
   let evidence: string | undefined;
   for (const [index, step] of defaultCycle.steps.entries()) {
     evidence = String(await delegate.execute(
@@ -875,6 +880,13 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
   assert.deepEqual(prompts.map((entry) => entry.body.model), defaultCycle.steps.map(() => ({ providerID: defaultModel.providerID, modelID: defaultModel.modelID })));
   assert.deepEqual(prompts.map((entry) => entry.body.variant), defaultCycle.steps.map(() => defaultModel.variant));
 
+  await roster.join({ name: "new-player", description: "New player", prompt: "Handle newly assigned work.", tools: ["read"] });
+  assert.equal(await delegate.execute(
+    { agent: "new-player", task: "handle work joined during this session" },
+    { ...execution, messageID: "default-new-player" },
+  ), "evidence:new-player");
+  assert.equal(prompts.at(-1).body.agent, "new-player");
+
   const beforeInvalid = creates.length;
   const sdlcExecution = { ...execution, messageID: "sdlc-invalid" };
   await assert.rejects(() => delegate.execute({ agent: "portfolio-management", task: "work" }, { ...sdlcExecution, agent: "crafter" }), /only to team-lead/);
@@ -884,7 +896,7 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
   await roster.bench("off dispose", bundledPlayers);
   await assert.rejects(() => delegate.execute({ agent: "dispose", task: "retire safely" }, sdlcExecution), /not found/);
   await assert.rejects(() => directPreflight(
-    { command: "harbor-dispose", sessionID: "parent", arguments: "retire safely" }, { parts: [] },
+    { command: "dispose", sessionID: "parent", arguments: "retire safely" }, { parts: [] },
   ), /not found/);
   assert.equal(creates.length, beforeInvalid, "invalid or inactive targets must create zero children");
   await roster.bench("on dispose", bundledPlayers);
@@ -911,15 +923,19 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
   await assert.rejects(() => delegate.execute(
     { agent: fullCycle.steps[0].agent, task: "seventh stage" }, { ...sdlcExecution, messageID: "sdlc-7" },
   ), /at most six/);
-  assert.equal(creates.length, defaultCycle.steps.length + fullCycle.steps.length);
-  assert.deepEqual(prompts.map((entry) => entry.body.agent), [...defaultCycle.steps, ...fullCycle.steps].map((step) => step.agent));
+  assert.equal(creates.length, defaultCycle.steps.length + 1 + fullCycle.steps.length);
+  assert.deepEqual(prompts.map((entry) => entry.body.agent), [
+    ...defaultCycle.steps.map((step) => step.agent), "new-player", ...fullCycle.steps.map((step) => step.agent),
+  ]);
   assert.deepEqual(
     prompts.map((entry) => entry.body.model),
-    [...defaultCycle.steps.map(() => ({ providerID: defaultModel.providerID, modelID: defaultModel.modelID })), ...fullCycle.steps.map(() => ({ providerID: sdlcModel.providerID, modelID: sdlcModel.modelID }))],
+    [...defaultCycle.steps.map(() => ({ providerID: defaultModel.providerID, modelID: defaultModel.modelID })),
+      { providerID: defaultModel.providerID, modelID: defaultModel.modelID },
+      ...fullCycle.steps.map(() => ({ providerID: sdlcModel.providerID, modelID: sdlcModel.modelID }))],
   );
   assert.deepEqual(
     prompts.map((entry) => entry.body.variant),
-    [...defaultCycle.steps.map(() => defaultModel.variant), ...fullCycle.steps.map(() => sdlcModel.variant)],
+    [...defaultCycle.steps.map(() => defaultModel.variant), defaultModel.variant, ...fullCycle.steps.map(() => sdlcModel.variant)],
   );
   assert.match(prompts.at(-1).body.parts[0].text, new RegExp(`evidence:${fullCycle.steps.at(-2)!.agent}`));
   assert.ok(creates.every((entry) => entry.body.parentID === undefined));
@@ -1112,6 +1128,7 @@ test("Pi deterministic command handlers never enter the SDK orchestrator", async
       cwd: join(root, "project"), ui: { notify: (value: string) => notices.push(value) },
     });
     assert.match(notices.at(-1)!, /joined native/);
+    assert.ok(commands.has("native"), "join must register /native in the current Pi session");
     await commands.get("retire").handler("native", { cwd: join(root, "project"), ui: { notify: (value: string) => notices.push(value) } });
     assert.match(notices.at(-1)!, /retired native/);
     await commands.get("list-skills").handler("zx", { cwd: join(root, "project"), ui: { notify: (value: string) => notices.push(value) } });

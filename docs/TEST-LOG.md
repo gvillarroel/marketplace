@@ -151,3 +151,37 @@ Ownership now recognizes only the canonical revision-4 structure. Other
 metadata fails closed as an unmanaged collision: it is neither activated,
 overwritten nor deleted. Bench inventory and mutation planning contain no
 retired-roster discovery, reservation, cleanup or reporting paths.
+
+## Markdown bundled-roster gate
+
+Recorded at `2026-07-21T00:01:41-04:00`.
+
+| Command | Result |
+| --- | --- |
+| `npm test` | Passed: 91 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 18,968.116 ms |
+| `npm run typecheck` | Passed |
+| `npm audit --audit-level=high` | Passed: 0 vulnerabilities |
+| `npm pack --dry-run --json` | Passed: 102 entries, 107,134 bytes packed, 481,655 bytes unpacked; contains both Markdown roster directories in the package and Copilot runtime |
+| `git diff --check` | Passed |
+
+The six bundled definitions load from closed-frontmatter Markdown under
+`src/core/bundled/`. Tests verify their canonical order and tools, parser
+failure modes, source-to-dist copies, and byte-identical Copilot runtime copies.
+
+## Direct joined-player command gate
+
+Recorded at `2026-07-21T00:09:02-04:00`.
+
+| Command | Result |
+| --- | --- |
+| `npm test` | Passed: 91 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 18,623.291 ms; installed Copilot, OpenCode and Pi smokes passed |
+| `npm run typecheck` | Passed |
+| `npm audit --audit-level=high` | Passed: 0 vulnerabilities |
+| `npm pack --dry-run --json` | Passed: 102 entries, 107,782 bytes packed, 483,329 bytes unpacked |
+| `git diff --check` | Passed |
+
+`join` now reports `/<id> <request>`. Copilot and OpenCode register that exact
+ID instead of a `harbor-`-prefixed alias, Pi registers a joined ID immediately,
+and OpenCode delegation revalidates its target against the live roster so a
+player joined during the session can be invoked without weakening ownership
+checks.

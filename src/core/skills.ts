@@ -15,7 +15,7 @@ import type {
   RepositorySkill,
   SkillReference,
 } from "./types.js";
-import { loadTrustedGithubSkill, parseSkillBody, validateGithubSkill } from "./github.js";
+import { isTrustedGithubSkill, loadTrustedGithubSkill, parseSkillBody, validateGithubSkill } from "./github.js";
 import { isHarborId } from "./identity.js";
 
 const segmentPattern = /^[A-Za-z0-9._-]+$/;
@@ -72,6 +72,38 @@ export function validateSkillReference(value: unknown): SkillReference {
     return validateRepositorySkill(value);
   }
   return validateGithubSkill(value);
+}
+
+/**
+ * Validates the canonical player skill array used by JSON commands and Markdown definitions.
+ * Local references are project-relative; GitHub references must match the execution allowlist.
+ */
+export function validateConfiguredSkillReferences(
+  value: unknown,
+  tools: readonly unknown[],
+  trusted: readonly GithubSkill[],
+): SkillReference[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 3) {
+    throw new Error("skills must be an array of at most three repository or GitHub references");
+  }
+  const references = value.map(validateSkillReference);
+  const identities = new Set<string>();
+  const names = new Set<string>();
+  for (const reference of references) {
+    const identity = reference.kind === "repo"
+      ? `repo\0${reference.path}`
+      : `github\0${reference.repo.toLowerCase()}\0${reference.path}\0${reference.track}`;
+    if (identities.has(identity)) throw new Error("duplicate skill reference");
+    if (names.has(reference.name)) throw new Error(`duplicate configured skill name: ${reference.name}`);
+    if (reference.kind === "github" && !isTrustedGithubSkill(reference, trusted)) {
+      throw new Error("untrusted GitHub skill reference");
+    }
+    identities.add(identity);
+    names.add(reference.name);
+  }
+  if (references.length && !tools.includes("read")) throw new Error("configured skills require read");
+  return references;
 }
 
 function contained(root: string, target: string): string {

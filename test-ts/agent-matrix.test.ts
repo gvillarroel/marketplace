@@ -61,10 +61,10 @@ test("the factory roster has exactly two active roles and six opt-in SDLC player
   }
 });
 
-test("fixed role Markdown files are editable, ordered, and fail closed", async (t) => {
+test("player definition Markdown files are editable, ordered, and fail closed", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "harbor-fixed-roles-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const definition = (name: string, order: number, skills: string[] = []) => [
+  const definition = (name: string, order: number, skills: unknown[] = []) => [
     "---",
     `name: ${JSON.stringify(name)}`,
     `description: ${JSON.stringify(`${name} description`)}`,
@@ -75,16 +75,20 @@ test("fixed role Markdown files are editable, ordered, and fail closed", async (
     `${name} prompt.`,
     "",
   ].join("\n");
+  const localSkill = { kind: "repo", name: "local-checklist", path: "skills/local-checklist/SKILL.md" };
   await Promise.all([
-    writeFile(join(root, "later.md"), definition("later", 20), "utf8"),
-    writeFile(join(root, "first.md"), definition("first", 10, ["zx-example-author"]), "utf8"),
+    writeFile(join(root, "later.md"), definition("later", 20, [localSkill]), "utf8"),
+    writeFile(join(root, "first.md"), definition("first", 10, [trustedSkills[0]]), "utf8"),
   ]);
   const directory = new URL("./", pathToFileURL(join(root, "placeholder")));
   const loaded = loadFixedPlayers(directory, trustedSkills);
   assert.deepEqual([...loaded.keys()], ["first", "later"]);
   assert.deepEqual(loaded.get("first")!.skills, trustedSkills);
+  assert.deepEqual(loaded.get("later")!.skills, [localSkill]);
   await writeFile(join(root, "later.md"), definition("later", 10), "utf8");
   assert.throws(() => loadFixedPlayers(directory, trustedSkills), /duplicate fixed player order/);
+  await writeFile(join(root, "later.md"), definition("later", 20, ["zx-example-author"]), "utf8");
+  assert.throws(() => loadFixedPlayers(directory, trustedSkills), /invalid GitHub skill reference/);
   await writeFile(join(root, "later.md"), definition("wrong-name", 20), "utf8");
   assert.throws(() => loadFixedPlayers(directory, trustedSkills), /name must match its filename/);
 });

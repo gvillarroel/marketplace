@@ -1,23 +1,22 @@
 # Agent Harbor
 
-Agent Harbor convierte GitHub Copilot CLI, OpenCode y Pi en un equipo de
-agentes administrable. Los tres runtimes comparten el mismo roster y las mismas
-reglas de ciclo de vida.
+Agent Harbor turns GitHub Copilot CLI, OpenCode, and Pi into a manageable agent
+team. All three runtimes share the same roster and lifecycle rules.
 
-Incluye:
+It includes:
 
-- `team-lead` y `crafter`, disponibles desde el inicio;
-- seis especialistas SDLC opcionales: `portfolio-management`, `design`,
-  `build`, `manage`, `consume` y `dispose`;
-- `/bench`, `/join`, `/retire` y `/list-skills` deterministas, sin inferencia
-  cuando se usan desde la superficie directa de cada runtime;
-- `/contract` para ejecutar exactamente un agente desechable;
-- ownership seguro: nunca sobrescribe ni elimina perfiles que no administra.
+- `team-lead` and `crafter`, available from startup;
+- six opt-in SDLC specialists: `portfolio-management`, `design`, `build`,
+  `manage`, `consume`, and `dispose`;
+- deterministic `/bench`, `/join`, `/retire`, and `/list-skills` controls that
+  use no inference through each runtime's direct surface;
+- `/contract` for exactly one disposable agent;
+- safe ownership: unmanaged profiles are never overwritten or deleted.
 
-## Instalación
+## Installation
 
-Elige el runtime donde lo vas a usar. Después de instalar o actualizar, abre
-una sesión nueva desde la carpeta de tu proyecto.
+Choose the runtime where you will use Agent Harbor. After installing or
+updating, start a new session from your project directory.
 
 ### GitHub Copilot CLI
 
@@ -29,13 +28,13 @@ copilot --experimental
 
 ### OpenCode
 
-Instalación global desde GitHub:
+Global installation from GitHub:
 
 ```shell
 opencode plugin https://github.com/gvillarroel/marketplace/archive/refs/heads/main.tar.gz --global
 ```
 
-Para instalarlo sólo en el proyecto actual, omite `--global`.
+Omit `--global` to install it only in the current project.
 
 ### Pi
 
@@ -43,48 +42,47 @@ Para instalarlo sólo en el proyecto actual, omite `--global`.
 pi install git:github.com/gvillarroel/marketplace
 ```
 
-Para instalarlo sólo en el proyecto actual:
+To install it only in the current project:
 
 ```shell
 pi install --local git:github.com/gvillarroel/marketplace
 ```
 
-## Primeros pasos
+## Getting started
 
-1. Consulta los agentes disponibles:
+1. List the available agents:
 
    ```text
    /bench
    ```
 
-   En OpenCode el control directo equivalente es `/bench-list`.
+   In OpenCode, the equivalent direct control is `/bench-list`.
 
-2. Activa sólo los especialistas que necesites:
+2. Activate only the specialists you need:
 
    ```text
    /bench on design build consume
    ```
 
-   En OpenCode usa `/bench-on`, que solicita los nombres en un diálogo.
+   In OpenCode, use `/bench-on`, which prompts for the names.
 
-3. Ejecuta una tarea:
+3. Run a task:
 
-   - En Copilot y OpenCode, selecciona `team-lead`, `crafter` o un especialista
-     activo desde el selector nativo de agentes.
-   - En Pi, invócalo directamente, por ejemplo:
+   - In Copilot and OpenCode, select `team-lead`, `crafter`, or an active
+     specialist through the native agent selector.
+   - In Pi, invoke it directly, for example:
 
      ```text
-     /team-lead Diseña e implementa este cambio y valida el resultado.
+     /team-lead Design and implement this change, then validate the result.
      ```
 
-Para enviar una tarea a un agente exacto en Copilot u OpenCode, usa
-`/harbor-<id> <tarea>`, por ejemplo:
+To send work to one exact agent in any runtime, use `/<id> <task>`, for example:
 
 ```text
-/harbor-design Diseña el cambio mínimo para soportar esta funcionalidad.
+/design Design the smallest change that supports this feature.
 ```
 
-También puedes administrar el roster sin depender de la interfaz del host:
+You can also manage the roster without depending on the host interface:
 
 ```shell
 agent-harbor <copilot|opencode|pi> bench list
@@ -92,8 +90,8 @@ agent-harbor <copilot|opencode|pi> bench on design build
 agent-harbor <copilot|opencode|pi> list-skills
 ```
 
-## Documentación
+## Documentation
 
-La documentación detallada está en [`docs/`](docs/README.md): uso avanzado,
-comandos, agentes, arquitectura, requisitos, decisiones de diseño y evidencia
-de pruebas.
+Detailed documentation is available in [`docs/`](docs/README.md): advanced
+usage, commands, agents, architecture, requirements, design decisions, and test
+evidence.

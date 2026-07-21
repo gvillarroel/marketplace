@@ -82,7 +82,7 @@ mismo layout.
 | Consumidor | Entrypoint | Superficie principal |
 | --- | --- | --- |
 | Copilot marketplace | `.github/plugin/marketplace.json` y `plugins/agent-foundry/plugin.json` | Instala únicamente `agent-foundry`. |
-| Copilot extensión | `plugins/agent-foundry/extensions/agent-harbor/extension.mjs` | Comandos client deterministas, `/harbor-<id>`, cambio/restauración de agente y guard de `team-lead`. |
+| Copilot extensión | `plugins/agent-foundry/extensions/agent-harbor/extension.mjs` | Comandos client deterministas, `/<id>`, cambio/restauración de agente y guard de `team-lead`. |
 | Copilot MCP | `plugins/agent-foundry/.mcp.json` → runtime generado `adapters/copilot-mcp.js` | Tool global `control`; `--skills-player <id>` publica sólo `skills`; `--scout` publica sólo `filter_skills` y `join_player`. |
 | Copilot model-backed | `plugins/agent-foundry/skills/contract/SKILL.md` | Único wrapper Markdown: `/contract` hace preflight y crea exactamente un child. Los cuatro controles deterministas no tienen fallback skill. |
 | OpenCode server | export `.`/`./server` → `dist/adapters/opencode.js` | Plugin `AgentHarborPlugin`: commands, agents y tools lifecycle, delegación, skills y las dos tools aisladas del scout. |
@@ -120,7 +120,8 @@ Semántica común:
 
 - `bench [list [filter]]` calcula estados; `bench on|off` activa o elimina sólo
   copias de proyecto. `all` expande los seis bundled en orden canónico.
-- `join <json>` valida, renderiza y escribe registro + copia activa.
+- `join <json>` valida, renderiza y escribe registro + copia activa, y devuelve
+  el alias nominal `/<id> <request>` que los adapters proyectan como comando.
 - `retire <id>` elimina el registro personal y la copia activa del proyecto
   actual; otros proyectos quedan intactos.
 - `list-skills [filter]` carga el override cerrado
@@ -149,14 +150,16 @@ Un fallo de ejecución y otro de cleanup se conservan juntos en un
 
 La invocación nominal evita una inferencia de routing:
 
-- Copilot `/harbor-<id>` recarga agentes, resuelve el ID fijo namespaced o el
+- Copilot `/<id>` recarga agentes, resuelve el ID fijo namespaced o el
   path administrado exacto, selecciona el agente, envía una tarea y restaura la
   selección anterior bajo `withSelectionLock`.
-- OpenCode configura `/harbor-<id>` con `agent: <id>`,
+- OpenCode configura `/<id>` con `agent: <id>`,
   `template: "$ARGUMENTS"` y `subtask: false`; el hook previo vuelve a validar
   tarea, actividad y ownership.
 - Pi registra `/<id>` y `runPlayer` abre una sesión SDK en memoria con la
-  definición fija o recuperada del perfil activo.
+  definición fija o recuperada del perfil activo. Tras `join` o `bench`, Pi
+  sincroniza los nuevos IDs inmediatamente; Copilot y OpenCode los incorporan
+  desde la misma copia activa al recargar la sesión/configuración del host.
 
 Una tarea vacía, un bundled apagado o un perfil no canónico falla antes de
 enviar el prompt.
@@ -173,55 +176,57 @@ cada especialista exitoso una sola vez y sintetizar sólo la evidencia devuelta.
 | Harness | Boundary de delegación | Controles ejecutables |
 | --- | --- | --- |
 | Copilot | `task` nativo + `createCopilotCoordinatorGuard` | Snapshot de agentes fuera del hook; target exacto activo; path revalidado; sin recursión/nesting; máximo seis y uno in-flight por prompt. `selectionEpoch` impide que un refresh tardío pise una selección más nueva. El host ejecuta y termina cada `task` síncrono. |
-| OpenCode | Tool exclusiva `harbor_delegate` | Enum de targets activos al iniciar; resolución del turno de usuario raíz; modelo/variant heredado; máximo seis, sin target repetido y uno in-flight. Cada llamada usa `runAgent`, normaliza paths absolutos del proyecto y borra la sesión child. |
+| OpenCode | Tool exclusiva `harbor_delegate` | Target string revalidado contra el roster activo en cada llamada; resolución del turno de usuario raíz; modelo/variant heredado; máximo seis, sin target repetido y uno in-flight. Cada llamada usa `runAgent`, normaliza paths absolutos del proyecto y borra la sesión child. |
 | Pi | Custom tool `harbor_delegate` en la sesión del lead | Enum capturado al crearla, `executionMode: "sequential"`, máximo seis y sin target repetido. Cada dispatch reconstruye la definición y abre/limpia una sesión child. |
 
-Los roles SDLC bundled son peers en este orden cuando todos los gates son
-obligatorios: `portfolio-management → design → build → manage → consume →
-dispose`. Para tareas ordinarias no se abre la cadena completa por defecto.
+Bundled SDLC peers are loaded through the same parser from
+`src/core/bundled/*.md`. Their `order` fields produce this sequence when every
+gate is required: `portfolio-management → design → build → manage → consume →
+dispose`. Ordinary tasks do not open the complete chain by default.
 
-## Persistencia, ownership y estados
+## Persistence, ownership, and states
 
-`src/core/harnesses.ts:harnessProfileLayout` define el destino activo y
-`src/core/profiles.ts:harnessSpec` lo combina con el registro bajo el home:
+`src/core/harnesses.ts:harnessProfileLayout` defines the active destination,
+and `src/core/profiles.ts:harnessSpec` combines it with the user-level
+registration path:
 
-| Harness | Registro personal bajo el home | Copia activa bajo el proyecto |
+| Harness | Personal registration under the user home | Active project copy |
 | --- | --- | --- |
 | Copilot | `agent-foundry/bench/<id>.agent.md` | `.github/agents/<id>.agent.md` |
 | OpenCode | `agent-foundry/bench/<id>.md` | `.opencode/agents/<id>.md` |
 | Pi | `agent-foundry/bench/<id>.md` | `.pi/agents/<id>.md` |
 
-Las clases tienen lifecycle diferente:
+The roster classes have different lifecycles:
 
-| Clase | Fuente | Persistencia | Activación |
+| Class | Source | Persistence | Activation |
 | --- | --- | --- | --- |
-| Fija | `src/core/roles/*.md` → `rolePlayers` y assets Copilot | No usa roster de usuario. | Siempre invocable. |
-| Bundled SDLC | `bundledPlayers` | Sólo copia activa de proyecto. | `bench on`; `bench off` la elimina. |
-| Personal | JSON de `join` | Registro en home + copia activa inicial. | `bench off` conserva registro; `bench on` re-renderiza desde revisión 4; `retire` elimina registro y copia actual. |
+| Fixed | `src/core/roles/*.md` → `rolePlayers` and Copilot assets | Does not use the user roster. | Always invocable. |
+| Bundled SDLC | `src/core/bundled/*.md` → `bundledPlayers` | Project-local active copy only. | `bench on`; `bench off` removes it. |
+| Personal | `join` JSON | User-level registration plus an initial active copy. | `bench off` preserves registration; `bench on` re-renders revision 4; `retire` removes registration and the current copy. |
 
-Un perfil revisión 4 renderizado por `renderPlayer` contiene:
+A revision-4 profile rendered by `renderPlayer` contains:
 
-- frontmatter nativo del harness;
-- metadata única `owner: agent-foundry`, `roster`, `player` y
+- native harness frontmatter;
+- unique `owner: agent-foundry`, `roster`, `player`, and
   `revision: "4"`;
-- marcador `agent-foundry:profile` con el mismo ID y revisión;
-- definición JSON canónica, sin `replace`, codificada en base64url;
-- instrucciones compuestas para el player.
+- an `agent-foundry:profile` marker with the same ID and revision;
+- a canonical base64url-encoded JSON definition without `replace`;
+- composed player instructions.
 
-`isOwnedProfile` prueba ownership estructural; no basta para invocar.
-`isCanonicalPlayerProfile` además exige que la definición decodificada y toda
-la representación ejecutable coincidan con el renderer actual. Copilot acepta
-como equivalente sólo una ruta MCP alternativa cuyo archivo sea regular,
-byte-idéntico al entrypoint esperado y no sea symlink. Cualquier metadata de
-ownership distinto del formato actual se trata como una colisión no administrada.
+`isOwnedProfile` proves structural ownership; that alone does not authorize
+invocation. `isCanonicalPlayerProfile` additionally requires the decoded
+definition and complete executable representation to match the current
+renderer. Copilot accepts an alternate MCP path only when its target is a
+regular, non-symlink file that is byte-identical to the expected entrypoint.
+Ownership metadata outside the current format is an unmanaged collision.
 
-`Roster.bench` expone `on`, `bench`, `stale` y `conflict`. En términos operativos:
+`Roster.bench` exposes `on`, `bench`, `stale`, and `conflict`:
 
-- `on`: perfil activo, owned y canónico;
-- `bench`: no hay copia activa recuperable;
-- `stale`: Agent Harbor reconoce ownership, pero no puede reconstruir o
-  aceptar la representación como canónica;
-- `conflict`: existe contenido que Agent Harbor no posee en ese destino.
+- `on`: active, owned, canonical profile;
+- `bench`: no recoverable active copy;
+- `stale`: Agent Harbor recognizes ownership but cannot reconstruct or accept
+  the representation as canonical;
+- `conflict`: the destination contains data Agent Harbor does not own.
 
 ## Lock, transacción y rollback
 
@@ -337,23 +342,24 @@ el hook síncrono del host no expone. `emitHarborEvidence` absorbe fallos
 síncronos o asíncronos del collector: observar nunca cambia ejecución ni
 cleanup.
 
-## Build y artefactos generados
+## Build and generated artifacts
 
-`npm run build` ejecuta únicamente `scripts/build.mjs`: elimina los dos
-árboles generados, ejecuta TypeScript con `noEmitOnError` y luego copia el
-runtime Copilot desde ese mismo `dist`.
+`npm run build` runs only `scripts/build.mjs`: it removes both generated trees,
+runs TypeScript with `noEmitOnError`, and copies the Copilot runtime from that
+same `dist` output.
 
-| Entrada fuente | Salida generada | Consumidor |
+| Source input | Generated output | Consumer |
 | --- | --- | --- |
-| `src/**/*.ts` | `dist/**/*.js` y `dist/**/*.d.ts` | Paquete npm, CLI, OpenCode y Pi. |
-| `dist/core/*.js` | `plugins/agent-foundry/runtime/dist/core/*.js` | Runtime del único plugin Copilot. |
-| `dist/adapters/{shared,copilot,copilot-mcp}.js` | Mismos paths bajo el runtime de `agent-foundry` | MCP global/player-scoped y preflight Copilot. |
-| `dist/adapters/{direct,copilot-coordinator}.js` | Sólo `plugins/agent-foundry/runtime/dist/adapters/` | Controles client y guard del coordinador. |
-| Manifests, `plugins/*/agents`, `plugins/*/skills`, `extension.mjs` | No se generan | Assets Copilot revisados como fuente. |
+| `src/**/*.ts` | `dist/**/*.js` and `dist/**/*.d.ts` | npm package, CLI, OpenCode, and Pi. |
+| `src/core/{bundled,roles}/*.md` | `dist/core/{bundled,roles}/*.md` and the same paths under the Copilot runtime | Editable roster definitions for every harness. |
+| `dist/core/*.js` | `plugins/agent-foundry/runtime/dist/core/*.js` | Runtime for the single Copilot plugin. |
+| `dist/adapters/{shared,copilot,copilot-mcp}.js` | Same paths under the `agent-foundry` runtime | Global/player-scoped MCP and Copilot preflight. |
+| `dist/adapters/{direct,copilot-coordinator}.js` | `plugins/agent-foundry/runtime/dist/adapters/` only | Client controls and coordinator guard. |
+| Manifests, `plugins/*/agents`, `plugins/*/skills`, `extension.mjs` | Not generated | Copilot assets reviewed as source. |
 
-El test `Copilot runtime is generated byte-for-byte from shared core` protege
-esta matriz. Si cambia `src/`, se ejecuta el build y se incluyen las salidas
-generadas correspondientes; no se parchean a mano.
+The `Copilot runtime is generated byte-for-byte from shared core` test protects
+this matrix. Any `src/` change requires a build and its corresponding generated
+outputs; generated files are never patched by hand.
 
 ## Estrategia de pruebas offline y live
 

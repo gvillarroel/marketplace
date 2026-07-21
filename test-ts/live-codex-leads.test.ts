@@ -327,7 +327,7 @@ async function runOpenCode(
     "OpenCode live team-lead",
     cli,
     [
-      "run", "--dir", project, "--command", "harbor-team-lead", "--model", `openai/${selection.model}`,
+      "run", "--dir", project, "--command", "team-lead", "--model", `openai/${selection.model}`,
       "--variant", "medium", "--format", "json", "--title", `Agent Harbor live ${sha256(acceptanceId).slice(0, 12)}`,
       prompt,
     ],

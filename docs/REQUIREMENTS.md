@@ -24,6 +24,15 @@ de los seis compañeros SDLC bundled: `portfolio-management`, `design`, `build`,
 pasan a ser invocables en el proyecto mediante `bench on`. La suite **DEBE**
 distinguir ambos estados y probar los ocho nombres después de `bench on all`.
 
+Fixed roles **MUST** load from `src/core/roles/*.md`, and bundled peers **MUST**
+load from `src/core/bundled/*.md`. Both directories **MUST** use the same
+closed-frontmatter loader: matching filename and `name`, unique `order`, known
+tools, a non-empty Markdown body as the prompt, and the same structured skill
+references accepted by `/join`. A `repo` reference **MUST** be relative to the
+current project; a `github` reference **MUST** match the exact trusted execution
+allowlist. The build **MUST** copy both definition directories into the package
+and the Copilot runtime.
+
 Cuando se requiere el ciclo completo, esos compañeros representan, en orden:
 
 - `portfolio-management`: encuadre de valor, prioridad, alcance, criterios de
@@ -196,6 +205,10 @@ ruta cero modelo.
 - Rechaza claves desconocidas, valores inseguros, tools desconocidas o
   duplicadas, descripción multilínea y perfiles mayores de 30.000 caracteres.
 - Escribe registro y copia activa byte-idénticos y los verifica.
+- Devuelve el alias nominal `/<name> <request>`. El host **DEBE** registrar ese
+  alias automáticamente desde la copia activa: Pi en la sesión actual y
+  Copilot/OpenCode al cargar o recargar su configuración de comandos. No se
+  requiere crear manualmente otro archivo ni editar configuración.
 - `skills` admite como máximo tres referencias con nombres únicos. Cada entrada
   es exactamente una referencia `repo` al `SKILL.md` relativo al proyecto o
   una referencia GitHub cubierta por la allowlist exacta. Una lista no vacía
@@ -235,7 +248,7 @@ ruta cero modelo.
 
 ### Invocación y delegación nominal
 
-- Copilot **DEBE** registrar comandos `client` `/harbor-<id> <task>` para los
+- Copilot **DEBE** registrar comandos `client` `/<id> <task>` para los
   dos roles fijos, los seis compañeros bundled y los perfiles activos conocidos al
   iniciar. El handler **DEBE** recargar discovery, resolver el ID estable o el
   path exacto administrado, seleccionar el agente, enviar el task una sola vez
@@ -244,12 +257,13 @@ ruta cero modelo.
   que sólo permita el `agent_type` exacto de un player Agent Harbor activo,
   rechace nested delegation y recursión, impida dos llamadas simultáneas y
   cuente como máximo seis por prompt de usuario.
-- OpenCode **DEBE** registrar `harbor-<id>` con `template: "$ARGUMENTS"`, el
+- OpenCode **DEBE** registrar `<id>` con `template: "$ARGUMENTS"`, el
   `agent` exacto y `subtask: false`; así evita tanto el router como el resumen
   adicional del padre. Un hook **DEBE** revalidar tarea, actividad y ownership
   al ejecutar incluso si el alias quedó cargado después de `bench off`.
-  `team-lead` **DEBE** recibir sólo `harbor_delegate`; el enum y la descripción
-  del tool enumeran exactamente los destinos activos al iniciar la sesión. Cada
+  `team-lead` **DEBE** recibir sólo `harbor_delegate`; el target es un string
+  que se revalida contra el roster activo al invocarse, de modo que incluya
+  players unidos durante la sesión sin aceptar IDs inactivos. Cada
   llamada crea un child desechable con `body.agent` exacto y una correlación
   única del tool. Con Codex OAuth, el child permanece separado del parent para
   no enviar metadata de sesión que ese endpoint rechaza; la correlación y el

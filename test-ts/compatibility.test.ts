@@ -204,7 +204,7 @@ async function inspectCopilotDirectExtension(launch: Launch, sandbox: string, wo
       direct = listed.commands.find((command) => command.name === "bench" && command.kind === "client");
     }
     assert.ok(direct, `Copilot must discover the direct /bench extension command: ${JSON.stringify(listed.commands)}`);
-    const expectedCommands = [...rolePlayers.keys(), ...bundledPlayers.keys()].map((id) => `harbor-${id}`);
+    const expectedCommands = [...rolePlayers.keys(), ...bundledPlayers.keys()];
     assert.ok(expectedCommands.every((name) => listed.commands.some((command) => command.name === name && command.kind === "client")));
     assert.ok(listed.commands.some((command) => command.name === "scout" && command.kind === "client"));
 
@@ -212,7 +212,7 @@ async function inspectCopilotDirectExtension(launch: Launch, sandbox: string, wo
     for (const id of rolePlayers.keys()) assert.ok(initial.agents.some((agent) => agent.name === id || agent.id.endsWith(`:${id}`)), id);
     assert.ok(initial.agents.some((agent) => agent.id === "agent-foundry:talent-scout"), "talent-scout");
     for (const id of bundledPlayers.keys()) assert.ok(!initial.agents.some((agent) => agent.name === id || agent.id === id), `${id} must start on the bench`);
-    await assert.rejects(() => session!.rpc.commands.invoke({ name: "harbor-portfolio-management", input: "must not reach a model" }), /not active/i);
+    await assert.rejects(() => session!.rpc.commands.invoke({ name: "portfolio-management", input: "must not reach a model" }), /not active/i);
 
     const invoked = await session.rpc.commands.invoke({ name: "bench", input: "on all" });
     assert.equal(invoked.kind, "completed");
@@ -378,7 +378,7 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
   for (const name of deterministicCommandNames) assert.match(extension, new RegExp(`\\["${name}"`));
   assert.equal(extension.match(/sendAndWait/g)?.length, 1, "only explicit player commands may send one prompt");
   assert.match(extension, /agent\.select/);
-  assert.match(extension, /harbor-\$\{id\}/);
+  assert.match(extension, /name: id/);
   assert.doesNotMatch(extension, /createSession|\.prompt\(/);
   assert.doesNotMatch(extension, /[\[\"]contract[\]\"]\s*,/);
   assert.match(extension, /catch \(error\)[\s\S]*throw error;/);
@@ -399,6 +399,8 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
 
 test("Copilot runtimes contain exact physical byte copies of their shared build inputs", async () => {
   const coreFiles = (await readdir(join(dist, "core"))).filter((name) => name.endsWith(".js")).sort();
+  const bundledFiles = ["build.md", "consume.md", "design.md", "dispose.md", "manage.md", "portfolio-management.md"];
+  const roleFiles = ["crafter.md", "team-lead.md"];
   const runtimes = [{
     name: "agent-foundry",
     adapters: ["copilot-coordinator.js", "copilot-mcp.js", "copilot.js", "direct.js", "shared.js"],
@@ -409,17 +411,20 @@ test("Copilot runtimes contain exact physical byte copies of their shared build 
     const coreRoot = join(runtimeDist, "core");
     const adapterRoot = join(runtimeDist, "adapters");
     assert.deepEqual((await readdir(runtimeDist)).sort(), ["adapters", "core"]);
-    assert.deepEqual((await readdir(coreRoot)).sort(), [...coreFiles, "roles"].sort(), `${runtime.name} must contain generated core JavaScript and fixed role Markdown`);
-    assert.deepEqual((await readdir(join(coreRoot, "roles"))).sort(), ["crafter.md", "team-lead.md"]);
+    assert.deepEqual((await readdir(coreRoot)).sort(), [...coreFiles, "bundled", "roles"].sort(), `${runtime.name} must contain generated core JavaScript and player Markdown`);
+    assert.deepEqual((await readdir(join(coreRoot, "bundled"))).sort(), bundledFiles);
+    assert.deepEqual((await readdir(join(coreRoot, "roles"))).sort(), roleFiles);
     assert.deepEqual((await readdir(adapterRoot)).sort(), [...runtime.adapters].sort(), `${runtime.name} adapter inventory`);
 
-    for (const directory of [runtimeDist, coreRoot, adapterRoot]) {
+    for (const directory of [runtimeDist, coreRoot, adapterRoot, join(coreRoot, "bundled"), join(coreRoot, "roles")]) {
       const stat = await lstat(directory);
       assert.ok(stat.isDirectory(), `${directory} must be a directory`);
       assert.equal(stat.isSymbolicLink(), false, `${directory} must be a physical directory`);
     }
     for (const [directory, source, names] of [
       [coreRoot, join(dist, "core"), coreFiles],
+      [join(coreRoot, "bundled"), join(dist, "core", "bundled"), bundledFiles],
+      [join(coreRoot, "roles"), join(dist, "core", "roles"), roleFiles],
       [adapterRoot, join(dist, "adapters"), runtime.adapters],
     ] as const) {
       for (const name of names) {
@@ -429,6 +434,16 @@ test("Copilot runtimes contain exact physical byte copies of their shared build 
         assert.equal(stat.isSymbolicLink(), false, `${target} must be a physical copy`);
         assert.deepEqual(await readFile(target), await readFile(join(source, name)), `${runtime.name}/${name}`);
       }
+    }
+  }
+
+  for (const [directory, names] of [["bundled", bundledFiles], ["roles", roleFiles]] as const) {
+    for (const name of names) {
+      assert.deepEqual(
+        await readFile(join(dist, "core", directory, name)),
+        await readFile(join(root, "src", "core", directory, name)),
+        `dist/core/${directory}/${name}`,
+      );
     }
   }
 });
@@ -672,6 +687,8 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
           "byte-identical packaged runtimes must recognize one another's scoped profile");
         const direct = await inspectCopilotDirectExtension(copilot!, sandbox, project);
         assert.ok(direct.commands.some((command) => command.name === "bench" && command.kind === "client"));
+        assert.ok(direct.commands.some((command) => command.name === "native-worker" && command.kind === "client"),
+          "a joined personal player must be registered as /native-worker");
         assert.ok([...rolePlayers.keys(), ...bundledPlayers.keys()].every((id) =>
           direct.agents.some((agent) => agent.name === id || agent.id === id || agent.id.endsWith(`:${id}`))));
         const crafter = direct.agents.find((agent) => agent.id === "agent-foundry:crafter");
@@ -707,7 +724,7 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
       const initial = JSON.parse(config.stdout);
       assert.ok([...commands].every((name) => name in initial.command));
       assert.ok([...rolePlayers.keys()].every((name) => name in initial.agent));
-      assert.ok([...rolePlayers.keys()].every((name) => initial.command[`harbor-${name}`]?.agent === name));
+      assert.ok([...rolePlayers.keys()].every((name) => initial.command[name]?.agent === name));
       assert.equal(initial.agent["team-lead"].tools["*"], false);
       assert.equal(initial.agent["team-lead"].tools.harbor_delegate, true);
       assert.ok([...bundledPlayers.keys()].every((name) => !(name in initial.agent)), "bundled players must start on the bench");
@@ -720,7 +737,7 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
       const discovered = JSON.parse(activatedConfig.stdout);
       for (const id of [...rolePlayers.keys(), ...bundledPlayers.keys()]) {
         assert.ok(id in discovered.agent, `OpenCode must discover ${id}`);
-        assert.deepEqual(discovered.command[`harbor-${id}`], {
+        assert.deepEqual(discovered.command[id], {
           template: "$ARGUMENTS",
           description: `Run Agent Harbor player ${id} in the current session`,
           agent: id,
