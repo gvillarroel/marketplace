@@ -3,7 +3,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { bundledPlayers } from "../src/core/defaults.js";
+import { bundledPlayers, rolePlayers, scoutPlayer } from "../src/core/defaults.js";
 import { Roster } from "../src/core/lifecycle.js";
 import { harnessSpec } from "../src/core/profiles.js";
 import { visibleTextWidth, wrapPlainLine } from "../src/core/text-layout.js";
@@ -11,11 +11,17 @@ import {
   formatPiLiveWidget,
   formatPiLiveStatus,
   formatPiMissionReport,
+  maximumPiObservedMessages,
   PiTeamRuntime,
   piTaskLabel,
   settlePiRootPromises,
 } from "../src/adapters/pi-team-runtime.js";
-import { formatPiTeamView } from "../src/adapters/pi-team-view.js";
+import {
+  formatPiTeamView,
+  maximumPiTeamOverviewLines,
+  maximumVisiblePiOverviewRosterMembers,
+  maximumVisiblePiRosterMembers,
+} from "../src/adapters/pi-team-view.js";
 import { PiOrchestrator } from "../src/orchestrators/pi.js";
 
 const definition = { name: "worker", description: "Worker", prompt: "Work", tools: ["read"] as const, task: "Do it" };
@@ -118,6 +124,27 @@ test("PiTeamRuntime keeps bounded safe tasks and deduplicates native usage witho
   assert.doesNotMatch(serialized, /private chain of thought|customer|private\.ts|internal\.example|abcdefghijklmnop/u);
 });
 
+test("PiTeamRuntime preserves configured model provenance until Pi observes a response model", () => {
+  const runtime = new PiTeamRuntime();
+  const runId = runtime.begin({
+    project: process.cwd(),
+    agent: "configured-worker",
+    kind: "personal",
+    task: "Use the configured route",
+    model: { provider: "router", id: "special" },
+    modelSource: "configured",
+  });
+  const observer = runtime.observer(runId);
+  observer.sessionStarted({ model: { provider: "router", id: "special" } });
+  assert.equal(runtime.get(runId)!.modelSource, "configured");
+  assert.match(formatPiLiveWidget(runtime, runId).join("\n"), /router\/special \(configured\)/u);
+  observer.messageEnd({
+    role: "assistant", responseId: "configured-response", provider: "router", model: "special",
+    usage: { input: 2, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 3 },
+  });
+  assert.equal(runtime.get(runId)!.modelSource, "observed");
+});
+
 test("PiTeamRuntime distinguishes equal-shape response-less messages while deduplicating transcript clones", () => {
   const runtime = new PiTeamRuntime();
   const runId = runtime.begin({ project: process.cwd(), agent: "worker", kind: "contractor", task: "Observe" });
@@ -199,6 +226,35 @@ test("PiTeamRuntime never prunes active roots and retains only bounded terminal 
   assert.equal(runtime.get(second)?.state, "completed");
 });
 
+test("PiTeamRuntime rejects cross-project children", () => {
+  const runtime = new PiTeamRuntime();
+  const root = runtime.begin({ project: process.cwd(), agent: "lead", kind: "manager", task: "Coordinate" });
+  assert.throws(() => runtime.begin({
+    project: join(process.cwd(), "foreign-project"),
+    agent: "worker",
+    kind: "contractor",
+    task: "Must remain local",
+    parentRunId: root,
+  }), /parent's project/u);
+  assert.equal(runtime.mission(root).length, 1);
+});
+
+test("PiTeamRuntime terminal retention preserves the latest mission per recent project", () => {
+  const runtime = new PiTeamRuntime(Date.now, 2);
+  const projectA = join(process.cwd(), "retention-a");
+  const projectB = join(process.cwd(), "retention-b");
+  const a = runtime.begin({ project: projectA, agent: "a", kind: "contractor", task: "A" });
+  runtime.finishIfOpen(a, "completed");
+  const b1 = runtime.begin({ project: projectB, agent: "b1", kind: "contractor", task: "B1" });
+  runtime.finishIfOpen(b1, "completed");
+  const b2 = runtime.begin({ project: projectB, agent: "b2", kind: "contractor", task: "B2" });
+  runtime.finishIfOpen(b2, "completed");
+  assert.ok(runtime.get(a), "a noisy second project evicted the only retained mission for project A");
+  assert.equal(runtime.get(b1), undefined);
+  assert.ok(runtime.get(b2));
+  assert.equal(runtime.projectRuns(projectA).length + runtime.projectRuns(projectB).length, 2);
+});
+
 test("PiTeamRuntime uses numeric creation order when timestamps tie", () => {
   const runtime = new PiTeamRuntime(() => 1, 2);
   const roots = Array.from({ length: 12 }, (_, index) => runtime.begin({
@@ -226,14 +282,24 @@ test("PiTeamRuntime does not prune a terminal root while one of its children is 
   assert.ok(runtime.get(newer));
 });
 
-test("PiTeamRuntime treats Pi all-zero usage sentinels as unknown", () => {
+test("PiTeamRuntime distinguishes explicit zero usage from omitted native usage", () => {
   const runtime = new PiTeamRuntime();
-  const sentinel = runtime.begin({ project: process.cwd(), agent: "sentinel", kind: "contractor", task: "Observe" });
-  runtime.observeMessageEnd(sentinel, {
+  const explicit = runtime.begin({ project: process.cwd(), agent: "explicit", kind: "contractor", task: "Observe" });
+  runtime.observeMessageEnd(explicit, {
     role: "assistant", responseId: "zero", provider: "router", model: "auto",
     usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
   });
-  assert.deepEqual(runtime.get(sentinel)!.usage, {});
+  assert.deepEqual(runtime.get(explicit)!.usage,
+    { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
+  assert.deepEqual(runtime.get(explicit)!.usageLowerBounds, []);
+
+  const omitted = runtime.begin({ project: process.cwd(), agent: "omitted", kind: "contractor", task: "Observe" });
+  runtime.observeMessageEnd(omitted, {
+    role: "assistant", responseId: "omitted", provider: "router", model: "auto",
+  });
+  assert.deepEqual(runtime.get(omitted)!.usage, {});
+  assert.deepEqual(new Set(runtime.get(omitted)!.usageLowerBounds),
+    new Set(["input", "output", "reasoning", "cacheRead", "cacheWrite", "total"]));
 
   const inconsistent = runtime.begin({ project: process.cwd(), agent: "partial", kind: "contractor", task: "Observe" });
   runtime.observeMessageEnd(inconsistent, {
@@ -248,6 +314,54 @@ test("PiTeamRuntime treats Pi all-zero usage sentinels as unknown", () => {
     usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 7 },
   });
   assert.deepEqual(runtime.get(totalOnly)!.usage, { reasoning: 0, total: 7 });
+});
+
+test("Pi message fingerprints and retained identity memory stay bounded", () => {
+  const runtime = new PiTeamRuntime();
+  const runId = runtime.begin({ project: process.cwd(), agent: "worker", kind: "contractor", task: "Observe safely" });
+  const cyclic: any = {
+    role: "assistant",
+    timestamp: 1,
+    provider: "p",
+    model: "m",
+    usage: { input: 1, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1 },
+  };
+  cyclic.content = cyclic;
+  assert.doesNotThrow(() => runtime.observeMessageEnd(runId, cyclic));
+
+  let deep: any = { text: `${"x".repeat(2_000_000)}private-suffix-must-not-be-retained` };
+  for (let index = 0; index < 10_000; index += 1) deep = { child: deep };
+  assert.doesNotThrow(() => runtime.observeMessageEnd(runId, {
+    role: "assistant",
+    timestamp: 2,
+    provider: "p",
+    model: "m",
+    content: deep,
+    usage: { input: 1, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1 },
+  }));
+  assert.equal(runtime.get(runId)!.nativeMessagesLowerBound, true);
+
+  for (let index = runtime.get(runId)!.nativeMessages; index <= maximumPiObservedMessages; index += 1) {
+    runtime.observeMessageEnd(runId, {
+      role: "assistant",
+      responseId: `bounded-${index}`,
+      provider: "p",
+      model: "m",
+      usage: { input: 1, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1 },
+    });
+  }
+  const snapshot = runtime.get(runId)!;
+  assert.equal(snapshot.nativeMessages, maximumPiObservedMessages);
+  assert.equal(snapshot.nativeMessagesLowerBound, true);
+  assert.ok(snapshot.usageLowerBounds.includes("total"));
+  assert.match(formatPiMissionReport(runtime, runId), new RegExp(`model turns ≥${maximumPiObservedMessages}`, "u"));
+  assert.doesNotMatch(JSON.stringify(snapshot), /private-suffix|x{100}/u);
+
+  runtime.finishIfOpen(runId, "completed");
+  assert.equal(runtime.observeMessageEnd(runId, {
+    role: "assistant", responseId: "after-terminal", usage: { input: 999, output: 1, totalTokens: 1_000 },
+  }), false);
+  assert.equal(runtime.get(runId)!.nativeMessages, maximumPiObservedMessages);
 });
 
 test("PiTeamRuntime preserves known usage as a lower bound after a usage-less cancelled turn", () => {
@@ -268,6 +382,52 @@ test("PiTeamRuntime preserves known usage as a lower bound after a usage-less ca
   assert.match(formatPiLiveStatus(runtime, runId), /≥1,071 tok/u);
   assert.match(formatPiLiveWidget(runtime, runId).join("\n"), /≥1,071 native tokens/u);
   assert.ok(formatPiLiveWidget(runtime, runId).every((line) => visibleTextWidth(line) <= 96));
+});
+
+test("Pi token counters saturate safely and mission totals disclose overflow uncertainty", () => {
+  const runtime = new PiTeamRuntime();
+  const root = runtime.begin({ project: process.cwd(), agent: "lead", kind: "manager", task: "Count safely" });
+  const child = runtime.begin({
+    project: process.cwd(), agent: "worker", kind: "contractor", task: "Count one", parentRunId: root,
+  });
+  runtime.observeMessageEnd(root, {
+    role: "assistant", responseId: "maximum-safe", provider: "p", model: "m",
+    usage: {
+      input: Number.MAX_SAFE_INTEGER,
+      output: 0,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: Number.MAX_SAFE_INTEGER,
+    },
+  });
+  runtime.observeMessageEnd(child, {
+    role: "assistant", responseId: "one-more", provider: "p", model: "m",
+    usage: { input: 1, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1 },
+  });
+  const invalid = runtime.begin({ project: process.cwd(), agent: "invalid", kind: "contractor", task: "Reject huge" });
+  runtime.observeMessageEnd(invalid, {
+    role: "assistant", responseId: "invalid-counts", provider: "p", model: "m",
+    usage: {
+      input: 1e308,
+      output: Number.POSITIVE_INFINITY,
+      reasoning: Number.NaN,
+      cacheRead: 1.5,
+      cacheWrite: -1,
+      totalTokens: 1e308,
+    },
+  });
+
+  assert.equal(runtime.missionUsage(root).input, Number.MAX_SAFE_INTEGER);
+  assert.equal(runtime.missionUsage(root).total, Number.MAX_SAFE_INTEGER);
+  assert.ok(runtime.missionUsageLowerBounds(root).includes("input"));
+  assert.ok(runtime.missionUsageLowerBounds(root).includes("total"));
+  assert.deepEqual(runtime.get(invalid)!.usage, {});
+  assert.deepEqual(new Set(runtime.get(invalid)!.usageLowerBounds),
+    new Set(["input", "output", "reasoning", "cacheRead", "cacheWrite", "total"]));
+  const report = formatPiMissionReport(runtime, root);
+  assert.doesNotMatch(`${JSON.stringify(runtime.get(invalid))}\n${report}`, /Infinity|NaN|∞/u);
+  assert.match(report, /total\s+≥9,007,199,254,740,991/u);
 });
 
 test("Pi observed model metadata cannot inject terminal controls or roster rows", () => {
@@ -311,9 +471,25 @@ test("Pi team view includes fixed, bundled, personal, utility, activity, help, a
   process.env.PI_CODING_AGENT_DIR = home;
   try {
     const roster = new Roster(harnessSpec("pi", home, project));
+    const baseOverview = await formatPiTeamView(project, new PiTeamRuntime());
+    const baseIds = [...rolePlayers.keys(), scoutPlayer.name, ...bundledPlayers.keys()];
+    for (const id of baseIds) {
+      assert.match(baseOverview, new RegExp(`^[●○!] ${id.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}\\b`, "mu"));
+    }
+    assert.equal(baseIds.length, 9);
+    assert.ok(baseOverview.split("\n").length <= 30,
+      `Pi overview exceeded the 30-line viewport budget: ${baseOverview.split("\n").length}`);
+    assert.match(baseOverview, /LEAD ACCESS[\s\S]*ACTIVITY[\s\S]*ROSTER[\s\S]*Details: \/team member:<id>[\s\S]*Commands:/u);
+    assert.doesNotMatch(baseOverview, /Capacity:|Repair:/u,
+      "unfiltered overview expanded rich member details into the initial viewport");
     await roster.join({ name: "privacy-reviewer", description: "Review privacy boundaries", prompt: "Review only", tools: ["read", "search"], model: "router/special" });
     const runtime = new PiTeamRuntime();
     const runId = runtime.begin({ project, agent: "privacy-reviewer", kind: "personal", task: "Review C:\\secret\\input.txt" });
+    const starting = await formatPiTeamView(project, runtime);
+    assert.match(starting, /Team: .*1 active \(1 starting\)/u);
+    assert.match(starting, /privacy-reviewer · personal · starting/u);
+    assert.doesNotMatch(starting, /Team: .*1 working/u);
+    assert.match(formatPiLiveStatus(runtime, runId), /1 active \(1 starting\).*privacy-reviewer starting/u);
     runtime.observer(runId).sessionStarted({ model: { provider: "openai-codex", id: "gpt-test" }, thinking: "low" });
     const view = await formatPiTeamView(project, runtime);
     assert.match(view, /0 model tokens/u);
@@ -323,14 +499,53 @@ test("Pi team view includes fixed, bundled, personal, utility, activity, help, a
     assert.match(view, /portfolio-management · bundled · bench/u);
     assert.match(view, /privacy-reviewer · personal · working/u);
     assert.match(view, /LEAD ACCESS\nLead capacity: 2\/32\nDelegable now: crafter\nBusy \(double-booking blocked\): privacy-reviewer/u);
-    assert.match(view, /SDLC coverage: 0\/6 active · 6 benched/u);
-    assert.match(view, /Activate SDLC: \/bench on portfolio-management design build manage consume dispose/u);
-    assert.match(view, /Task: “Review \[path\]”/u);
+    assert.match(view, /SDLC coverage: 0\/6 enabled · 6 benched/u);
+    assert.match(view, /Enable SDLC: \/bench on portfolio-management design build manage consume dispose/u);
+    const memberDetail = await formatPiTeamView(project, runtime, { filter: "member:privacy-reviewer" });
+    assert.match(memberDetail, /Task: “Review \[path\]”/u);
+    assert.match(memberDetail, /Capacity: read, search · model: configured router\/special/u);
+    const noModelOverview = await formatPiTeamView(project, runtime, { nextModelUnavailable: true });
+    assert.match(noModelOverview,
+      /Next (?:default )?child: unavailable \(Pi reports no usable models; use \/login\)/u);
+    assert.match(noModelOverview, /LEAD ACCESS[\s\S]*Delegable now: none \(model unavailable\)/u);
+    assert.doesNotMatch(noModelOverview, /Delegable now: crafter/u);
+    const noModelFiltered = await formatPiTeamView(project, runtime, {
+      filter: "member:privacy-reviewer",
+      nextModelUnavailable: true,
+    });
+    assert.match(noModelFiltered,
+      /LEAD ACCESS · OVERALL[\s\S]*Delegable now: none \(model unavailable\)/u);
+    assert.doesNotMatch(noModelFiltered, /Delegable now: crafter/u);
+    const selectionOverview = await formatPiTeamView(project, runtime, { nextModelAvailableCount: 2 });
+    assert.match(selectionOverview, /Next (?:default )?child: not selected \(2 available; use \/model\)/u);
+    assert.match(selectionOverview, /Delegable now: none \(select a model with \/model\)/u);
+    assert.doesNotMatch(selectionOverview, /Delegable now: crafter/u);
+    const selectionFiltered = await formatPiTeamView(project, runtime, {
+      filter: "member:privacy-reviewer",
+      nextModelAvailableCount: 2,
+    });
+    assert.match(selectionFiltered, /Next default child: not selected \(2 available; use \/model\)/u);
+    assert.match(selectionFiltered, /Delegable now: none \(select a model with \/model\)/u);
+    const unobservedOverview = await formatPiTeamView(project, runtime, {
+      nextModelAvailabilityUnobserved: true,
+    });
+    assert.match(unobservedOverview,
+      /Next (?:default )?child: no active model; availability unobserved \(use \/model or \/login\)/u);
+    assert.match(unobservedOverview,
+      /Delegable now: none \(model availability unobserved; use \/model or \/login\)/u);
+    const unobservedFiltered = await formatPiTeamView(project, runtime, {
+      filter: "member:privacy-reviewer",
+      nextModelAvailabilityUnobserved: true,
+    });
+    assert.match(unobservedFiltered,
+      /Next default child: no active model; availability unobserved \(use \/model or \/login\)/u);
+    assert.match(unobservedFiltered,
+      /Delegable now: none \(model availability unobserved; use \/model or \/login\)/u);
     assert.doesNotMatch(view, /secret\\input/u);
-    assert.match(view, /Commands: \/team \[filter\]/u);
+    assert.match(view, /Commands: \/team \[filter\][\s\S]*\/<id> <task>[\s\S]*\/contract\s+<json>/u);
     assert.equal((view.match(/ · bundled · bench/gu) ?? []).length, bundledPlayers.size);
     const filtered = await formatPiTeamView(project, runtime, { filter: "construction" });
-    assert.match(filtered, /Overall Team: .*1 working/u);
+    assert.match(filtered, /Overall Team: .*1 active \(1 working\)/u);
     assert.match(filtered, /No active work matches this filter/u);
     assert.doesNotMatch(filtered, /No one is working right now/u);
     const noMatch = await formatPiTeamView(project, runtime, { filter: "nonexistent-capability" });
@@ -339,6 +554,57 @@ test("Pi team view includes fixed, bundled, personal, utility, activity, help, a
     const configuredModel = await formatPiTeamView(project, runtime, { filter: "router/special" });
     assert.match(configuredModel, /privacy-reviewer · personal · working/u);
     assert.match(configuredModel, /configured router\/special/u);
+    const toolFilter = await formatPiTeamView(project, runtime, { filter: "tool:read" });
+    assert.match(toolFilter, /^● crafter · fixed · ready$/mu);
+    assert.match(toolFilter, /^● privacy-reviewer · personal · working$/mu);
+    assert.doesNotMatch(toolFilter, /^● team-lead · manager/mu);
+    const readyFilter = await formatPiTeamView(project, runtime, { filter: "status:ready" });
+    assert.match(readyFilter, /^● crafter · fixed · ready$/mu);
+    assert.doesNotMatch(readyFilter, /^● privacy-reviewer · personal/mu);
+    const workingFilter = await formatPiTeamView(project, runtime, { filter: "status:working" });
+    assert.match(workingFilter, /^● privacy-reviewer · run pi-run-1.* · working ·/mu);
+    assert.match(workingFilter, /^● privacy-reviewer · personal · working$/mu);
+    assert.doesNotMatch(workingFilter, /^● crafter · fixed/mu);
+    const stateFilter = await formatPiTeamView(project, runtime, { filter: "state:working" });
+    assert.match(stateFilter, /^● privacy-reviewer · personal · working$/mu);
+    const benchFilter = await formatPiTeamView(project, runtime, { filter: "status:bench" });
+    assert.match(benchFilter, /^○ portfolio-management · bundled · bench$/mu);
+    const capabilityFilter = await formatPiTeamView(project, runtime, { filter: "capability:recruit" });
+    assert.match(capabilityFilter, /^● talent-scout \(\/scout\) · utility · ready$/mu);
+    const skillFilter = await formatPiTeamView(project, runtime, { filter: "skill:zx-example" });
+    assert.match(skillFilter, /^● crafter · fixed · ready$/mu);
+    const observedModelFilter = await formatPiTeamView(project, runtime, { filter: "model:gpt-test" });
+    assert.match(observedModelFilter, /^● privacy-reviewer · run pi-run-1/mu);
+    const thinkingFilter = await formatPiTeamView(project, runtime, { filter: "thinking:low" });
+    assert.match(thinkingFilter, /^● privacy-reviewer · run pi-run-1/mu);
+    const taskFilter = await formatPiTeamView(project, runtime, { filter: "task:review" });
+    assert.match(taskFilter, /^● privacy-reviewer · run pi-run-1/mu);
+    const runFilter = await formatPiTeamView(project, runtime, { filter: "run:pi-run-1" });
+    assert.match(runFilter, /^● privacy-reviewer · run pi-run-1/mu);
+    for (const memberFilter of ["member:privacy", "id:privacy", "kind:personal"]) {
+      assert.match(await formatPiTeamView(project, runtime, { filter: memberFilter }),
+        /^● privacy-reviewer · personal · working$/mu);
+    }
+    assert.match(await formatPiTeamView(project, runtime, { filter: "role:manager" }),
+      /^● team-lead · manager · ready$/mu);
+    assert.match(await formatPiTeamView(project, runtime, { filter: "description:privacy boundaries" }),
+      /^● privacy-reviewer · personal · working$/mu);
+    assert.match(await formatPiTeamView(project, runtime, { filter: "run:privacy" }),
+      /No team member or tracked activity matches/u,
+      "run filters must not search the agent field");
+    const lowerBoundRuntime = new PiTeamRuntime();
+    const lowerBoundRun = lowerBoundRuntime.begin({
+      project, agent: "privacy-reviewer", kind: "personal", task: "Bound model turns",
+    });
+    for (let index = 0; index <= maximumPiObservedMessages; index += 1) {
+      lowerBoundRuntime.observeMessageEnd(lowerBoundRun, {
+        role: "assistant", responseId: `bounded-view-${index}`, provider: "p", model: "m",
+      });
+    }
+    const lowerBoundView = await formatPiTeamView(project, lowerBoundRuntime, { filter: `run:${lowerBoundRun}` });
+    assert.match(lowerBoundView,
+      new RegExp(`model turns ≥${maximumPiObservedMessages}`, "u"),
+      "live ACTIVITY understated a saturated native message count");
     runtime.observeMessageEnd(runId, {
       role: "assistant", responseId: "review-1", provider: "openai-codex", model: "gpt-test",
       usage: { input: 6, output: 4, reasoning: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 10 },
@@ -356,13 +622,20 @@ test("Pi team view includes fixed, bundled, personal, utility, activity, help, a
       usage: { input: 15, output: 8, reasoning: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 23 },
     });
     runtime.setState(childId, "completed");
+    runtime.setState(runId, "cleaning");
+    const cleaning = await formatPiTeamView(project, runtime);
+    assert.match(cleaning, /Team: .*1 active \(1 cleaning\)/u);
+    assert.match(cleaning, /privacy-reviewer · personal · cleaning/u);
+    assert.doesNotMatch(cleaning, /Team: .*1 working/u);
+    assert.match(formatPiLiveStatus(runtime, runId), /1 active \(1 cleaning\).*privacy-reviewer cleaning/u);
     runtime.setState(runId, "completed");
     const history = await formatPiTeamView(project, runtime);
     assert.equal((history.match(/^LAST MISSION$/gmu) ?? []).length, 1);
     assert.doesNotMatch(history, /^TEAM RUN/gmu, "the history view duplicated the final-report heading");
-    assert.match(history, /● privacy-reviewer · run pi-run-1 · personal · completed[\s\S]*Task: “Review \[path\]”[\s\S]*openai-codex\/gpt-test \(observed\) · thinking setting low[\s\S]*total 10/u);
-    assert.match(history, /└─ build · run pi-run-2 · parent pi-run-1 · bundled · completed[\s\S]*Task: “Implement \[path\] without exposing it”[\s\S]*anthropic\/worker-test \(observed\) · thinking setting high[\s\S]*total 23/u);
-    assert.match(history, /Mission total .*total 33/u);
+    assert.match(history, /privacy-reviewer · pi-run-1 · completed[\s\S]*Mission: 2 tracked runs · total 33 native tokens/u);
+    assert.doesNotMatch(history, /Task: “Review \[path\]”|Task: “Implement \[path\]/u);
+    const rootHistory = await formatPiTeamView(project, runtime, { filter: "run:pi-run-1" });
+    assert.match(rootHistory, /● privacy-reviewer · run pi-run-1 · personal · completed[\s\S]*Task: “Review \[path\]”[\s\S]*openai-codex\/gpt-test \(observed\) · thinking setting low[\s\S]*total 10/u);
     const childHistory = await formatPiTeamView(project, runtime, { filter: "worker-test" });
     assert.match(childHistory, /LAST MISSION · MATCHING MEMBERS/u);
     assert.match(childHistory, /build · run pi-run-2 · parent pi-run-1 · bundled · completed/u);
@@ -372,12 +645,59 @@ test("Pi team view includes fixed, bundled, personal, utility, activity, help, a
     assert.doesNotMatch(unrelatedHistory, /Review \[path\]|worker-test|Mission total/u);
     await roster.bench("on all", bundledPlayers);
     const activated = await formatPiTeamView(project, runtime);
-    assert.match(activated, /SDLC coverage: 6\/6 active · 0 benched/u);
+    assert.match(activated, /SDLC coverage: 6\/6 enabled · 0 benched/u);
     assert.doesNotMatch(activated, /Coverage is limited/u);
     assert.match(activated, /Delegable now: crafter, portfolio-management, design, build, manage, consume, dispose,\s+privacy-reviewer/u);
-    for (const output of [view, filtered, noMatch, configuredModel, history, childHistory, activated]) {
+    for (const output of [
+      baseOverview, starting, view, memberDetail, filtered, noMatch, configuredModel, toolFilter, readyFilter, workingFilter,
+      stateFilter, benchFilter, capabilityFilter, skillFilter, observedModelFilter, thinkingFilter,
+      taskFilter, runFilter, lowerBoundView, cleaning, history, rootHistory, childHistory, activated,
+      noModelOverview, noModelFiltered, selectionOverview, selectionFiltered,
+      unobservedOverview, unobservedFiltered,
+    ]) {
       assert.ok(output.split("\n").every((line) => visibleTextWidth(line) <= 96), "Pi team output exceeded 96 visible columns");
     }
+  } finally {
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
+});
+
+test("Pi team view bounds a large roster and keeps omitted members discoverable by filter", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-large-team-view-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = home;
+  try {
+    const roster = new Roster(harnessSpec("pi", home, project));
+    const personalCount = maximumVisiblePiRosterMembers;
+    for (let index = 0; index < personalCount; index += 1) {
+      const suffix = index.toString().padStart(2, "0");
+      await roster.join({
+        name: `scale-member-${suffix}`,
+        description: `Scale member ${suffix}`,
+        prompt: "Work only in the requested scope.",
+        tools: ["read"],
+      });
+    }
+
+    const view = await formatPiTeamView(project, new PiTeamRuntime());
+    const baseIds = [...rolePlayers.keys(), scoutPlayer.name, ...bundledPlayers.keys()];
+    for (const id of baseIds) assert.match(view, new RegExp(`^[●○!] ${id}\\b`, "mu"));
+    const shownPersonal = (view.match(/^[●○!] scale-member-\d+ · personal · ready$/gmu) ?? []).length;
+    assert.ok(shownPersonal <= maximumVisiblePiOverviewRosterMembers - baseIds.length);
+    assert.match(view, new RegExp(`\\+${personalCount - shownPersonal} personal members omitted`, "u"));
+    assert.match(view, /use \/team kind:personal or \/team member:<id>/u);
+    assert.ok(view.split("\n").length <= maximumPiTeamOverviewLines,
+      `crowded Pi overview exceeded ${maximumPiTeamOverviewLines} wrapped lines`);
+    assert.doesNotMatch(view, /^● scale-member-31 /mu, "an omitted tail member unexpectedly escaped the roster cap");
+
+    const filtered = await formatPiTeamView(project, new PiTeamRuntime(), { filter: "member:scale-member-31" });
+    assert.match(filtered, /scale-member-31 · personal · ready/u);
+    assert.match(filtered, /Capacity: read · model: inherits the Pi host when run/u);
+    assert.doesNotMatch(filtered, /more roster members/u);
+    assert.ok([view, filtered].every((output) => output.split("\n").every((line) => visibleTextWidth(line) <= 96)));
   } finally {
     if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousHome;
@@ -408,10 +728,17 @@ test("Pi team view gives class-specific stale repair commands", async () => {
       .replace(/<!-- agent-foundry:definition [A-Za-z0-9_-]+ -->/u, `<!-- agent-foundry:definition ${invalidDefinition} -->`), "utf8");
 
     const view = await formatPiTeamView(project, new PiTeamRuntime());
-    assert.match(view, /! design · bundled · stale[\s\S]*Repair: \/bench on design; then \/reload\./u);
-    assert.match(view, /! active-stale · personal · stale[\s\S]*Repair: \/bench on active-stale; then \/reload\./u);
-    assert.match(view, /! registration-stale · personal · stale[\s\S]*Repair: re-run \/join with the full[\s\S]*definition and "replace":true; then \/reload\./u);
-    assert.doesNotMatch(view.match(/! design[\s\S]*?(?=\n!|\n●|\n○|$)/u)?.[0] ?? "", /\/join/u);
+    assert.match(view, /! design · bundled · stale/u);
+    assert.match(view, /! active-stale · personal · stale/u);
+    assert.match(view, /! registration-stale · personal · stale/u);
+    assert.doesNotMatch(view, /Repair:/u);
+    const design = await formatPiTeamView(project, new PiTeamRuntime(), { filter: "member:design" });
+    const active = await formatPiTeamView(project, new PiTeamRuntime(), { filter: "member:active-stale" });
+    const registration = await formatPiTeamView(project, new PiTeamRuntime(), { filter: "member:registration-stale" });
+    assert.match(design, /! design · bundled · stale[\s\S]*Repair: \/bench on design; then \/reload\./u);
+    assert.match(active, /! active-stale · personal · stale[\s\S]*Repair: \/bench on active-stale; then \/reload\./u);
+    assert.match(registration, /! registration-stale · personal · stale[\s\S]*Repair: re-run \/join with the full[\s\S]*definition and "replace":true; then \/reload\./u);
+    assert.doesNotMatch(design.match(/! design[\s\S]*?(?=\n\nCommands:|$)/u)?.[0] ?? "", /\/join/u);
   } finally {
     if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousHome;
@@ -471,6 +798,53 @@ test("Pi orchestrator reports effective model, native message_end usage, cleanup
   );
   await assert.rejects(() => cleanupOrchestrator.run(definition as any), /dispose failed/u);
   assert.equal(cleanupRuntime.get(cleanupRun)!.state, "cleanup-error");
+});
+
+test("Pi cancellation escapes an abort-ignoring prompt and bounds a hung native abort cleanup", async () => {
+  const events: string[] = [];
+  const runtime = new PiTeamRuntime();
+  const runId = runtime.begin({ project: process.cwd(), agent: "worker", kind: "contractor", task: "Hang" });
+  let promptStarted!: () => void;
+  const started = new Promise<void>((resolve) => { promptStarted = resolve; });
+  const session = {
+    messages: [],
+    subscribe: () => () => events.push("unsubscribe"),
+    prompt: () => {
+      promptStarted();
+      return new Promise<void>(() => {});
+    },
+    abort: () => {
+      events.push("abort");
+      return new Promise<void>(() => {});
+    },
+    dispose: () => { events.push("dispose"); },
+  };
+  const sdk = {
+    DefaultResourceLoader: class {
+      private readonly options: any;
+      constructor(options: any) { this.options = options; }
+      async reload() { this.options.skillsOverride({ skills: [], diagnostics: [] }); }
+      getSkills() { return { skills: [], diagnostics: [] }; }
+    },
+    getAgentDir: () => "pi-agent-home",
+    SessionManager: { inMemory: () => ({}) },
+    createAgentSession: async () => ({ session }),
+  };
+  const controller = new AbortController();
+  const orchestrator = new PiOrchestrator(
+    process.cwd(), async () => sdk as any, [], undefined, [], undefined, {}, runtime.observer(runId),
+  );
+  const invocation = orchestrator.run(definition as any, controller.signal);
+  await started;
+  const cancelledAt = performance.now();
+  controller.abort(new DOMException("Stopped by test", "AbortError"));
+  let failure: unknown;
+  try { await invocation; } catch (error) { failure = error; }
+  assert.ok(failure instanceof AggregateError);
+  assert.match(failure.errors.map((error) => String(error)).join("\n"), /Pi child abort timed out/u);
+  assert.ok(performance.now() - cancelledAt < 2_000, "hung native abort cleanup was not bounded");
+  assert.deepEqual(events, ["abort", "unsubscribe", "dispose"]);
+  assert.equal(runtime.get(runId)!.state, "cleanup-error");
 });
 
 test("Pi transcript fallback recovers native usage/model once when message_end is absent", async () => {

@@ -18,15 +18,32 @@ export declare function validatePlayer(value: unknown, allowReserved?: boolean):
  */
 export declare class Roster {
     private readonly spec;
+    private activeTransaction?;
+    private boundDirectories?;
+    private bindingDirectories?;
+    private lifecycleRuntime?;
     /** Binds lifecycle operations to one harness's home, project, layout, and renderer. */
     constructor(spec: HarnessSpec);
+    /** Testable host boundary: packaged CLIs may not expose Node through process.execPath. */
+    protected lifecycleHostExecutable(): string;
+    /** Testable environment boundary; executable selection never asks a shell to resolve it. */
+    protected lifecycleHostEnvironment(): NodeJS.ProcessEnv;
+    private nodeRuntime;
     private rootFor;
+    private directoryKey;
+    private bindDirectory;
+    private bindTarget;
+    private existingBound;
+    private closeBoundDirectories;
     private withMutationLock;
-    /** Applies one transaction step; protected to support failure injection without weakening checks. */
+    /** Stages one identity-bound transaction step; protected for deterministic failure/race injection. */
     protected applyChange(change: {
         path: string;
         content?: string;
     }, _index: number): Promise<void>;
+    private verifyStagedChange;
+    private finalizeStagedChange;
+    private rollbackStagedChange;
     private transaction;
     private paths;
     /**

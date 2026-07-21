@@ -19,6 +19,7 @@
     "dist/",
     "plugins/",
     "scripts/asciinema-demo.mjs",
+    "scripts/asciinema-copilot-tui.py",
     "scripts/asciinema-replay.mjs"
   ],
   "engines": {
@@ -58,7 +59,7 @@
   },
   "dependencies": {
     "@github/copilot-sdk": "1.0.6",
-    "@opencode-ai/plugin": "1.17.13"
+    "@opencode-ai/plugin": "1.18.3"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "0.80.10"

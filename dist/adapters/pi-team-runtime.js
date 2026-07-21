@@ -1,47 +1,57 @@
 /** In-memory, zero-model observability for Agent Harbor runs hosted by Pi. */
 import { createHmac, randomBytes } from "node:crypto";
 import { basename, resolve } from "node:path";
+import { publicMetadataText, publicTaskLabel } from "../core/public-metadata.js";
 import { wrapPlainLine, wrapPlainLines } from "../core/text-layout.js";
 const usageKeys = ["input", "output", "reasoning", "cacheRead", "cacheWrite", "total"];
 const activeStates = new Set(["starting", "working", "cleaning"]);
 const terminalStates = new Set(["completed", "failed", "cancelled", "cleanup-error"]);
+export const maximumPiObservedMessages = 4_096;
+const maximumFingerprintDepth = 32;
+const maximumFingerprintNodes = 256;
+const maximumFingerprintEntries = 32;
+const maximumFingerprintStringCodeUnits = 4_096;
 export function piPublicIdentifier(value, limit = 80) {
-    if (typeof value !== "string")
-        return undefined;
-    const normalized = value
-        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, " ")
-        .replace(/[\p{Cc}\p{Cf}\s]+/gu, " ")
-        .trim();
-    return normalized ? [...normalized].slice(0, limit).join("") : undefined;
+    return typeof value === "string" ? publicMetadataText(value, limit) : undefined;
 }
 /** Produces a useful but deliberately lossy task label without retaining prompts, paths, or likely secrets. */
 export function piTaskLabel(task) {
-    const normalized = task
-        .replace(/https?:\/\/\S+/giu, "[url]")
-        .replace(/\\\\[^\\\s"'`]+(?:\\[^\\\s"'`]+)+/gu, "[path]")
-        .replace(/\b[A-Za-z]:\\(?:[^\s"']+\\)*[^\s"']*/gu, "[path]")
-        .replace(/(^|[\s"'`(])\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+(?=$|[\s"'`,.;:!?)}\]])/gu, "$1[path]")
-        .replace(/(^|[\s"'`(])\.{1,2}[\\/](?:[^\s"'`\\/()]+[\\/])*[^\s"'`()]+/gu, "$1[path]")
-        .replace(/(^|[\s"'`(])(?:[A-Za-z0-9_.-]+[\\/])+(?:[A-Za-z0-9_.-]*\.[A-Za-z0-9_.-]+)(?=$|[\s"'`,.;:!?)}\]])/gu, "$1[path]")
-        .replace(/\b(?:authorization\s*:\s*)?bearer\s+[A-Za-z0-9._~+/=-]{12,}/giu, "[redacted]")
-        .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, "[redacted]")
-        .replace(/\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu, "$1=[redacted]")
-        .replace(/\b(?:sk|pk|api|token|secret|key)[-_][A-Za-z0-9_-]{12,}\b/giu, "[redacted]")
-        .replace(/[\p{Cc}\p{Cf}\s]+/gu, " ")
-        .trim();
-    if (!normalized)
-        return "(task not disclosed)";
-    const points = [...normalized];
-    return points.length <= 72 ? normalized : `${points.slice(0, 69).join("")}…`;
+    return publicTaskLabel(task);
 }
-function nativeNumber(value) {
+function nativeFiniteNumber(value) {
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
-function updatePrivateFingerprint(fingerprint, value, seen) {
+function nativeInteger(value) {
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+function addSafeInteger(left, right) {
+    if (left > Number.MAX_SAFE_INTEGER - right) {
+        return { value: Number.MAX_SAFE_INTEGER, overflow: true };
+    }
+    return { value: left + right, overflow: false };
+}
+function sumSafeIntegers(values) {
+    if (!values.length)
+        return { value: undefined, overflow: false };
+    let value = 0;
+    let overflow = false;
+    for (const amount of values) {
+        const next = addSafeInteger(value, amount);
+        value = next.value;
+        overflow ||= next.overflow;
+    }
+    return { value, overflow };
+}
+function updatePrivateFingerprint(state, value, depth = 0) {
     const update = (tag, body = "") => {
-        fingerprint.update(`${tag}:${Buffer.byteLength(body, "utf8")}:`);
-        fingerprint.update(body, "utf8");
-        fingerprint.update(";");
+        const bounded = body.length > maximumFingerprintStringCodeUnits
+            ? body.slice(0, maximumFingerprintStringCodeUnits)
+            : body;
+        if (bounded.length !== body.length)
+            state.truncated = true;
+        state.fingerprint.update(`${tag}:${Buffer.byteLength(bounded, "utf8")}:`);
+        state.fingerprint.update(bounded, "utf8");
+        state.fingerprint.update(";");
     };
     if (value === null)
         return update("null");
@@ -60,24 +70,70 @@ function updatePrivateFingerprint(fingerprint, value, seen) {
         return update("symbol");
     if (typeof value === "function")
         return update("function");
-    const priorReference = seen.get(value);
+    if (depth > maximumFingerprintDepth || state.nodes >= maximumFingerprintNodes) {
+        state.truncated = true;
+        return update("bounded");
+    }
+    state.nodes += 1;
+    const priorReference = state.seen.get(value);
     if (priorReference !== undefined)
         return update("reference", String(priorReference));
-    seen.set(value, seen.size);
+    state.seen.set(value, state.seen.size);
     if (Array.isArray(value)) {
         update("array-start", String(value.length));
-        for (let index = 0; index < value.length; index += 1) {
-            update(Object.hasOwn(value, index) ? "item" : "hole", String(index));
-            if (Object.hasOwn(value, index))
-                updatePrivateFingerprint(fingerprint, value[index], seen);
+        const length = Math.min(value.length, maximumFingerprintEntries);
+        if (value.length > length)
+            state.truncated = true;
+        for (let index = 0; index < length; index += 1) {
+            let present = false;
+            try {
+                present = Object.hasOwn(value, index);
+            }
+            catch {
+                state.truncated = true;
+                update("unreadable-item", String(index));
+                continue;
+            }
+            update(present ? "item" : "hole", String(index));
+            if (present) {
+                try {
+                    updatePrivateFingerprint(state, value[index], depth + 1);
+                }
+                catch {
+                    state.truncated = true;
+                    update("unreadable-value", String(index));
+                }
+            }
         }
         return update("array-end");
     }
-    const keys = Object.keys(value).sort();
+    const keys = [];
+    try {
+        for (const key in value) {
+            if (!Object.hasOwn(value, key))
+                continue;
+            if (keys.length === maximumFingerprintEntries) {
+                state.truncated = true;
+                break;
+            }
+            keys.push(key);
+        }
+    }
+    catch {
+        state.truncated = true;
+        return update("unreadable-object");
+    }
+    keys.sort();
     update("object-start", String(keys.length));
     for (const key of keys) {
         update("key", key);
-        updatePrivateFingerprint(fingerprint, value[key], seen);
+        try {
+            updatePrivateFingerprint(state, value[key], depth + 1);
+        }
+        catch {
+            state.truncated = true;
+            update("unreadable-value", key);
+        }
     }
     update("object-end");
 }
@@ -88,35 +144,40 @@ function updatePrivateFingerprint(fingerprint, value, seen) {
  */
 function privateFingerprint(value, key) {
     const fingerprint = createHmac("sha256", key);
-    updatePrivateFingerprint(fingerprint, value, new Map());
-    return fingerprint.digest("base64url");
+    const state = { fingerprint, seen: new Map(), nodes: 0, truncated: false };
+    updatePrivateFingerprint(state, value);
+    return { digest: fingerprint.digest("base64url"), truncated: state.truncated };
 }
 function messageKey(message, fingerprintKey) {
-    const responseId = typeof message.responseId === "string" && message.responseId.trim()
+    const responseId = typeof message.responseId === "string"
+        && /\S/u.test(message.responseId.slice(0, maximumFingerprintStringCodeUnits + 1))
         ? message.responseId
         : undefined;
-    if (responseId)
-        return `response:${privateFingerprint(responseId, fingerprintKey)}`;
-    const timestamp = nativeNumber(message.timestamp);
+    if (responseId) {
+        const identity = privateFingerprint(responseId, fingerprintKey);
+        return { key: `response:${identity.digest}`, truncated: identity.truncated };
+    }
+    const timestamp = nativeFiniteNumber(message.timestamp);
     const usage = message.usage && typeof message.usage === "object" ? message.usage : {};
     const hasContent = Object.hasOwn(message, "content");
     if (timestamp === undefined && !hasContent && !Object.keys(usage).length)
         return undefined;
-    return `message:${privateFingerprint({
+    const identity = privateFingerprint({
         timestamp,
         provider: message.provider,
         model: message.responseModel ?? message.model,
         stopReason: message.stopReason,
         content: message.content,
         usage: {
-            input: nativeNumber(usage.input),
-            output: nativeNumber(usage.output),
-            cacheRead: nativeNumber(usage.cacheRead),
-            cacheWrite: nativeNumber(usage.cacheWrite),
-            reasoning: nativeNumber(usage.reasoning),
-            totalTokens: nativeNumber(usage.totalTokens),
+            input: nativeInteger(usage.input),
+            output: nativeInteger(usage.output),
+            cacheRead: nativeInteger(usage.cacheRead),
+            cacheWrite: nativeInteger(usage.cacheWrite),
+            reasoning: nativeInteger(usage.reasoning),
+            totalTokens: nativeInteger(usage.totalTokens),
         },
-    }, fingerprintKey)}`;
+    }, fingerprintKey);
+    return { key: `message:${identity.digest}`, truncated: identity.truncated };
 }
 function modelFrom(value) {
     if (!value || typeof value !== "object")
@@ -153,6 +214,8 @@ export class PiTeamRuntime {
         const parent = input.parentRunId === undefined ? undefined : this.runs.get(input.parentRunId);
         if (input.parentRunId !== undefined && !parent)
             throw new Error("unknown parent team run");
+        if (parent && parent.project !== projectKey(input.project))
+            throw new Error("child team run must use its parent's project");
         const sequence = ++this.sequence;
         const id = `pi-run-${sequence}`;
         const initialModel = modelFrom(input.model);
@@ -168,13 +231,14 @@ export class PiTeamRuntime {
             state: "starting",
             startedAt: this.now(),
             ...(initialModel ? { model: initialModel } : {}),
-            ...(initialModel ? { modelSource: "inherited" } : {}),
+            ...(initialModel ? { modelSource: input.modelSource ?? "inherited" } : {}),
             observedModels: new Map(),
             observedModelsTruncated: false,
             ...(input.thinking === undefined ? {} : { thinking: input.thinking }),
             usage: {},
             usageLowerBounds: new Set(),
             nativeMessages: 0,
+            nativeMessagesLowerBound: false,
             seenMessageObjects: new WeakSet(),
             seenMessageKeys: new Set(),
         };
@@ -190,7 +254,8 @@ export class PiTeamRuntime {
                 const model = modelFrom(info?.model);
                 if (model) {
                     run.model = model;
-                    run.modelSource = "inherited";
+                    if (run.modelSource !== "configured")
+                        run.modelSource = "inherited";
                 }
                 if (info?.thinking !== undefined)
                     run.thinking = info.thinking;
@@ -209,6 +274,10 @@ export class PiTeamRuntime {
         run.state = state;
         if (terminalStates.has(state))
             run.endedAt = this.now();
+        if (terminalStates.has(state)) {
+            run.seenMessageKeys.clear();
+            run.seenMessageObjects = new WeakSet();
+        }
         this.emit(runId);
         if (terminalStates.has(state))
             this.prune();
@@ -220,6 +289,8 @@ export class PiTeamRuntime {
     }
     observeMessageEnd(runId, value) {
         const run = this.require(runId);
+        if (terminalStates.has(run.state))
+            return false;
         if (!value || typeof value !== "object")
             return false;
         const message = value;
@@ -227,12 +298,24 @@ export class PiTeamRuntime {
             return false;
         if (run.seenMessageObjects.has(message))
             return false;
-        const key = messageKey(message, this.messageFingerprintKey);
-        if (key && run.seenMessageKeys.has(key))
+        if (run.nativeMessages >= maximumPiObservedMessages) {
+            run.nativeMessagesLowerBound = true;
+            for (const field of usageKeys)
+                run.usageLowerBounds.add(field);
+            this.emit(runId);
+            return false;
+        }
+        const identity = messageKey(message, this.messageFingerprintKey);
+        if (identity?.truncated) {
+            run.nativeMessagesLowerBound = true;
+            for (const field of usageKeys)
+                run.usageLowerBounds.add(field);
+        }
+        if (identity && run.seenMessageKeys.has(identity.key))
             return false;
         run.seenMessageObjects.add(message);
-        if (key)
-            run.seenMessageKeys.add(key);
+        if (identity)
+            run.seenMessageKeys.add(identity.key);
         const actualModel = modelFrom(message);
         if (actualModel) {
             run.model = actualModel;
@@ -245,32 +328,28 @@ export class PiTeamRuntime {
                     run.observedModelsTruncated = true;
             }
         }
-        const usage = message.usage && typeof message.usage === "object" ? message.usage : {};
+        const usage = message.usage && typeof message.usage === "object"
+            ? message.usage
+            : undefined;
         const incoming = {
-            input: nativeNumber(usage.input),
-            output: nativeNumber(usage.output),
-            reasoning: nativeNumber(usage.reasoning),
-            cacheRead: nativeNumber(usage.cacheRead),
-            cacheWrite: nativeNumber(usage.cacheWrite),
-            total: nativeNumber(usage.totalTokens),
+            input: nativeInteger(usage?.input),
+            output: nativeInteger(usage?.output),
+            reasoning: nativeInteger(usage?.reasoning),
+            cacheRead: nativeInteger(usage?.cacheRead),
+            cacheWrite: nativeInteger(usage?.cacheWrite),
+            total: nativeInteger(usage?.totalTokens),
         };
         const componentFields = ["input", "output", "cacheRead", "cacheWrite"];
         const componentValues = componentFields.map((field) => incoming[field]);
         const anyPositiveComponent = componentValues.some((value) => value !== undefined && value > 0);
         const everyComponentZero = componentValues.every((value) => value === 0);
-        // Pi initializes absent provider usage to an all-zero object. A real model
-        // turn cannot consume zero input/cache and zero output simultaneously.
-        if (incoming.total === 0 && everyComponentZero) {
-            for (const field of [...componentFields, "reasoning", "total"])
+        // Presence is authoritative: an explicit all-zero native usage object is
+        // distinct from an omitted object. Contradictory totals remain unknown.
+        if (incoming.total === 0 && anyPositiveComponent)
+            incoming.total = undefined;
+        if (incoming.total !== undefined && incoming.total > 0 && everyComponentZero) {
+            for (const field of componentFields)
                 incoming[field] = undefined;
-        }
-        else {
-            if (incoming.total === 0 && anyPositiveComponent)
-                incoming.total = undefined;
-            if (incoming.total !== undefined && incoming.total > 0 && everyComponentZero) {
-                for (const field of componentFields)
-                    incoming[field] = undefined;
-            }
         }
         for (const field of usageKeys) {
             const amount = incoming[field];
@@ -278,7 +357,10 @@ export class PiTeamRuntime {
                 run.usageLowerBounds.add(field);
             }
             else {
-                run.usage[field] = (run.usage[field] ?? 0) + amount;
+                const next = addSafeInteger(run.usage[field] ?? 0, amount);
+                run.usage[field] = next.value;
+                if (next.overflow)
+                    run.usageLowerBounds.add(field);
             }
         }
         run.nativeMessages += 1;
@@ -316,13 +398,19 @@ export class PiTeamRuntime {
         const runs = this.mission(rootRunId);
         return Object.fromEntries(usageKeys.flatMap((field) => {
             const known = runs.flatMap((run) => run.usage[field] === undefined ? [] : [run.usage[field]]);
-            return known.length ? [[field, known.reduce((sum, value) => sum + value, 0)]] : [];
+            const aggregate = sumSafeIntegers(known);
+            return aggregate.value === undefined ? [] : [[field, aggregate.value]];
         }));
     }
     missionUsageLowerBounds(rootRunId) {
         const runs = this.mission(rootRunId);
         const usage = this.missionUsage(rootRunId);
-        return usageKeys.filter((field) => usage[field] !== undefined && runs.some((run) => run.usage[field] === undefined || run.usageLowerBounds.includes(field)));
+        return usageKeys.filter((field) => {
+            if (usage[field] === undefined)
+                return false;
+            const known = runs.flatMap((run) => run.usage[field] === undefined ? [] : [run.usage[field]]);
+            return sumSafeIntegers(known).overflow || runs.some((run) => run.usage[field] === undefined || run.usageLowerBounds.includes(field));
+        });
     }
     projectName(project) {
         return basename(resolve(project)) || "project";
@@ -349,6 +437,7 @@ export class PiTeamRuntime {
             usage: cloneUsage(run),
             usageLowerBounds: [...run.usageLowerBounds],
             nativeMessages: run.nativeMessages,
+            nativeMessagesLowerBound: run.nativeMessagesLowerBound,
         };
     }
     require(runId) {
@@ -371,7 +460,28 @@ export class PiTeamRuntime {
         const roots = [...this.runs.values()].filter((run) => run.parentRunId === undefined && terminalStates.has(run.state) &&
             [...this.runs.values()].every((candidate) => candidate.rootRunId !== run.id || terminalStates.has(candidate.state)))
             .sort((left, right) => right.sequence - left.sequence);
-        for (const root of roots.slice(this.maxRootRuns)) {
+        // Retention stays globally bounded, but one noisy project cannot consume
+        // every slot while another tracked project loses its only last mission.
+        // When the number of projects itself exceeds the cap, the newest projects
+        // win (an explicit project-level LRU), then remaining slots go to the
+        // newest additional missions regardless of project.
+        const keep = new Set();
+        const newestByProject = new Map();
+        for (const root of roots)
+            if (!newestByProject.has(root.project))
+                newestByProject.set(root.project, root);
+        for (const root of [...newestByProject.values()]
+            .sort((left, right) => right.sequence - left.sequence)
+            .slice(0, this.maxRootRuns))
+            keep.add(root.id);
+        for (const root of roots) {
+            if (keep.size >= this.maxRootRuns)
+                break;
+            keep.add(root.id);
+        }
+        for (const root of roots) {
+            if (keep.has(root.id))
+                continue;
             for (const run of this.runs.values())
                 if (run.rootRunId === root.id)
                     this.runs.delete(run.id);
@@ -437,7 +547,7 @@ export function formatPiRunDetails(runs) {
         const detail = run.parentRunId ? "     " : "  ";
         lines.push(`${branch} ${run.agent} · run ${run.id}${run.parentRunId ? ` · parent ${run.parentRunId}` : ""} · ${run.kind} · ${run.state} · ${formatElapsed(run.elapsedMs)}`);
         lines.push(`${detail}Task: “${run.task}”`);
-        lines.push(`${detail}${formatModel(run)} · thinking setting ${run.thinking ?? "unknown"} · model turns ${run.nativeMessages} · ${formatUsage(run.usage, run.usageLowerBounds)}`);
+        lines.push(`${detail}${formatModel(run)} · thinking setting ${run.thinking ?? "unknown"} · model turns ${run.nativeMessagesLowerBound ? "≥" : ""}${run.nativeMessages} · ${formatUsage(run.usage, run.usageLowerBounds)}`);
     }
     return wrapPlainLines(lines);
 }
@@ -463,12 +573,18 @@ export function formatPiLiveStatus(runtime, rootRunId) {
     const totalLabel = formatTokenCount(usage.total, runtime.missionUsageLowerBounds(rootRunId).includes("total"));
     if (!focus)
         return "Agent Harbor · no active run";
-    return wrapPlainLine(`Agent Harbor · ${active.length} working · ${focus.agent} ${focus.state} · ${totalLabel} tok · ${formatElapsed(focus.elapsedMs)}`).join("\n");
+    const counts = new Map();
+    for (const run of active)
+        counts.set(run.state, (counts.get(run.state) ?? 0) + 1);
+    const breakdown = ["working", "starting", "cleaning"]
+        .flatMap((state) => counts.has(state) ? [`${counts.get(state)} ${state}`] : [])
+        .join(" · ");
+    return wrapPlainLine(`Agent Harbor · ${active.length} active${breakdown ? ` (${breakdown})` : ""} · ${focus.agent} ${focus.state} · ${totalLabel} tok · ${formatElapsed(focus.elapsedMs)}`).join("\n");
 }
 export function formatPiLiveWidget(runtime, rootRunId) {
     const runs = runtime.mission(rootRunId);
     return wrapPlainLines([...runs.slice(-8).flatMap((run) => [
             `${run.parentRunId ? "  └─" : "●"} ${run.agent} · run ${run.id} · ${run.state} · ${formatModel(run)} · thinking setting ${run.thinking ?? "unknown"} · ${formatElapsed(run.elapsedMs)}`,
-            `${run.parentRunId ? "     " : "  "}Task: “${run.task}” · model turns ${run.nativeMessages} · ${formatTokenCount(run.usage.total, run.usageLowerBounds.includes("total"))} native tokens`,
+            `${run.parentRunId ? "     " : "  "}Task: “${run.task}” · model turns ${run.nativeMessagesLowerBound ? "≥" : ""}${run.nativeMessages} · ${formatTokenCount(run.usage.total, run.usageLowerBounds.includes("total"))} native tokens`,
         ]), "Alt+H: stop active Agent Harbor work"]);
 }

@@ -5,7 +5,8 @@
  */
 
 import { Buffer } from "node:buffer";
-import { mkdtemp, lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { constants, type BigIntStats } from "node:fs";
+import { mkdtemp, lstat, mkdir, open, realpath, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import type {
@@ -20,6 +21,7 @@ import { isTrustedGithubSkill, loadTrustedGithubSkill, parseSkillBody, validateG
 import { isHarborId } from "./identity.js";
 
 const segmentPattern = /^[A-Za-z0-9._-]+$/;
+const maximumSkillDocumentBytes = 18_000;
 const maximumCombinedBodyBytes = 30_000;
 
 /** Validated skill guidance loaded from its configured source. */
@@ -115,14 +117,46 @@ function contained(root: string, target: string): string {
   return child;
 }
 
-// Lexical containment, component-by-component symlink rejection, and final realpath containment are
-// all required: no project-local skill may redirect the loader outside the supplied project root.
-async function readRepositorySkill(skill: RepositorySkill, project: string): Promise<LoadedConfiguredSkill> {
+function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameFileVersion(left: BigIntStats, right: BigIntStats): boolean {
+  return sameFileIdentity(left, right) && left.size === right.size &&
+    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+async function verifyOpenedRepositoryFile(
+  target: string,
+  physicalRoot: string,
+  opened: BigIntStats,
+  skillPath: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
+  const current = await lstat(target, { bigint: true });
+  if (current.isSymbolicLink()) throw new Error(`repository skill symlink traversal refused: ${skillPath}`);
+  if (!current.isFile() || !sameFileIdentity(current, opened)) {
+    throw new Error(`repository skill changed while being opened: ${skillPath}`);
+  }
+  contained(physicalRoot, await realpath(target));
+  signal?.throwIfAborted();
+}
+
+// The path is checked component-by-component, then opened once. All bytes come from that one handle;
+// handle/path identity and physical containment are verified both before and after the bounded read.
+async function readRepositorySkill(
+  skill: RepositorySkill,
+  project: string,
+  signal?: AbortSignal,
+): Promise<LoadedConfiguredSkill> {
+  signal?.throwIfAborted();
   const root = resolve(project);
   const target = contained(root, join(root, ...skill.path.split("/")));
   const rel = relative(root, target);
   let cursor = root;
   for (const segment of ["", ...rel.split(/[\\/]+/)]) {
+    signal?.throwIfAborted();
     if (segment) cursor = join(cursor, segment);
     let stat;
     try { stat = await lstat(cursor); }
@@ -132,12 +166,53 @@ async function readRepositorySkill(skill: RepositorySkill, project: string): Pro
     }
     if (stat.isSymbolicLink()) throw new Error(`repository skill symlink traversal refused: ${skill.path}`);
   }
-  const stat = await lstat(target);
-  if (!stat.isFile()) throw new Error(`repository skill is not a file: ${skill.path}`);
   const physicalRoot = await realpath(root);
-  const physicalTarget = await realpath(target);
-  contained(physicalRoot, physicalTarget);
-  return { reference: skill, body: parseSkillBody(await readFile(target), skill.name, "repository") };
+  signal?.throwIfAborted();
+  const noFollow = constants.O_NOFOLLOW ?? 0;
+  let handle;
+  try {
+    handle = await open(target, constants.O_RDONLY | noFollow);
+  } catch (error: any) {
+    if (["ELOOP", "EMLINK"].includes(error?.code)) {
+      throw new Error(`repository skill symlink traversal refused: ${skill.path}`);
+    }
+    throw error;
+  }
+  try {
+    signal?.throwIfAborted();
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) throw new Error(`repository skill is not a file: ${skill.path}`);
+    if (before.size > BigInt(maximumSkillDocumentBytes)) {
+      throw new Error(`repository skill body must be 1..${maximumSkillDocumentBytes} UTF-8 bytes: ${skill.path}`);
+    }
+    await verifyOpenedRepositoryFile(target, physicalRoot, before, skill.path, signal);
+
+    // Read at most one byte past the accepted boundary. This remains bounded if
+    // another process grows the already-open file after the pre-read fstat.
+    const buffer = Buffer.allocUnsafe(maximumSkillDocumentBytes + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      signal?.throwIfAborted();
+      const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+      if (result.bytesRead === 0) break;
+      bytesRead += result.bytesRead;
+    }
+    signal?.throwIfAborted();
+    if (bytesRead > maximumSkillDocumentBytes) {
+      throw new Error(`repository skill body must be 1..${maximumSkillDocumentBytes} UTF-8 bytes: ${skill.path}`);
+    }
+    const after = await handle.stat({ bigint: true });
+    if (!sameFileVersion(before, after)) {
+      throw new Error(`repository skill changed while being read: ${skill.path}`);
+    }
+    await verifyOpenedRepositoryFile(target, physicalRoot, after, skill.path, signal);
+    return {
+      reference: skill,
+      body: parseSkillBody(buffer.subarray(0, bytesRead), skill.name, "repository"),
+    };
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
@@ -161,15 +236,24 @@ export async function loadConfiguredSkills(
     names.add(reference.name);
     return reference;
   });
-  const loaded = await Promise.all(references.map(async (reference): Promise<LoadedConfiguredSkill> => {
+  const loaded: LoadedConfiguredSkill[] = [];
+  let combinedBodyBytes = 0;
+  for (const reference of references) {
     signal?.throwIfAborted();
-    if (reference.kind === "repo") return readRepositorySkill(reference, project);
-    const result = await loadTrustedGithubSkill(reference, trusted, github, signal);
-    return { reference: result.skill, body: result.body, commit: result.commit };
-  }));
-  signal?.throwIfAborted();
-  const total = loaded.reduce((sum, skill) => sum + Buffer.byteLength(skill.body, "utf8"), 0);
-  if (total > maximumCombinedBodyBytes) throw new Error(`configured skill guidance exceeds ${maximumCombinedBodyBytes} UTF-8 bytes`);
+    const skill = reference.kind === "repo"
+      ? await readRepositorySkill(reference, project, signal)
+      : await loadTrustedGithubSkill(reference, trusted, github, signal).then((result) => ({
+          reference: result.skill,
+          body: result.body,
+          commit: result.commit,
+        }));
+    signal?.throwIfAborted();
+    combinedBodyBytes += Buffer.byteLength(skill.body, "utf8");
+    if (combinedBodyBytes > maximumCombinedBodyBytes) {
+      throw new Error(`configured skill guidance exceeds ${maximumCombinedBodyBytes} UTF-8 bytes`);
+    }
+    loaded.push(skill);
+  }
   return loaded;
 }
 

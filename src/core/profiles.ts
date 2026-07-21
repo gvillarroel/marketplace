@@ -1,13 +1,14 @@
 /**
  * Canonical profile rendering, decoding, and runtime-specific least-privilege policies.
- * Revision-4 profiles carry a self-contained definition so active files can be validated without
- * trusting mutable registration state.
+ * Revision-5 profiles carry a self-contained definition so active files can be validated without
+ * trusting mutable registration state. Exact revision-4 profiles remain recognizable only as
+ * legacy owned state that must be repaired before invocation.
  */
 
 import { Buffer } from "node:buffer";
-import { lstatSync, readFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
+import { resolve } from "node:path";
+import { harborPlayerSkillToolName } from "./custom-tools.js";
 import { harnessProfileLayout } from "./harnesses.js";
 import type { ContractDefinition, HarnessName, HarnessSpec, HarborTool, PlayerDefinition } from "./types.js";
 
@@ -16,7 +17,7 @@ const toolMap: Record<HarnessName, Record<HarborTool, string[]>> = {
   opencode: { read: ["read"], search: ["grep", "glob"], edit: ["apply_patch"], execute: ["bash"] },
   pi: { read: ["read"], search: ["grep", "find", "ls"], edit: ["edit", "write"], execute: ["bash"] },
 };
-const openCodeToolNames = ["*", "invalid", "question", "bash", "read", "glob", "grep", "task", "webfetch", "websearch", "todowrite", "todoread", "skill", "apply_patch", "edit", "write", "list", "harbor", "harbor_contract", "harbor_delegate", "harbor_filter_skills", "harbor_join_player", "agent_harbor_skills"];
+const openCodeToolNames = ["*", "invalid", "question", "bash", "read", "glob", "grep", "task", "webfetch", "websearch", "todowrite", "todoread", "skill", "apply_patch", "edit", "write", "list", "harbor", "harbor_contract", "harbor_delegate", "harbor_team_roster", "harbor_filter_skills", "harbor_join_player", "agent_harbor_skills"];
 type OpenCodePermissionAction = "allow" | "deny";
 type OpenCodePermissionValue = OpenCodePermissionAction | Record<string, OpenCodePermissionAction>;
 
@@ -92,14 +93,6 @@ export function openCodePermissionPolicy(
   };
 }
 
-function copilotSkillServerName(player: Pick<PlayerDefinition, "name">): string {
-  return `agent-harbor-skills-${player.name}`;
-}
-
-function copilotSkillTool(player: Pick<PlayerDefinition, "name">): string {
-  return `${copilotSkillServerName(player)}/skills`;
-}
-
 function configuredSkillInstructions(player: PlayerDefinition, harness?: HarnessName): string[] {
   if (!player.skills?.length) return [];
   const names = player.skills.map((skill) => skill.name);
@@ -114,7 +107,7 @@ function configuredSkillInstructions(player: PlayerDefinition, harness?: Harness
     "Before domain work, call `agent_harbor_skills` exactly once with no arguments. Require one `HARBOR-SKILL` section for every configured name and no others; if loading fails, change nothing and report `configured-skill-bootstrap: blocked`.",
   ];
   if (harness === "copilot") return [...common,
-    `Before domain work, call the \`skills\` tool from the player-scoped \`${copilotSkillServerName(player)}\` MCP server exactly once with no arguments. Require one \`HARBOR-SKILL\` section for every configured name and no others; if loading fails, change nothing and report \`configured-skill-bootstrap: blocked\`.`,
+    `Before domain work, call the extension tool \`${harborPlayerSkillToolName(player)}\` exactly once with no arguments. It is statically bound to this player; never supply or infer another player ID. Require one \`HARBOR-SKILL\` section for every configured name and no others; if loading fails, change nothing and report \`configured-skill-bootstrap: blocked\`.`,
   ];
   return [...common,
     "The harness supplies this exact group through its invocation-scoped skill configuration. Do not use an ambient or globally installed skill with the same or another name.",
@@ -150,7 +143,12 @@ function encodedPlayer(player: PlayerDefinition): string {
   return Buffer.from(JSON.stringify(definition), "utf8").toString("base64url");
 }
 
-/** Decodes a revision-4 embedded definition and verifies that it belongs to the requested player. */
+/** Opaque digest used to prove that a host-loaded agent matches the current managed definition. */
+export function playerDefinitionDigest(player: PlayerDefinition): string {
+  return `sha256:${createHash("sha256").update(encodedPlayer(player), "utf8").digest("base64url")}`;
+}
+
+/** Decodes an embedded managed definition and verifies that it belongs to the requested player. */
 export function decodePlayer(content: string, id: string): unknown {
   const match = /^<!-- agent-foundry:definition ([A-Za-z0-9_-]+) -->$/m.exec(content);
   if (!match || match[1].length > 40_000) throw new Error(`managed definition missing: ${id}`);
@@ -160,7 +158,7 @@ export function decodePlayer(content: string, id: string): unknown {
 }
 
 /**
- * Renders the canonical revision-4 active/registration profile for a harness.
+ * Renders the canonical revision-5 active/registration profile for a harness.
  * The ownership metadata, embedded definition, tool policy, and instructions form one executable
  * representation; discovery treats mutations to any of them as stale rather than silently trusting them.
  */
@@ -172,21 +170,8 @@ export function renderPlayer(harness: HarnessName, player: PlayerDefinition, ros
     `description: ${JSON.stringify(player.description)}`,
   ];
   if (harness === "copilot") {
-    common.push(`tools: ${JSON.stringify([...mapped, ...(player.skills?.length ? [copilotSkillTool(player)] : [])])}`);
+    common.push(`tools: ${JSON.stringify([...mapped, ...(player.skills?.length ? [harborPlayerSkillToolName(player)] : [])])}`);
     if (player.model) common.push(`model: ${JSON.stringify(player.model)}`);
-    if (player.skills?.length) {
-      const server = copilotSkillServerName(player);
-      const entrypoint = fileURLToPath(new URL("../adapters/copilot-mcp.js", import.meta.url));
-      common.push(
-        "mcp-servers:",
-        `  ${JSON.stringify(server)}:`,
-        "    type: local",
-        '    command: "node"',
-        `    args: ${JSON.stringify([entrypoint, "--skills-player", player.name])}`,
-        '    tools: ["skills"]',
-        "    timeout: 45000",
-      );
-    }
     common.push("disable-model-invocation: false", "user-invocable: true");
   } else if (harness === "opencode") {
     common.push("mode: subagent", "steps: 4");
@@ -214,42 +199,19 @@ export function renderPlayer(harness: HarnessName, player: PlayerDefinition, ros
     "  owner: agent-foundry",
     `  roster: ${roster}`,
     `  player: ${JSON.stringify(player.name)}`,
-    '  revision: "4"',
+    '  revision: "5"',
     "---",
-    `<!-- agent-foundry:profile id=${player.name} revision=4 -->`,
+    `<!-- agent-foundry:profile id=${player.name} revision=5 -->`,
   );
   common.push(`<!-- agent-foundry:definition ${encodedPlayer(player)} -->`);
   common.push("", composePlayerInstructions(player, harness), "");
   return common.join("\n");
 }
 
-// Installed packages can move while retaining the exact MCP adapter bytes. For Copilot skill profiles,
-// accept only that path relocation: both entrypoints must be regular, non-symlinked, byte-identical files,
-// and every other byte of the profile must still equal the freshly rendered canonical form.
-function copilotRuntimeEquivalentProfile(content: string, canonical: string, id: string): boolean {
-  const extract = (profile: string): { line: string; entrypoint: string } | undefined => {
-    const matches = [...profile.matchAll(/^    args: (.+)$/gmu)];
-    if (matches.length !== 1) return undefined;
-    let args: unknown;
-    try { args = JSON.parse(matches[0][1]); } catch { return undefined; }
-    if (!Array.isArray(args) || args.length !== 3 || typeof args[0] !== "string" ||
-        args[1] !== "--skills-player" || args[2] !== id || !isAbsolute(args[0])) return undefined;
-    return { line: matches[0][0], entrypoint: args[0] };
-  };
-  const actual = extract(content); const expected = extract(canonical);
-  if (!actual || !expected || actual.entrypoint === expected.entrypoint) return false;
-  try {
-    const actualStat = lstatSync(actual.entrypoint); const expectedStat = lstatSync(expected.entrypoint);
-    if (!actualStat.isFile() || actualStat.isSymbolicLink() || !expectedStat.isFile() || expectedStat.isSymbolicLink() ||
-        actualStat.size > 100_000 || actualStat.size !== expectedStat.size) return false;
-    if (!readFileSync(actual.entrypoint).equals(readFileSync(expected.entrypoint))) return false;
-  } catch { return false; }
-  return content === canonical.replace(expected.line, actual.line);
-}
-
 /**
  * Tests whether an owned profile exactly matches its validated definition and current renderer.
- * Copilot skill profiles permit only a byte-verified relocation of the local MCP entrypoint.
+ * Revision-4 profiles remain legacy-owned for safe repair, but only exact
+ * revision-5 output is executable.
  */
 export function isCanonicalPlayerProfile(
   content: string,
@@ -259,8 +221,7 @@ export function isCanonicalPlayerProfile(
   project?: string,
 ): boolean {
   const canonical = renderPlayer(harness, player, roster, project);
-  return content === canonical || Boolean(harness === "copilot" && player.skills?.length &&
-    copilotRuntimeEquivalentProfile(content, canonical, player.name));
+  return content === canonical;
 }
 
 /** Creates the filesystem layout and bound canonical renderer for one harness/project pair. */

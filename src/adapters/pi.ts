@@ -1,21 +1,32 @@
 /** Pi extension entrypoint, zero-model controls, live team status, and delegation. */
+import { resolve } from "node:path";
 import * as hostPiSdk from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
   Model,
+  ProviderConfig,
   ThinkingLevel,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { listInvocablePlayers, listManagedActiveIds, loadPiActivePlayer } from "../core/active.js";
 import { parseContractDefinition } from "../core/commands.js";
+import {
+  assertHarborCustomToolAccess,
+  formatHarborTeamRosterSnapshot,
+  harborCustomToolNames,
+  harborCustomToolPolicy,
+  harborStaticCustomToolSpecs,
+  HarborScoutTurnGuard,
+  validateHarborCustomToolArguments,
+} from "../core/custom-tools.js";
 import { bundledPlayers, rolePlayers, scoutPlayer, trustedSkills } from "../core/defaults.js";
 import { GhResolver } from "../core/github.js";
-import { isHarborId } from "../core/identity.js";
 import { commandNames, type ContractDefinition, type PlayerDefinition } from "../core/types.js";
 import { wrapPlainText } from "../core/text-layout.js";
 import { normalizeDelegatedTaskPaths } from "../core/profiles.js";
+import { publicErrorText, publicMetadataText } from "../core/public-metadata.js";
 import { filterTrustedSkills, formatScoutSkillMatches } from "../core/scout.js";
 import { PiOrchestrator, type PiSessionOptions } from "../orchestrators/pi.js";
 import { runDeterministicCommand } from "./direct.js";
@@ -33,6 +44,11 @@ import { collectPiTeamMembers, formatPiTeamView } from "./pi-team-view.js";
 type NoticeLevel = "info" | "warning" | "error";
 const preflightZeroLine = "Preflight stopped · no model was called · 0 model tokens.";
 const maximumConcurrentPiRoots = 32;
+const maximumPiCompletionItems = 50;
+const piCompletionCacheTtlMs = 750;
+const maximumPiTaskBytes = 30_000;
+const maximumPiFilterBytes = 4_096;
+const maximumPiDefinitionBytes = 100_000;
 
 interface StartedPiRun {
   readonly runId: string;
@@ -57,8 +73,69 @@ function modelIdentity(model: Model | undefined): { provider: string; id: string
   return model === undefined ? undefined : { provider: model.provider, id: model.id };
 }
 
-function resolveConfiguredPiModel(configured: string | undefined, ctx: ExtensionContext): Model | undefined {
-  if (configured === undefined) return ctx.model;
+function boundedPiModelPart(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 200) return undefined;
+  const normalized = value.trim();
+  return normalized || undefined;
+}
+
+function isPiOfflinePlaceholder(model: Model | undefined): boolean {
+  if (model === undefined) return false;
+  const provider = boundedPiModelPart(model.provider)?.toLowerCase();
+  const id = boundedPiModelPart(model.id ?? (model as unknown as { readonly model?: unknown }).model)?.toLowerCase();
+  const api = boundedPiModelPart((model as unknown as { readonly api?: unknown }).api)?.toLowerCase();
+  return provider === "unknown" && (id === "unknown" || id === "default") &&
+    (api === undefined || api === "unknown") && model.maxTokens === 0;
+}
+
+function resolveInheritedPiModel(ctx: ExtensionContext): Model {
+  // Pi exposes model through a live getter. Capture one coherent command-time
+  // value so a concurrent host selection cannot split this preflight.
+  const current = ctx.model;
+  const registry = ctx.modelRegistry as {
+    readonly getAvailable?: () => readonly Model[];
+    readonly getError?: () => string | undefined;
+    readonly hasConfiguredAuth?: (model: Model) => boolean;
+  } | undefined;
+  if (current === undefined || isPiOfflinePlaceholder(current)) {
+    try {
+      if (typeof registry?.getAvailable === "function" && typeof registry.getError === "function") {
+        const available = registry.getAvailable();
+        const registryError = registry.getError();
+        if (registryError === undefined && Array.isArray(available)) {
+          if (available.length > 0) {
+            throw new Error(`Pi has ${available.length} usable model${available.length === 1 ? "" : "s"}, but none is selected. Use /model to select one before running Agent Harbor work`);
+          }
+          throw new Error("Pi reports no usable authenticated model. Use /login to configure a provider, then /model to select it");
+        }
+      }
+    } catch (error) {
+      if (error instanceof Error && /^Pi (?:has|reports) /u.test(error.message)) throw error;
+    }
+    throw new Error("Pi has no active model and model availability is unobserved. Use /model to select one or /login to configure a provider");
+  }
+
+  const provider = boundedPiModelPart(current.provider) ?? "unknown";
+  const id = boundedPiModelPart(current.id) ?? "unknown";
+  if (typeof registry?.hasConfiguredAuth === "function" && !registry.hasConfiguredAuth(current)) {
+    throw new Error(`selected Pi model has no configured authentication: ${provider}/${id}. Use /login ${provider} or select another model with /model`);
+  }
+  if (typeof registry?.getAvailable === "function" && typeof registry.getError === "function") {
+    try {
+      const available = registry.getAvailable();
+      if (registry.getError() === undefined && Array.isArray(available) &&
+          !available.some((model) => model.provider === current.provider && model.id === current.id)) {
+        throw new Error(`selected Pi model is no longer available: ${provider}/${id}. Use /model to select an available authenticated model`);
+      }
+    } catch (error) {
+      if (error instanceof Error && /^selected Pi model /u.test(error.message)) throw error;
+    }
+  }
+  return current;
+}
+
+function resolveConfiguredPiModel(configured: string | undefined, ctx: ExtensionContext): Model {
+  if (configured === undefined) return resolveInheritedPiModel(ctx);
   const separator = configured.indexOf("/");
   const provider = separator > 0 ? configured.slice(0, separator) : undefined;
   const id = separator > 0 ? configured.slice(separator + 1) : undefined;
@@ -69,6 +146,54 @@ function resolveConfiguredPiModel(configured: string | undefined, ctx: Extension
     throw new Error(`configured Pi model has no available authentication: ${provider}/${id}`);
   }
   return resolved;
+}
+
+function configuredPiProvider(route: string): string {
+  const separator = route.indexOf("/");
+  const provider = separator > 0 ? boundedPiModelPart(route.slice(0, separator)) : undefined;
+  const id = separator > 0 ? boundedPiModelPart(route.slice(separator + 1)) : undefined;
+  if (!provider || !id) throw new Error(`configured Pi model must use provider/model syntax: ${route}`);
+  return provider;
+}
+
+async function capturePiProviderProjections(
+  ctx: ExtensionContext,
+  requiredProviderIds: readonly string[],
+): Promise<NonNullable<PiSessionOptions["providerProjections"]>> {
+  const registry = ctx.modelRegistry as {
+    readonly getRegisteredProviderConfig?: (providerId: string) => ProviderConfig | undefined;
+    readonly getProviderAuthStatus?: (providerId: string) => { readonly source?: string };
+    readonly getApiKeyForProvider?: (providerId: string) => Promise<string | undefined>;
+  } | undefined;
+  const projections: Array<NonNullable<PiSessionOptions["providerProjections"]>[number]> = [];
+  const seen = new Set<string>();
+  for (const rawProviderId of requiredProviderIds) {
+    const providerId = boundedPiModelPart(rawProviderId);
+    if (!providerId || seen.has(providerId)) continue;
+    seen.add(providerId);
+    let config: ProviderConfig | undefined;
+    try { config = registry?.getRegisteredProviderConfig?.(providerId); }
+    catch { throw new Error(`Pi could not inspect the registered provider configuration for ${providerId}`); }
+    let runtimeKey: string | undefined;
+    let authSource: string | undefined;
+    try { authSource = registry?.getProviderAuthStatus?.(providerId)?.source; }
+    catch { throw new Error(`Pi could not inspect authentication for provider ${providerId}`); }
+    if (authSource === "runtime") {
+      if (typeof registry?.getApiKeyForProvider !== "function") {
+        throw new Error(`Pi cannot transfer runtime-only authentication for provider ${providerId}`);
+      }
+      try { runtimeKey = await registry.getApiKeyForProvider(providerId); }
+      catch { throw new Error(`Pi could not transfer runtime-only authentication for provider ${providerId}`); }
+      if (!runtimeKey) throw new Error(`Pi runtime-only authentication is unavailable for provider ${providerId}`);
+    }
+    if (config === undefined && runtimeKey === undefined) continue;
+    projections.push({
+      id: providerId,
+      ...(config === undefined ? {} : { config: { ...config } }),
+      ...(runtimeKey === undefined ? {} : { runtimeKey }),
+    });
+  }
+  return projections;
 }
 
 function playerKind(player: PlayerDefinition): PiTeamMemberKind {
@@ -97,12 +222,29 @@ function failCommand(ctx: ExtensionCommandContext, message: string): void {
   throw new Error(message);
 }
 
+/** Public model/tool boundary: preserve cancellation identity, never a raw cause. */
+function publicPiToolFailure(error: unknown): Error {
+  const raw = error instanceof Error ? error.message : String(error);
+  const visible = new Error(publicErrorText(raw, 600) ?? "Agent Harbor tool failed safely");
+  visible.name = error instanceof Error && error.name === "AbortError"
+    ? "AbortError"
+    : publicMetadataText(error instanceof Error ? error.name : "Error", 80) ?? "Error";
+  return visible;
+}
+
 function zeroModelResult(command: string, result: string): string {
   return wrapPlainText(`Agent Harbor /${command} · 0 model tokens\n${result}`);
 }
 
 function stopResult(result: string): string {
   return wrapPlainText(`Agent Harbor stop · 0 model tokens\n${result}`);
+}
+
+function requireBoundedArguments(value: string, maximumBytes: number, label: string): string {
+  if (value.length > maximumBytes || Buffer.byteLength(value, "utf8") > maximumBytes) {
+    throw new Error(`Agent Harbor ${label} exceeds ${maximumBytes} bytes`);
+  }
+  return value;
 }
 
 function commandHelp(command: string): string {
@@ -118,7 +260,8 @@ function commandHelp(command: string): string {
 
 function humanError(command: string, error: unknown, deterministic = false): string {
   const raw = error instanceof Error ? error.message : String(error);
-  if (/active managed player preflight failed/iu.test(raw)) {
+  const rawPrefix = raw.length > 4_096 ? raw.slice(0, 4_096) : raw;
+  if (/active managed player preflight failed/iu.test(rawPrefix)) {
     return [
       `/${command} is no longer active or current in this Pi session.`,
       preflightZeroLine,
@@ -126,10 +269,11 @@ function humanError(command: string, error: unknown, deterministic = false): str
       "Run /team to inspect the roster, then /reload to remove stale aliases.",
     ].join("\n");
   }
-  let message = raw;
+  let message = publicErrorText(raw, 600, [`/${command}`, "/login", "/model"])
+    ?? "Agent Harbor command failed.";
   if (error instanceof SyntaxError || /JSON/u.test(error instanceof Error ? error.name : "")) {
     message = `Invalid JSON for /${command}. Expected exactly one JSON object.`;
-  } else if (/usage:/iu.test(raw)) {
+  } else if (/usage:/iu.test(rawPrefix)) {
     return `${commandHelp(command)}${deterministic ? "\nNo model was called." : ""}`;
   }
   return deterministic
@@ -148,11 +292,26 @@ function withoutViewHeader(view: string): string {
 
 function conciseLifecycleResult(command: string, args: string, raw: string): string {
   if (command === "join") {
-    const input = JSON.parse(args) as { name: string; description: string; tools: string[] };
+    const input = JSON.parse(args) as {
+      name: string;
+      description: string;
+      tools: string[];
+      skills?: Array<{ name: string }>;
+      model?: string;
+    };
+    const capacity = [
+      ...input.tools,
+      ...(input.skills ?? []).map(({ name }) => `skill:${name}`),
+    ];
+    const id = publicMetadataText(input.name, 48) ?? "joined-player";
+    const role = publicMetadataText(input.description, 240) ?? "Personal Agent Harbor teammate";
+    const model = publicMetadataText(input.model ?? "", 200);
     return [
-      `✓ ${input.name} joined · personal · ready in this project`,
-      `Role: ${input.description} · capacity: ${input.tools.join(", ")}`,
-      `Run: /${input.name} <task>`,
+      `✓ ${id} joined · personal · ready in this project`,
+      `Role: ${role}`,
+      `Capacity: ${capacity.join(", ") || "advisory"}`,
+      `Model: ${model ? `configured ${model}` : "inherits the Pi host when run"}`,
+      `Run: /${id} <task>`,
     ].join("\n");
   }
   if (command === "retire") {
@@ -175,22 +334,38 @@ function benchListFilter(args: string): string | undefined {
 const benchAllNote = "Here, all means the six bundled SDLC specialists only; personal members are unchanged.";
 
 function compactPublicText(value: string, limit: number): string {
-  const normalized = value.replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim();
-  const points = [...normalized];
-  return points.length <= limit ? normalized : `${points.slice(0, Math.max(0, limit - 1)).join("")}…`;
+  return publicMetadataText(value, limit) ?? "not disclosed";
 }
 
-function leadRosterRow(definition: PlayerDefinition, busy = false): string {
+function sameProject(left: string, right: string): boolean {
+  const normalize = (value: string): string => process.platform === "win32"
+    ? resolve(value).replace(/\\/gu, "/").replace(/\/$/u, "").toLowerCase()
+    : resolve(value).replace(/\/$/u, "");
+  return normalize(left) === normalize(right);
+}
+
+function childToolProject(context: ExtensionContext | undefined, expected: string): string {
+  const project = context?.cwd || expected;
+  if (!sameProject(project, expected)) {
+    throw new Error("Agent Harbor child custom tool cannot cross its invocation project boundary");
+  }
+  return project;
+}
+
+function leadRosterPreviewRow(definition: PlayerDefinition, busy = false): string {
+  const capacity = [
+    ...definition.tools,
+    ...(definition.skills ?? []).map(({ name }) => `skill:${name}`),
+  ].slice(0, 6);
   return JSON.stringify({
     id: definition.name,
-    role: compactPublicText(definition.description, 120),
-    tools: definition.tools,
-    skills: (definition.skills ?? []).map(({ name }) => name).slice(0, 12),
-    busy,
+    state: busy ? "busy" : "ready",
+    role: compactPublicText(definition.description, 48),
+    capacity,
   });
 }
 
-function boundedLeadRoster(rows: readonly string[], maximumCharacters = 6_000): string {
+function boundedLeadRoster(rows: readonly string[], maximumCharacters = 1_500): string {
   const shown: string[] = [];
   let length = 0;
   for (const row of rows) {
@@ -200,7 +375,7 @@ function boundedLeadRoster(rows: readonly string[], maximumCharacters = 6_000): 
     length += increment;
   }
   const omitted = rows.length - shown.length;
-  return `${shown.join("; ")}${omitted ? `; +${omitted} more active; use optional harbor_team_roster` : ""}`;
+  return `${shown.join("; ")}${omitted ? `; +${omitted} more enabled specialists omitted from this preview` : ""}`;
 }
 
 /**
@@ -213,48 +388,167 @@ export default function agentHarbor(pi: ExtensionAPI): void {
   const runtime = new PiTeamRuntime();
   const rootAbortControllers = new Map<string, AbortController>();
   const rootPromises = new Map<string, Promise<unknown>>();
+  const rootSettlements = new Map<string, Promise<unknown>>();
+  const rootSettlementProjects = new Map<string, string>();
   const loadHostSdk = async () => hostPiSdk;
   let completionProject = process.cwd();
   let discoveryWarning: string | undefined;
+  let completionRosterCache: {
+    readonly project: string;
+    readonly expiresAt: number;
+    readonly members: Awaited<ReturnType<typeof collectPiTeamMembers>>;
+  } | undefined;
+  let completionRosterInFlight: {
+    readonly project: string;
+    readonly promise: Promise<Awaited<ReturnType<typeof collectPiTeamMembers>>>;
+  } | undefined;
   const metadataRefreshWarning = "Pi command metadata refresh failed after the roster change was committed; run /reload. No rollback was attempted.";
+
+  const invalidateCompletionRoster = (project?: string): void => {
+    if (!project || (completionRosterCache && sameProject(completionRosterCache.project, project))) {
+      completionRosterCache = undefined;
+    }
+    if (!project || (completionRosterInFlight && sameProject(completionRosterInFlight.project, project))) {
+      completionRosterInFlight = undefined;
+    }
+  };
+
+  const completionMembers = async (project: string): Promise<Awaited<ReturnType<typeof collectPiTeamMembers>>> => {
+    if (completionRosterCache && sameProject(completionRosterCache.project, project) &&
+        completionRosterCache.expiresAt > Date.now()) {
+      return completionRosterCache.members;
+    }
+    if (completionRosterInFlight && sameProject(completionRosterInFlight.project, project)) {
+      return completionRosterInFlight.promise;
+    }
+    const promise = collectPiTeamMembers(project);
+    const inFlight = { project, promise };
+    completionRosterInFlight = inFlight;
+    try {
+      const members = await promise;
+      if (completionRosterInFlight === inFlight) {
+        completionRosterCache = { project, expiresAt: Date.now() + piCompletionCacheTtlMs, members };
+      }
+      return members;
+    } finally {
+      if (completionRosterInFlight === inFlight) completionRosterInFlight = undefined;
+    }
+  };
 
   const combineSignals = (...signals: Array<AbortSignal | undefined>): AbortSignal | undefined => {
     const present = signals.filter((signal): signal is AbortSignal => signal !== undefined);
     return present.length > 1 ? AbortSignal.any(present) : present[0];
   };
 
+  const rootToolSignal = (rootRunId: string, toolSignal?: AbortSignal): AbortSignal => {
+    const run = runtime.get(rootRunId);
+    if (!run || (run.state !== "starting" && run.state !== "working")) {
+      throw new Error("Agent Harbor root is terminal or cleaning; late custom-tool calls are blocked");
+    }
+    const rootSignal = rootAbortControllers.get(rootRunId)?.signal;
+    if (!rootSignal) throw new Error("Agent Harbor root execution authority is no longer available");
+    const signal = combineSignals(rootSignal, toolSignal)!;
+    signal.throwIfAborted();
+    return signal;
+  };
+
   const trackRootExecution = (
     runId: string,
+    project: string,
     callerSignal: AbortSignal | undefined,
     execute: (signal: AbortSignal) => Promise<string>,
   ): Promise<string> => {
-    const controller = new AbortController();
+    const controller = rootAbortControllers.get(runId) ?? new AbortController();
     rootAbortControllers.set(runId, controller);
-    const effectiveSignal = combineSignals(callerSignal, controller.signal)!;
-    let tracked: Promise<string>;
-    try {
-      tracked = execute(effectiveSignal).finally(() => {
-        if (rootAbortControllers.get(runId) === controller) rootAbortControllers.delete(runId);
-        if (rootPromises.get(runId) === tracked) rootPromises.delete(runId);
-      });
-    } catch (error) {
-      rootAbortControllers.delete(runId);
+    const relayCallerAbort = (): void => {
+      const state = runtime.get(runId)?.state;
+      if (state === "starting" || state === "working") runtime.setState(runId, "cleaning");
+      controller.abort(callerSignal?.reason);
+    };
+    if (callerSignal?.aborted) relayCallerAbort();
+    else callerSignal?.addEventListener("abort", relayCallerAbort, { once: true });
+    // The controller is the canonical root authority used by both the prompt
+    // and every invocation-scoped tool. Relaying the caller here closes the
+    // small race between caller cancellation and terminal-state observation.
+    const effectiveSignal = controller.signal;
+    let abortListener: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const fail = (): void => reject(effectiveSignal.reason instanceof Error
+        ? effectiveSignal.reason
+        : new DOMException("Agent Harbor Pi run cancelled", "AbortError"));
+      if (effectiveSignal.aborted) fail();
+      else {
+        abortListener = fail;
+        effectiveSignal.addEventListener("abort", fail, { once: true });
+      }
+    });
+    const execution = Promise.resolve().then(() => {
+      effectiveSignal.throwIfAborted();
+      return execute(effectiveSignal);
+    });
+    const settlement = execution.catch((error) => {
+      runtime.finishIfOpen(runId, cancellation(error, effectiveSignal) ? "cancelled" : "failed");
       throw error;
-    }
+    }).finally(() => {
+      callerSignal?.removeEventListener("abort", relayCallerAbort);
+      if (rootAbortControllers.get(runId) === controller) rootAbortControllers.delete(runId);
+      rootSettlements.delete(runId);
+      rootSettlementProjects.delete(runId);
+    });
+    rootSettlements.set(runId, settlement);
+    rootSettlementProjects.set(runId, project);
+    let tracked: Promise<string>;
+    tracked = Promise.race([settlement, aborted]).finally(() => {
+      if (abortListener) effectiveSignal.removeEventListener("abort", abortListener);
+      if (rootPromises.get(runId) === tracked) rootPromises.delete(runId);
+    });
     rootPromises.set(runId, tracked);
     return tracked;
   };
 
-  const stopProjectRoots = (project: string, selector = "all"): string[] => {
-    const activeRoots = runtime.activeProjectRuns(project).filter((run) => run.parentRunId === undefined);
-    const selected = selector === "all" ? activeRoots : activeRoots.filter((run) => run.id === selector);
+  const stopProjectRoots = (project: string, selector = "all") => {
+    const active = runtime.activeProjectRuns(project);
+    const matching = selector === "all"
+      ? active
+      : active.filter((run) => run.id === selector || run.rootRunId === selector);
+    const rootIds = [...new Set(matching.map(({ rootRunId }) => rootRunId))];
+    const selected = rootIds.flatMap((rootId) => active.find((run) => run.id === rootId) ?? []);
+    const stopped: string[] = [];
+    const alreadyStopping: string[] = [];
+    const unavailable: string[] = [];
     for (const run of selected) {
       const controller = rootAbortControllers.get(run.id);
-      if (controller && !controller.signal.aborted) {
-        controller.abort(new DOMException("Stopped by user", "AbortError"));
+      if (run.state === "cleaning" || controller?.signal.aborted) {
+        alreadyStopping.push(run.id);
+        continue;
       }
+      if (!controller) {
+        unavailable.push(run.id);
+        continue;
+      }
+      runtime.setState(run.id, "cleaning");
+      controller.abort(new DOMException("Stopped by user", "AbortError"));
+      stopped.push(run.id);
     }
-    return selected.map(({ id }) => id);
+    return { stopped, alreadyStopping, unavailable };
+  };
+
+  const stopProjectRootsMessage = (
+    result: ReturnType<typeof stopProjectRoots>,
+    empty = "No Agent Harbor work is active in this project.",
+  ): string => {
+    const lines = [
+      ...(result.stopped.length
+        ? [`Stopping ${result.stopped.length} Agent Harbor root run(s): ${result.stopped.join(", ")}.`]
+        : []),
+      ...(result.alreadyStopping.length
+        ? [`Already stopping ${result.alreadyStopping.length} root run(s): ${result.alreadyStopping.join(", ")}; waiting for provider cleanup.`]
+        : []),
+      ...(result.unavailable.length
+        ? [`Stop authority unavailable for ${result.unavailable.length} root run(s): ${result.unavailable.join(", ")}; inspect /team until they settle.`]
+        : []),
+    ];
+    return lines.length ? lines.join("\n") : empty;
   };
 
   const assertRootStartAllowed = (
@@ -266,27 +560,77 @@ export default function agentHarbor(pi: ExtensionAPI): void {
     if (activeRoots.length >= maximumConcurrentPiRoots) {
       throw new Error(`Agent Harbor allows at most ${maximumConcurrentPiRoots} concurrent root runs per project; wait or use /team stop <run-id|all>`);
     }
+    const settlingRoots = [...rootSettlementProjects.values()]
+      .filter((candidate) => sameProject(candidate, project)).length;
+    if (settlingRoots >= maximumConcurrentPiRoots) {
+      throw new Error(`Agent Harbor is still settling ${settlingRoots} stopped or active roots in this project; wait for cleanup before starting more model work`);
+    }
     if (kind === "contractor") return;
     const busy = runtime.activeProjectRuns(project).find((run) => run.kind !== "contractor" && run.agent === agent);
     if (busy) throw new Error(`${agent} is already working in ${busy.rootRunId}; wait or use /team stop ${busy.rootRunId}`);
   };
 
-  const currentSessionOptions = (model: Model | undefined): PiSessionOptions => ({
-    ...(model === undefined ? {} : { model }),
-    thinkingLevel: pi.getThinkingLevel(),
-  });
+  const captureSessionOptions = async (
+    ctx: ExtensionContext,
+    model: Model,
+    thinkingLevel: ThinkingLevel,
+    additionalProviderIds: readonly string[] = [],
+  ): Promise<PiSessionOptions> => {
+    const providerProjections = await capturePiProviderProjections(
+      ctx,
+      [model.provider, ...additionalProviderIds],
+    );
+    return {
+      model,
+      thinkingLevel,
+      ...(providerProjections.length ? { providerProjections } : {}),
+    };
+  };
 
   const teamViewRuntimeOptions = (ctx: ExtensionContext) => {
     let nextThinking: ThinkingLevel | undefined;
     try { nextThinking = pi.getThinkingLevel(); } catch { /* Keep deterministic inspection available. */ }
+    const currentModel = ctx.model;
+    const rawProvider = boundedPiModelPart(currentModel?.provider);
+    const rawId = boundedPiModelPart(currentModel?.id ?? (currentModel as unknown as { readonly model?: unknown } | undefined)?.model);
+    const noActiveModel = currentModel === undefined || isPiOfflinePlaceholder(currentModel);
+    let registryReportsNoAvailableModels = false;
+    let availableModelCount: number | undefined;
+    let modelAvailabilityUnobserved = noActiveModel;
+    if (noActiveModel) {
+      const registry = ctx.modelRegistry as {
+        readonly getAvailable?: () => readonly unknown[];
+        readonly getError?: () => string | undefined;
+      } | undefined;
+      try {
+        if (typeof registry?.getAvailable === "function" && typeof registry.getError === "function") {
+          const available = registry.getAvailable();
+          if (Array.isArray(available) && registry.getError() === undefined) {
+            registryReportsNoAvailableModels = available.length === 0;
+            availableModelCount = available.length > 0 ? available.length : undefined;
+            modelAvailabilityUnobserved = false;
+          }
+        }
+      } catch { /* A missing or unhealthy registry is unobserved, not proof of no models. */ }
+    }
+    const nextModelUnavailable = noActiveModel && registryReportsNoAvailableModels;
+    const provider = rawProvider?.toLowerCase() === "unknown" ? undefined : rawProvider;
+    const id = rawId?.toLowerCase() === "unknown" ? undefined : rawId;
+    const maxTokens = typeof currentModel?.maxTokens === "number" &&
+      Number.isSafeInteger(currentModel.maxTokens) && currentModel.maxTokens > 0
+      ? currentModel.maxTokens
+      : undefined;
     return {
-      ...(ctx.model === undefined ? {} : {
+      ...(provider === undefined || id === undefined ? {} : {
         nextModel: {
-          provider: ctx.model.provider,
-          id: ctx.model.id,
-          ...(typeof ctx.model.maxTokens === "number" ? { maxTokens: ctx.model.maxTokens } : {}),
+          provider,
+          id,
+          ...(maxTokens === undefined ? {} : { maxTokens }),
         },
       }),
+      ...(nextModelUnavailable ? { nextModelUnavailable: true } : {}),
+      ...(availableModelCount === undefined ? {} : { nextModelAvailableCount: availableModelCount }),
+      ...(modelAvailabilityUnobserved ? { nextModelAvailabilityUnobserved: true } : {}),
       ...(nextThinking === undefined ? {} : { nextThinking }),
     };
   };
@@ -325,7 +669,7 @@ export default function agentHarbor(pi: ExtensionAPI): void {
         customTools,
         runtime.observer(runId),
       ).run(definition, signal);
-      runtime.finishIfOpen(runId, "completed");
+      runtime.finishIfOpen(runId, signal?.aborted ? "cancelled" : "completed");
       return result;
     } catch (error) {
       runtime.finishIfOpen(runId, cancellation(error, signal) ? "cancelled" : "failed");
@@ -344,6 +688,7 @@ export default function agentHarbor(pi: ExtensionAPI): void {
     customTools: readonly ToolDefinition[] = [],
   ): StartedPiRun => {
     completionProject = cwd;
+    requireBoundedArguments(definition.task, maximumPiTaskBytes, "contract task");
     if (parentRunId === undefined) assertRootStartAllowed(cwd, definition.name, kind);
     const runId = runtime.begin({
       project: cwd,
@@ -352,12 +697,15 @@ export default function agentHarbor(pi: ExtensionAPI): void {
       task: definition.task,
       ...(parentRunId === undefined ? {} : { parentRunId }),
       ...(sessionOptions.model === undefined ? {} : { model: modelIdentity(sessionOptions.model) }),
+      ...(sessionOptions.model === undefined ? {} : {
+        modelSource: definition.model === undefined ? "inherited" as const : "configured" as const,
+      }),
       ...(sessionOptions.thinkingLevel === undefined ? {} : { thinking: sessionOptions.thinkingLevel }),
     });
     const execute = (effectiveSignal: AbortSignal | undefined) =>
       executeRun(definition, runId, cwd, sessionOptions, effectiveSignal, additionalTools, customTools);
     const result = parentRunId === undefined
-      ? trackRootExecution(runId, signal, execute)
+      ? trackRootExecution(runId, cwd, signal, execute)
       : execute(combineSignals(signal, rootAbortControllers.get(runtime.get(runId)!.rootRunId)?.signal));
     return {
       runId,
@@ -374,149 +722,241 @@ export default function agentHarbor(pi: ExtensionAPI): void {
     // A fresh tool per team-lead child makes the six-call/sequential policy invocation-local.
     let calls = 0;
     const delegatedAgents = new Set<string>();
-    const delegationTargets = [...delegationRoster.keys()];
     const compactRoster = boundedLeadRoster([...delegationRoster].map(([id, definition]) =>
-      leadRosterRow(definition,
+      leadRosterPreviewRow(definition,
         runtime.activeProjectRuns(cwd).some((run) => run.kind !== "contractor" && run.agent === id))));
-    return {
-      name: "harbor_delegate",
-      label: "Agent Harbor Delegate",
-      description: `Run one active named specialist and return only its evidence. Compact active roster: ${compactRoster}.`,
-      executionMode: "sequential",
-      parameters: {
-        type: "object",
-        properties: {
-          agent: { type: "string", enum: delegationTargets, description: "Exact active Agent Harbor agent ID" },
-          task: { type: "string", description: "Complete bounded task for that agent" },
+    const spec = harborStaticCustomToolSpecs[harborCustomToolNames.delegate];
+    const policy = harborCustomToolPolicy(spec.name)!;
+    const staticParameters = spec.parameters as {
+      readonly properties: Readonly<Record<string, Record<string, unknown>>>;
+    };
+    const parameters = {
+      ...spec.parameters,
+      properties: {
+        ...staticParameters.properties,
+        agent: {
+          ...staticParameters.properties.agent,
+          enum: [...delegationRoster.keys()],
         },
-        required: ["agent", "task"],
-        additionalProperties: false,
       },
-      execute: async (_id, params: { agent: string; task: string }, signal, _update, context) => {
-        const project = context?.cwd || cwd;
-        if (!isHarborId(params.agent) || params.agent === "team-lead") throw new Error("invalid or recursive delegation target");
-        if (typeof params.task !== "string" || !params.task.trim()) throw new Error("delegation requires a non-empty task");
-        const player = delegationRoster.get(params.agent);
-        if (!player) throw new Error(`delegation target ${params.agent} is not in this team-lead roster snapshot`);
+    };
+    return {
+      name: spec.name,
+      label: "Agent Harbor Delegate",
+      description: `${spec.description} Enabled roster preview: ${compactRoster}. Call ${harborCustomToolNames.teamRoster} with query "" for the full invocation snapshot or a short query for details.`,
+      executionMode: "sequential",
+      parameters,
+      execute: async (_id, params: unknown, signal, _update, context) => {
+        try {
+        const effectiveSignal = rootToolSignal(parentRunId, signal);
+        const project = childToolProject(context, cwd);
+        assertHarborCustomToolAccess(spec.name, { agent: "team-lead" });
+        const call = validateHarborCustomToolArguments(spec.name, params);
+        if (call.kind !== "delegate") throw new Error("invalid Agent Harbor delegate dispatch");
+        const player = delegationRoster.get(call.agent);
+        if (!player) throw new Error(`delegation target ${call.agent} is not in this team-lead roster snapshot`);
         const busy = runtime.activeProjectRuns(project).find((run) =>
-          run.kind !== "contractor" && run.agent === params.agent && run.rootRunId !== parentRunId);
-        if (busy) throw new Error(`delegation target ${params.agent} is busy in ${busy.rootRunId}; wait or stop that run`);
-        if (calls >= 6) throw new Error("delegation limit reached (6)");
-        if (delegatedAgents.has(params.agent)) throw new Error(`already delegated to ${params.agent} in this team-lead run`);
+          run.kind !== "contractor" && run.agent === call.agent && run.rootRunId !== parentRunId);
+        if (busy) throw new Error(`delegation target ${call.agent} is busy in ${busy.rootRunId}; wait or stop that run`);
+        if (calls >= policy.maximumCalls) throw new Error(`delegation limit reached (${policy.maximumCalls})`);
+        if (delegatedAgents.has(call.agent)) throw new Error(`already delegated to ${call.agent} in this team-lead run`);
+        const delegatedModel = player.model === undefined
+          ? context.model ?? leadSessionOptions.model
+          : resolveConfiguredPiModel(player.model, context);
         calls += 1;
-        delegatedAgents.add(params.agent);
+        delegatedAgents.add(call.agent);
         const delegateSessionOptions: PiSessionOptions = {
           ...leadSessionOptions,
-          ...(context.model === undefined ? {} : { model: context.model }),
+          ...(delegatedModel === undefined ? {} : { model: delegatedModel }),
         };
-        const definition = { ...player, task: normalizeDelegatedTaskPaths(params.task, project) };
-        const child = startDefinition(definition, project, delegateSessionOptions, playerKind(player), signal, parentRunId);
+        const definition = { ...player, task: normalizeDelegatedTaskPaths(call.task, project) };
+        const child = startDefinition(definition, project, delegateSessionOptions, playerKind(player), effectiveSignal, parentRunId);
         const text = await child.result;
         // Accounting remains outside this content so the lead reasons only over specialist evidence.
-        return { content: [{ type: "text", text }], details: { harness: "pi", agent: params.agent, call: calls } };
+        return { content: [{ type: "text", text }], details: { harness: "pi", agent: call.agent, call: calls } };
+        } catch (error) {
+          throw publicPiToolFailure(error);
+        }
       },
     };
   };
 
-  const createTeamRosterTool = (cwd: string, rosterSnapshot: ReadonlyMap<string, PlayerDefinition>): ToolDefinition => ({
-    name: "harbor_team_roster",
+  const createTeamRosterTool = (
+    cwd: string,
+    rosterSnapshot: ReadonlyMap<string, PlayerDefinition>,
+    parentRunId: string,
+  ): ToolDefinition => {
+    const spec = harborStaticCustomToolSpecs[harborCustomToolNames.teamRoster];
+    const policy = harborCustomToolPolicy(spec.name)!;
+    let calls = 0;
+    return {
+    name: spec.name,
     label: "Agent Harbor Team Roster",
-    description: "Optionally search current active specialists by public role, tool, or skill metadata; deterministic and creates no child.",
+    description: spec.description,
     executionMode: "sequential",
-    parameters: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Optional concise ID, role, tool, or skill filter; use an empty string for all" },
-      },
-      required: ["query"],
-      additionalProperties: false,
+    parameters: spec.parameters,
+    execute: async (_id, params: unknown, signal, _update, context) => {
+      try {
+      rootToolSignal(parentRunId, signal);
+      const project = childToolProject(context, cwd);
+      assertHarborCustomToolAccess(spec.name, { agent: "team-lead" });
+      const call = validateHarborCustomToolArguments(spec.name, params);
+      if (call.kind !== "team-roster") throw new Error("invalid Agent Harbor team-roster dispatch");
+      if (calls >= policy.maximumCalls) throw new Error(`team roster limit reached (${policy.maximumCalls})`);
+      calls += 1;
+      const snapshot = formatHarborTeamRosterSnapshot(
+        [...rosterSnapshot.values()].map((definition) => ({
+          id: definition.name,
+          role: publicMetadataText(definition.description, 240) ?? "Role not disclosed",
+          tools: definition.tools,
+          skills: (definition.skills ?? []).map(({ name }) => name),
+          ...(definition.model ? { configuredModel: publicMetadataText(definition.model, 200) ?? "redacted" } : {}),
+          availability: runtime.activeProjectRuns(project)
+            .some((run) => run.kind !== "contractor" && run.agent === definition.name)
+            ? "busy" as const
+            : "ready" as const,
+        })),
+        call.query,
+      );
+      return { content: [{ type: "text", text: snapshot.text }], details: {
+        harness: "pi", deterministic: true, childCreated: false, rosterComplete: snapshot.complete,
+      } };
+      } catch (error) {
+        throw publicPiToolFailure(error);
+      }
     },
-    execute: async (_id, params: { query: string }, _signal, _update, context) => {
-      if (typeof params.query !== "string" || [...params.query].length > 80) throw new Error("team roster query must be at most 80 characters");
-      const project = context?.cwd || cwd;
-      const query = params.query.trim().toLowerCase();
-      const definitions = [...rosterSnapshot.values()];
-      const matches = definitions.filter((definition) => !query || [
-        definition.name,
-        definition.description,
-        ...definition.tools,
-        ...(definition.skills ?? []).map(({ name }) => name),
-      ].some((value) => value.toLowerCase().includes(query)));
-      const shown = matches.slice(0, 24);
-      const text = matches.length
-        ? [`Lead-start roster snapshot · showing ${shown.length}/${matches.length}`,
-          ...shown.map((definition) => leadRosterRow(definition,
-            runtime.activeProjectRuns(project).some((run) => run.kind !== "contractor" && run.agent === definition.name))),
-          ...(matches.length > shown.length ? ["Refine query to see omitted matches."] : [])].join("\n")
-        : `No active specialist matches “${compactPublicText(params.query, 80)}”.`;
-      return { content: [{ type: "text", text }], details: { harness: "pi", deterministic: true, childCreated: false } };
-    },
-  });
+  };
+  };
 
-  const createScoutTools = (cwd: string, onJoinCommitted: (id: string) => void): ToolDefinition[] => {
-    let filterCalls = 0;
-    let joinCalls = 0;
+  const createScoutTools = (
+    cwd: string,
+    onJoinCommitted: (id: string) => void,
+    rosterSnapshot: ReadonlyMap<string, PlayerDefinition>,
+    parentRunId: string,
+  ): ToolDefinition[] => {
+    const guard = new HarborScoutTurnGuard();
+    const rosterSpec = harborStaticCustomToolSpecs[harborCustomToolNames.teamRoster];
+    const filterSpec = harborStaticCustomToolSpecs[harborCustomToolNames.filterSkills];
+    const joinSpec = harborStaticCustomToolSpecs[harborCustomToolNames.joinPlayer];
     return [{
-    name: "harbor_filter_skills",
-    label: "Agent Harbor Skill Filter",
-    description: "Search only the exact execution-trusted skill group by public metadata.",
+    name: rosterSpec.name,
+    label: "Agent Harbor Team Roster",
+    description: `${rosterSpec.description} Call this exactly once before filtering skills or joining a player.`,
     executionMode: "sequential",
-    parameters: {
-      type: "object",
-      properties: { query: { type: "string", description: "Concise capability keywords" } },
-      required: ["query"], additionalProperties: false,
-    },
-    execute: async (_id, params: { query: string }, signal) => {
-      if (filterCalls >= 3) throw new Error("talent scout filter limit reached (3)");
-      filterCalls += 1;
-      const text = formatScoutSkillMatches(await filterTrustedSkills(params.query, trustedSkills, new GhResolver(), signal));
-      return { content: [{ type: "text", text }], details: { harness: "pi", scope: "trusted-skills" } };
+    parameters: rosterSpec.parameters,
+    execute: async (_id, params: unknown, signal, _update, context) => {
+      const effectiveSignal = rootToolSignal(parentRunId, signal);
+      const ticket = guard.begin(harborCustomToolNames.teamRoster, effectiveSignal);
+      try {
+      const project = childToolProject(context, cwd);
+      assertHarborCustomToolAccess(rosterSpec.name, { agent: scoutPlayer.name });
+      const call = validateHarborCustomToolArguments(rosterSpec.name, params);
+      if (call.kind !== "team-roster") throw new Error("invalid Agent Harbor team-roster dispatch");
+      const snapshot = formatHarborTeamRosterSnapshot(
+        [...rosterSnapshot.values()].map((definition) => ({
+          id: definition.name,
+          role: publicMetadataText(definition.description, 240) ?? "Role not disclosed",
+          tools: definition.tools,
+          skills: (definition.skills ?? []).map(({ name }) => name),
+          ...(definition.model ? { configuredModel: publicMetadataText(definition.model, 200) ?? "redacted" } : {}),
+          availability: runtime.activeProjectRuns(project)
+            .some((run) => run.kind !== "contractor" && run.agent === definition.name)
+            ? "busy" as const
+            : "ready" as const,
+        })),
+        call.query,
+      );
+      guard.succeed(ticket, { rosterComplete: snapshot.complete });
+      return { content: [{ type: "text", text: snapshot.text }], details: {
+        harness: "pi", deterministic: true, childCreated: false, rosterComplete: snapshot.complete,
+      } };
+      } catch (error) {
+        guard.fail(ticket, effectiveSignal);
+        throw publicPiToolFailure(error);
+      }
     },
   }, {
-    name: "harbor_join_player",
-    label: "Agent Harbor Join Player",
-    description: "Validate, register, and activate exactly one persistent player.",
+    name: filterSpec.name,
+    label: "Agent Harbor Skill Filter",
+    description: filterSpec.description,
     executionMode: "sequential",
-    parameters: {
-      type: "object",
-      properties: { definition: { type: "string", description: "Complete player definition serialized as JSON" } },
-      required: ["definition"], additionalProperties: false,
+    parameters: filterSpec.parameters,
+    execute: async (_id, params: unknown, signal, _update, context) => {
+      const effectiveSignal = rootToolSignal(parentRunId, signal);
+      const ticket = guard.begin(harborCustomToolNames.filterSkills, effectiveSignal);
+      try {
+      const project = childToolProject(context, cwd);
+      assertHarborCustomToolAccess(filterSpec.name, { agent: scoutPlayer.name });
+      const call = validateHarborCustomToolArguments(filterSpec.name, params);
+      if (call.kind !== "filter-skills") throw new Error("invalid Agent Harbor skill-filter dispatch");
+      const text = formatScoutSkillMatches(await filterTrustedSkills(call.query, trustedSkills, new GhResolver(), effectiveSignal));
+      guard.succeed(ticket);
+      return { content: [{ type: "text", text }], details: { harness: "pi", scope: "trusted-skills" } };
+      } catch (error) {
+        guard.fail(ticket, effectiveSignal);
+        throw publicPiToolFailure(error);
+      }
     },
-    execute: async (_id, params: { definition: string }, signal, _update, context) => {
-      if (joinCalls >= 1) throw new Error("talent scout may join at most one player per run");
-      joinCalls += 1;
-      const project = context?.cwd || cwd;
-      const text = await runDeterministicCommand("pi", "join", params.definition, project, signal);
-      const joined = JSON.parse(params.definition) as { name: string };
+  }, {
+    name: joinSpec.name,
+    label: "Agent Harbor Join Player",
+    description: joinSpec.description,
+    executionMode: "sequential",
+    parameters: joinSpec.parameters,
+    execute: async (_id, params: unknown, signal, _update, context) => {
+      const effectiveSignal = rootToolSignal(parentRunId, signal);
+      const ticket = guard.begin(harborCustomToolNames.joinPlayer, effectiveSignal);
+      try {
+      const project = childToolProject(context, cwd);
+      assertHarborCustomToolAccess(joinSpec.name, { agent: scoutPlayer.name });
+      const call = validateHarborCustomToolArguments(joinSpec.name, params);
+      if (call.kind !== "join-player") throw new Error("invalid Agent Harbor join-player dispatch");
+      const text = await runDeterministicCommand("pi", "join", call.definition, project, effectiveSignal);
+      const joined = JSON.parse(call.definition) as { name: string };
       onJoinCommitted(joined.name);
+      guard.succeed(ticket);
       return {
-        content: [{ type: "text", text: conciseLifecycleResult("join", params.definition, text) }],
+        content: [{ type: "text", text: conciseLifecycleResult("join", call.definition, text) }],
         details: { harness: "pi", action: "join", modelTokens: 0 },
       };
+      } catch (error) {
+        guard.fail(ticket, effectiveSignal);
+        throw publicPiToolFailure(error);
+      }
     },
     }];
+  };
+
+  const preparePlayerRoster = (
+    player: PlayerDefinition,
+    cwd: string,
+  ): ReadonlyMap<string, PlayerDefinition> => {
+    const rosterSnapshot = player.name === "team-lead" || player.name === scoutPlayer.name
+      ? new Map(listInvocablePlayers("pi", cwd)
+        .filter(({ id }) => id !== player.name &&
+          (player.name !== scoutPlayer.name || id !== "team-lead"))
+        .map(({ id, definition }) => [id, definition] as const))
+      : new Map<string, PlayerDefinition>();
+    if (player.name === "team-lead" && rosterSnapshot.size > 32) {
+      throw new Error(`team lead supports at most 32 enabled specialists; found ${rosterSnapshot.size}. Use /team, then /bench off <id...> to reduce the enabled roster`);
+    }
+    return rosterSnapshot;
   };
 
   const startPlayer = (
     player: PlayerDefinition,
     task: string,
     cwd: string,
-    model: Model | undefined,
-    thinkingLevel: ThinkingLevel,
+    sessionOptions: PiSessionOptions,
+    rosterSnapshot: ReadonlyMap<string, PlayerDefinition>,
     signal?: AbortSignal,
     onScoutJoinCommitted: (id: string) => void = () => {},
   ): StartedPiRun => {
+    requireBoundedArguments(task, maximumPiTaskBytes, "task");
     if (!task.trim()) throw new Error(`/${player.name} requires a non-empty task`);
     assertRootStartAllowed(cwd, player.name, playerKind(player));
-    const leadSnapshot = player.name === "team-lead"
-      ? new Map(listInvocablePlayers("pi", cwd)
-        .filter(({ id }) => id !== "team-lead")
-        .map(({ id, definition }) => [id, definition] as const))
-      : new Map<string, PlayerDefinition>();
-    if (leadSnapshot.size > 32) {
-      throw new Error(`team lead supports at most 32 active specialists; found ${leadSnapshot.size}. Use /team, then /bench off <id...> to reduce the active roster`);
-    }
-    const sessionOptions: PiSessionOptions = { ...(model === undefined ? {} : { model }), thinkingLevel };
+    const model = sessionOptions.model;
+    const thinkingLevel = sessionOptions.thinkingLevel;
     completionProject = cwd;
     const runId = runtime.begin({
       project: cwd,
@@ -524,16 +964,19 @@ export default function agentHarbor(pi: ExtensionAPI): void {
       kind: playerKind(player),
       task,
       ...(model === undefined ? {} : { model: modelIdentity(model) }),
-      thinking: thinkingLevel,
+      ...(model === undefined ? {} : {
+        modelSource: player.model === undefined ? "inherited" as const : "configured" as const,
+      }),
+      ...(thinkingLevel === undefined ? {} : { thinking: thinkingLevel }),
     });
     try {
       const customTools = player.name === "team-lead"
-        ? [createDelegateTool(cwd, sessionOptions, runId, leadSnapshot), createTeamRosterTool(cwd, leadSnapshot)]
-        : player.name === scoutPlayer.name ? createScoutTools(cwd, onScoutJoinCommitted) : [];
+        ? [createDelegateTool(cwd, sessionOptions, runId, rosterSnapshot), createTeamRosterTool(cwd, rosterSnapshot, runId)]
+        : player.name === scoutPlayer.name ? createScoutTools(cwd, onScoutJoinCommitted, rosterSnapshot, runId) : [];
       const additionalTools = customTools.map((tool) => tool.name);
       return {
         runId,
-        result: trackRootExecution(runId, signal, (effectiveSignal) =>
+        result: trackRootExecution(runId, cwd, signal, (effectiveSignal) =>
           executeRun({ ...player, task }, runId, cwd, sessionOptions, effectiveSignal, additionalTools, customTools)),
       };
     } catch (error) {
@@ -571,21 +1014,38 @@ export default function agentHarbor(pi: ExtensionAPI): void {
   ): void => {
     if (registered.has(id) && !refresh) return;
     const cost = id === "team-lead" ? "1 lead + up to 6 sequential specialist children" : "1 model child";
+    const publicDescription = publicMetadataText(display?.description ?? `Run active Agent Harbor player ${id}`, 240)
+      ?? `Run active Agent Harbor player ${id}`;
     pi.registerCommand(id, {
-      description: `${cost} · /${id} <task> · ${display?.description ?? `Run active Agent Harbor player ${id}`}`,
+      description: `${cost} · /${id} <task> · ${publicDescription}`,
       handler: async (args, ctx) => {
         completionProject = ctx.cwd;
         let run: StartedPiRun | undefined;
         try {
+          requireBoundedArguments(args, maximumPiTaskBytes, `/${id} task`);
           let player: PlayerDefinition;
           try { player = fixed ?? loadPiActivePlayer(ctx.cwd, id); }
           catch { throw new Error(`active managed player preflight failed: ${id}`); }
-          run = startPlayer(player, args, ctx.cwd, resolveConfiguredPiModel(player.model, ctx), pi.getThinkingLevel(), ctx.signal);
+          if (!args.trim()) throw new Error(`/${player.name} requires a non-empty task`);
+          const rosterSnapshot = preparePlayerRoster(player, ctx.cwd);
+          const model = resolveConfiguredPiModel(player.model, ctx);
+          const additionalProviderIds = player.name === "team-lead"
+            ? [...rosterSnapshot.values()].flatMap(({ model: route }) =>
+              route === undefined ? [] : [configuredPiProvider(route)])
+            : [];
+          const sessionOptions = await captureSessionOptions(
+            ctx,
+            model,
+            pi.getThinkingLevel(),
+            additionalProviderIds,
+          );
+          run = startPlayer(player, args, ctx.cwd, sessionOptions, rosterSnapshot, ctx.signal);
           const text = await trackUi(ctx, run);
           notify(ctx, `${text}${formatPiMissionReport(runtime, run.runId)}`, "info");
         } catch (error) {
-          if (run && runtime.get(run.runId)?.state === "cancelled") {
-            notify(ctx, `Cancelled.${formatPiMissionReport(runtime, run.runId)}`, "warning");
+          const state = run ? runtime.get(run.runId)?.state : undefined;
+          if (run && (state === "cancelled" || state === "cleaning")) {
+            notify(ctx, `${state === "cleaning" ? "Cancellation requested; provider cleanup is still settling." : "Cancelled."}${formatPiMissionReport(runtime, run.runId)}`, "warning");
           } else {
             failCommand(ctx, run
               ? `${humanError(id, error)}${formatPiMissionReport(runtime, run.runId)}`
@@ -599,6 +1059,7 @@ export default function agentHarbor(pi: ExtensionAPI): void {
 
   const syncActivePlayers = (project: string): void => {
     completionProject = project;
+    invalidateCompletionRoster(project);
     for (const id of listManagedActiveIds("pi", project)) {
       const display = bundledPlayers.get(id) ?? loadPiActivePlayer(project, id);
       registerPlayer(id, undefined, display, true);
@@ -608,58 +1069,59 @@ export default function agentHarbor(pi: ExtensionAPI): void {
 
   const teamCompletions = async (prefix: string) => {
     try {
-      const members = await collectPiTeamMembers(completionProject);
+      requireBoundedArguments(prefix, maximumPiFilterBytes, "/team completion prefix");
+      const members = await completionMembers(completionProject);
       const normalized = prefix.trim().toLowerCase();
       const activeRoots = runtime.activeProjectRuns(completionProject).filter((run) => run.parentRunId === undefined);
-      const items = [...members.map((member) => ({
-        value: member.id,
-        label: `${member.id} · ${member.kind}/${member.availability}`,
-        description: `${member.description} (${member.capacity})`,
-      })), ...(activeRoots.length ? [{ value: "stop all", label: "stop all · deterministic", description: "Stop all active Harbor root runs" }] : []),
+      const memberItems: Array<{ value: string; label: string; description: string }> = [];
+      for (const member of members) {
+        if (memberItems.length >= maximumPiCompletionItems) break;
+        const description = `${member.description} (${member.capacity})`;
+        if (!normalized || member.id.includes(normalized) || description.toLowerCase().includes(normalized)) {
+          memberItems.push({ value: member.id, label: `${member.id} · ${member.kind}/${member.availability}`, description });
+        }
+      }
+      const stopItems = [...(activeRoots.length ? [{ value: "stop all", label: "stop all · deterministic", description: "Stop all active Harbor root runs" }] : []),
       ...activeRoots.map((run) => ({
         value: `stop ${run.id}`,
         label: `stop ${run.id} · ${run.agent}`,
         description: `Stop ${run.agent}: ${run.task}`,
       }))].filter((item) => !normalized || item.value.includes(normalized) || item.description.toLowerCase().includes(normalized));
-      return items.length ? items : null;
+      const filterItems = [
+        { value: "status:bench", label: "status:bench · roster", description: "Show benched teammates" },
+        { value: "status:ready", label: "status:ready · roster", description: "Show teammates available now" },
+        { value: "status:working", label: "status:working · live", description: "Show teammates working now" },
+        { value: "kind:personal", label: "kind:personal · roster", description: "Show personal teammates" },
+        { value: "model:", label: "model:<name> · roster/activity", description: "Filter configured or observed model" },
+        { value: "task:", label: "task:<label> · activity", description: "Filter safe active or historical task labels" },
+      ].filter((item) => !normalized || item.value.startsWith(normalized) || item.description.toLowerCase().includes(normalized));
+      const items = normalized.startsWith("stop")
+        ? [...stopItems, ...memberItems, ...filterItems]
+        : normalized.includes(":")
+          ? [...filterItems, ...memberItems, ...stopItems]
+          : [...memberItems, ...stopItems, ...filterItems];
+      return items.length ? items.slice(0, maximumPiCompletionItems) : null;
     } catch { return null; }
   };
 
   const benchCompletions = async (prefix: string) => {
     try {
-      const members = await collectPiTeamMembers(completionProject);
-      const values = ["list", "on all", "off all", ...members
-        .filter((member) => member.kind === "bundled" || member.kind === "personal")
-        .flatMap((member) => [`list ${member.id}`, `on ${member.id}`, `off ${member.id}`])];
+      const members = await completionMembers(completionProject);
       const normalized = prefix.trim().toLowerCase();
-      const items = values.filter((value) => !normalized || value.startsWith(normalized))
-        .map((value) => ({ value, label: value }));
+      const items: Array<{ value: string; label: string }> = [];
+      const append = (value: string): void => {
+        if (items.length >= maximumPiCompletionItems) return;
+        if (!normalized || value.startsWith(normalized)) items.push({ value, label: value });
+      };
+      for (const value of ["list", "on all", "off all"]) append(value);
+      for (const member of members) {
+        if (items.length >= maximumPiCompletionItems) break;
+        if (member.kind !== "bundled" && member.kind !== "personal") continue;
+        for (const action of ["list", "on", "off"]) append(`${action} ${member.id}`);
+      }
       return items.length ? items : null;
     } catch { return null; }
   };
-
-  pi.registerTool({
-    name: "harbor_contract",
-    label: "Agent Harbor Contract",
-    description: "Run exactly one invocation-scoped Agent Harbor child through the Pi SDK; returns child evidence only.",
-    executionMode: "sequential",
-    parameters: {
-      type: "object",
-      properties: { definition: { type: "string", description: "Complete /contract JSON object" } },
-      required: ["definition"],
-      additionalProperties: false,
-    },
-    execute: async (_id: string, params: { definition: string }, signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) => {
-      const definition = parseContractDefinition(params.definition);
-      const options = currentSessionOptions(resolveConfiguredPiModel(definition.model, ctx));
-      const run = startDefinition(definition, ctx.cwd, options, "contractor", signal);
-      const text = await trackUi(ctx, run);
-      return {
-        content: [{ type: "text", text }],
-        details: { harness: "pi", runId: run.runId, usage: runtime.missionUsage(run.runId) },
-      };
-    },
-  });
 
   pi.registerCommand("team", {
     description: `0 model tokens · ${commandSyntax.team} · Show roster, live work, model, thinking, native usage, and last mission.`,
@@ -667,21 +1129,23 @@ export default function agentHarbor(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       completionProject = ctx.cwd;
       try {
+        requireBoundedArguments(args, maximumPiFilterBytes, "/team arguments");
         const value = args.trim();
         if (value === "stop" || value.startsWith("stop ")) {
           const selector = value.slice("stop".length).trim();
           if (!selector) throw new Error("usage: /team stop <run-id|all>");
-          const stopped = stopProjectRoots(ctx.cwd, selector);
-          if (!stopped.length && selector === "all") {
+          const result = stopProjectRoots(ctx.cwd, selector);
+          const matched = result.stopped.length + result.alreadyStopping.length + result.unavailable.length;
+          if (!matched && selector === "all") {
             notify(ctx, stopResult("No Agent Harbor work is active in this project."), "info");
             return;
           }
-          if (!stopped.length) throw new Error(`no active Harbor root matches ${selector}`);
-          notify(ctx, stopResult(`Stopping ${stopped.length} root run(s): ${stopped.join(", ")}.`), "warning");
+          if (!matched) throw new Error(`no active Harbor root matches ${selector}`);
+          notify(ctx, stopResult(stopProjectRootsMessage(result)), "warning");
           return;
         }
         const result = value === "--help" || value === "help"
-          ? wrapPlainText(`${commandHelp("team")}\nFilters match member ID, role, description, tool, skill, configured/observed model, thinking, state, safe task label, and run ID.\nTUI: Alt+H stops all active Harbor work. RPC: /team stop <run-id|all>.`)
+          ? wrapPlainText(`${commandHelp("team")}\nChoose one exact teammate: /<id> <task> (or /player <id> <task> in hosts that expose it).\nSet a personal model with /join JSON model:"provider/model"; add replace:true to change it.\nDisposable work: /contract <json> (exactly 1 model child). Recruit: /scout <need> (1 recruiter model child).\nTokens, AI credits, and max-output are observations only when the host reports them; Agent Harbor does not simulate a hard per-run token cap.\nAgent Harbor limits 32 concurrent roots per project and 6 sequential team-lead delegations per prompt.\nField filters: member:/id: · kind:/role: · description: · capability:/tool:/skill: · status:/state: · model: · thinking: · task: · run:.\nExamples: /team status:working · /team member:reviewer · /team model:gpt.\nTUI: Alt+H stops all active Harbor work. RPC: /team stop <run-id|all>.`)
           : await formatPiTeamView(ctx.cwd, runtime, { filter: value, title: "team", ...teamViewRuntimeOptions(ctx) });
         notify(ctx, `${result}${discoveryWarning ? `\n\nWarning: ${discoveryWarning}` : ""}`, "info");
       } catch (error) { failCommand(ctx, humanError("team", error, true)); }
@@ -697,6 +1161,7 @@ export default function agentHarbor(pi: ExtensionAPI): void {
         handler: async (args, ctx) => {
           completionProject = ctx.cwd;
           try {
+            requireBoundedArguments(args, maximumPiFilterBytes, "/bench arguments");
             if (["help", "--help"].includes(args.trim())) {
               notify(ctx, `${commandHelp("bench")}\n${benchAllNote}\nUse /team for live work and mission accounting.`, "info");
               return;
@@ -736,13 +1201,17 @@ export default function agentHarbor(pi: ExtensionAPI): void {
           completionProject = ctx.cwd;
           let run: StartedPiRun | undefined;
           try {
+            requireBoundedArguments(args, maximumPiDefinitionBytes, "/contract definition");
             const definition = parseContractDefinition(args);
-            run = startDefinition(definition, ctx.cwd, currentSessionOptions(resolveConfiguredPiModel(definition.model, ctx)), "contractor", ctx.signal);
+            const model = resolveConfiguredPiModel(definition.model, ctx);
+            const sessionOptions = await captureSessionOptions(ctx, model, pi.getThinkingLevel());
+            run = startDefinition(definition, ctx.cwd, sessionOptions, "contractor", ctx.signal);
             const text = await trackUi(ctx, run);
             notify(ctx, `${text}${formatPiMissionReport(runtime, run.runId)}`, "info");
           } catch (error) {
-            if (run && runtime.get(run.runId)?.state === "cancelled") {
-              notify(ctx, `Cancelled.${formatPiMissionReport(runtime, run.runId)}`, "warning");
+            const state = run ? runtime.get(run.runId)?.state : undefined;
+            if (run && (state === "cancelled" || state === "cleaning")) {
+              notify(ctx, `${state === "cleaning" ? "Cancellation requested; provider cleanup is still settling." : "Cancelled."}${formatPiMissionReport(runtime, run.runId)}`, "warning");
             } else {
               failCommand(ctx, run
                 ? `${humanError(name, error)}${formatPiMissionReport(runtime, run.runId)}`
@@ -765,7 +1234,23 @@ export default function agentHarbor(pi: ExtensionAPI): void {
       handler: async (args, ctx) => {
         completionProject = ctx.cwd;
         try {
+          requireBoundedArguments(
+            args,
+            name === "join" ? maximumPiDefinitionBytes : maximumPiFilterBytes,
+            `/${name} arguments`,
+          );
           if (name === "retire" && !args.trim()) throw new Error("usage: /retire <personal-id>");
+          if (name === "retire") {
+            const id = args.trim();
+            const busy = runtime.activeProjectRuns(ctx.cwd).find((run) =>
+              run.kind !== "contractor" && run.agent === id);
+            if (busy) {
+              throw new Error(
+                `cannot retire ${id} while it is ${busy.state} in ${busy.rootRunId}; ` +
+                `use /team stop ${busy.rootRunId}, then wait for cleanup to settle`,
+              );
+            }
+          }
           const result = await runDeterministicCommand(
             "pi",
             name,
@@ -797,50 +1282,74 @@ export default function agentHarbor(pi: ExtensionAPI): void {
       let failure: unknown;
       let failed = false;
       let refresh = "";
+      let handlerSettled = false;
+      const reconcileCommittedJoin = (id: string): void => {
+        joinedPlayer = id;
+        let reconciled = true;
+        try { syncActivePlayers(ctx.cwd); }
+        catch {
+          reconciled = false;
+          discoveryWarning = metadataRefreshWarning;
+          refresh = `\nWarning: ${metadataRefreshWarning}`;
+        }
+        if (handlerSettled) {
+          safeUi(() => notify(ctx, wrapPlainText(
+            `Roster commit preserved: ${id} is joined and active in this project. ` +
+            (reconciled
+              ? "The recruiter UI had already settled, so Agent Harbor reconciled the alias after commit."
+              : "The recruiter UI had already settled; the commit is durable, but alias metadata refresh failed.") +
+            refresh,
+          ), "warning"));
+        }
+      };
       try {
+        requireBoundedArguments(args, maximumPiTaskBytes, "/scout task");
+        if (!args.trim()) throw new Error(`/${scoutPlayer.name} requires a non-empty task`);
+        const rosterSnapshot = preparePlayerRoster(scoutPlayer, ctx.cwd);
+        const model = resolveConfiguredPiModel(undefined, ctx);
+        const sessionOptions = await captureSessionOptions(ctx, model, pi.getThinkingLevel());
         run = startPlayer(
-          scoutPlayer, args, ctx.cwd, ctx.model, pi.getThinkingLevel(), ctx.signal,
-          (id) => { joinedPlayer = id; },
+          scoutPlayer, args, ctx.cwd, sessionOptions, rosterSnapshot, ctx.signal,
+          reconcileCommittedJoin,
         );
         text = await trackUi(ctx, run);
       } catch (error) { failed = true; failure = error; }
-      finally {
-        if (joinedPlayer) {
-          try { syncActivePlayers(ctx.cwd); }
-          catch { discoveryWarning = metadataRefreshWarning; refresh = `\nWarning: ${metadataRefreshWarning}`; }
-        }
-      }
       const committed = joinedPlayer
         ? `\nRoster commit preserved: ${joinedPlayer} is joined and active in this project.${failed ? " The recruiter child ended after that commit." : ""}`
         : "";
-      if (failed) {
-        if (run && runtime.get(run.runId)?.state === "cancelled") {
-          notify(ctx, wrapPlainText(`Cancelled.${committed}${formatPiMissionReport(runtime, run.runId)}${refresh}`), "warning");
-        } else {
-          failCommand(ctx, wrapPlainText(run
-            ? `${humanError("scout", failure)}${committed}${formatPiMissionReport(runtime, run.runId)}${refresh}`
-            : modelPreflightError("scout", failure)));
+      try {
+        if (failed) {
+          const state = run ? runtime.get(run.runId)?.state : undefined;
+          if (run && (state === "cancelled" || state === "cleaning")) {
+            const status = state === "cleaning" ? "Cancellation requested; provider cleanup is still settling." : "Cancelled.";
+            notify(ctx, wrapPlainText(`${status}${committed}${formatPiMissionReport(runtime, run.runId)}${refresh}`), "warning");
+          } else {
+            failCommand(ctx, wrapPlainText(run
+              ? `${humanError("scout", failure)}${committed}${formatPiMissionReport(runtime, run.runId)}${refresh}`
+              : modelPreflightError("scout", failure)));
+          }
+          return;
         }
-        return;
+        notify(ctx, wrapPlainText(`${text ?? "Scout completed."}${committed}${run ? formatPiMissionReport(runtime, run.runId) : ""}${refresh}`), "info");
+      } finally {
+        handlerSettled = true;
       }
-      notify(ctx, wrapPlainText(`${text ?? "Scout completed."}${committed}${run ? formatPiMissionReport(runtime, run.runId) : ""}${refresh}`), "info");
     },
   });
   registered.add("scout");
   pi.registerShortcut?.("alt+h", {
     description: "Stop active Agent Harbor work",
     handler: (ctx) => {
-      const stopped = stopProjectRoots(ctx.cwd);
-      notify(ctx, stopResult(stopped.length
-        ? `Stopping ${stopped.length} Agent Harbor root run(s): ${stopped.join(", ")}.`
-        : "No Agent Harbor work is active in this project."), stopped.length ? "warning" : "info");
+      const result = stopProjectRoots(ctx.cwd);
+      const matched = result.stopped.length + result.alreadyStopping.length + result.unavailable.length;
+      notify(ctx, stopResult(stopProjectRootsMessage(result)), matched ? "warning" : "info");
     },
   });
   pi.on?.("session_shutdown", async () => {
     for (const controller of rootAbortControllers.values()) {
       if (!controller.signal.aborted) controller.abort(new DOMException("Pi session shutdown", "AbortError"));
     }
-    await settlePiRootPromises([...rootPromises.values()]);
+    await settlePiRootPromises([...rootSettlements.values()]);
   });
   try { syncActivePlayers(process.cwd()); }
   catch { discoveryWarning = "Active alias discovery failed; fixed controls remain available. Inspect /team, then run /reload after repairing the roster."; }

@@ -5,10 +5,18 @@ type PiSdk = typeof import("@earendil-works/pi-coding-agent");
 type PiModel = import("@earendil-works/pi-coding-agent").Model;
 type PiToolDefinition = import("@earendil-works/pi-coding-agent").ToolDefinition;
 type PiThinkingLevel = import("@earendil-works/pi-coding-agent").ThinkingLevel;
+type PiProviderConfig = import("@earendil-works/pi-coding-agent").ProviderConfig;
 /** Optional host model and reasoning settings inherited by a Pi child. */
+export interface PiProviderProjection {
+    readonly id: string;
+    readonly config?: PiProviderConfig;
+    /** Present only for a host credential whose public auth status source is runtime. */
+    readonly runtimeKey?: string;
+}
 export interface PiSessionOptions {
     readonly model?: PiModel;
     readonly thinkingLevel?: PiThinkingLevel;
+    readonly providerProjections?: readonly PiProviderProjection[];
 }
 /** Executes each contract in one isolated, in-memory Pi SDK session. */
 export declare class PiOrchestrator implements Orchestrator {

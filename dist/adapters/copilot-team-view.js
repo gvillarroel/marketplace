@@ -1,16 +1,20 @@
 /** Deterministic Copilot team inventory and process-local activity views. */
-import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { loadManagedActivePlayer } from "../core/active.js";
 import { bundledPlayers, rolePlayers, scoutPlayer } from "../core/defaults.js";
 import { isOwnedProfile, validatePlayer } from "../core/lifecycle.js";
 import { decodePlayer, harnessSpec, isCanonicalPlayerProfile } from "../core/profiles.js";
+import { publicMetadataText } from "../core/public-metadata.js";
+import { readSafeBoundedProfile } from "../core/safe-profile.js";
 import { wrapPlainLines } from "../core/text-layout.js";
 import { runDeterministicCommand } from "./direct.js";
 import { defaultHome } from "./shared.js";
 import { listCopilotActiveProfileIds, resolveCopilotPlayer, } from "./copilot-coordinator.js";
 import { copilotPublicIdentifier, formatCopilotElapsed, formatCopilotMissionDetails, formatCopilotModel, formatCopilotNativeTelemetry, formatCopilotReasoning, formatCopilotRunDetails, formatCopilotTokenCount, } from "./copilot-team-runtime.js";
 export const maximumVisibleCopilotRosterMembers = 32;
+export const maximumVisibleCopilotOverviewRosterMembers = 12;
+export const maximumVisibleCopilotOverviewRuns = 4;
+export const maximumCopilotTeamOverviewLines = 30;
 const personalProfileReadConcurrency = 8;
 function parseBenchRows(output) {
     const lines = output.split(/\r?\n/gu).map((line) => line.trim()).filter(Boolean);
@@ -35,12 +39,20 @@ function memberCapacity(definition, id = definition.name) {
         capabilities.push(`skill:${skill.name}`);
     return capabilities.join(", ");
 }
+function memberTools(definition) {
+    return [...definition.tools];
+}
+function memberSkills(definition) {
+    return (definition.skills ?? []).map(({ name }) => name);
+}
 async function registeredPersonalDefinition(project, id) {
     try {
         const root = resolve(project);
         const spec = harnessSpec("copilot", defaultHome("copilot"), root);
         const path = join(spec.home, spec.registrationDir, `${id}${spec.extension}`);
-        const content = await readFile(path, "utf8");
+        const content = await readSafeBoundedProfile(spec.home, path);
+        if (!content)
+            return undefined;
         if (!isOwnedProfile(content, id, "personal"))
             return undefined;
         const definition = validatePlayer(decodePlayer(content, id));
@@ -86,6 +98,8 @@ export async function collectCopilotTeamMembers(project, native) {
             availability: "ready",
             description: definition.description,
             capacity: memberCapacity(definition, id),
+            tools: memberTools(definition),
+            skills: memberSkills(definition),
             ...(definition.model ? { configuredModel: definition.model } : {}),
         });
     }
@@ -95,6 +109,8 @@ export async function collectCopilotTeamMembers(project, native) {
         availability: "ready",
         description: scoutPlayer.description,
         capacity: "skill discovery, recruitment",
+        tools: memberTools(scoutPlayer),
+        skills: memberSkills(scoutPlayer),
         ...(scoutPlayer.model ? { configuredModel: scoutPlayer.model } : {}),
     });
     for (const row of rows.filter(({ roster }) => roster === "bundled")) {
@@ -107,6 +123,8 @@ export async function collectCopilotTeamMembers(project, native) {
             availability: row.state === "on" ? "ready" : row.state,
             description: definition.description,
             capacity: memberCapacity(definition),
+            tools: memberTools(definition),
+            skills: memberSkills(definition),
             ...(definition.model ? { configuredModel: definition.model } : {}),
             ...(row.state === "stale" ? { repairKind: "bundled-profile" } : {}),
         });
@@ -124,6 +142,8 @@ export async function collectCopilotTeamMembers(project, native) {
                 description: definition?.description
                     ?? (row.state === "conflict" ? "Unmanaged collision; metadata unavailable" : "Managed profile needs repair"),
                 capacity: definition ? memberCapacity(definition) : "unavailable until repaired",
+                tools: definition ? memberTools(definition) : [],
+                skills: definition ? memberSkills(definition) : [],
                 ...(definition?.model ? { configuredModel: definition.model } : {}),
                 ...(row.state === "stale" ? {
                     repairKind: definition ? "personal-active" : "personal-registration",
@@ -133,15 +153,100 @@ export async function collectCopilotTeamMembers(project, native) {
         members.push(...batch);
     }
     const activeProfileIds = native ? listCopilotActiveProfileIds(project) : [];
-    return members.map((member) => verifyNativeAvailability(member, project, native, activeProfileIds));
+    return members.map((member) => verifyNativeAvailability(member, project, native, activeProfileIds))
+        .map((member) => ({
+        ...member,
+        description: publicMetadataText(member.description, 500) ?? "Description unavailable",
+        capacity: publicMetadataText(member.capacity, 500) ?? "unavailable",
+        ...(member.configuredModel === undefined
+            ? {}
+            : { configuredModel: publicMetadataText(member.configuredModel, 200) ?? "redacted" }),
+    }));
 }
-function memberMatches(member, filter) {
-    return !filter || [member.id, member.kind, member.availability, member.description, member.capacity, member.configuredModel ?? ""]
-        .some((value) => value.toLowerCase().includes(filter));
+const copilotTeamFilterFields = new Map([
+    ["tool", "tool"],
+    ["capability", "capability"],
+    ["skill", "skill"],
+    ["status", "status"],
+    ["state", "status"],
+    ["model", "model"],
+    ["reasoning", "reasoning"],
+    ["task", "task"],
+    ["run", "run"],
+    ["id", "member"],
+    ["member", "member"],
+    ["kind", "kind"],
+    ["role", "kind"],
+    ["description", "description"],
+]);
+function parseCopilotTeamFilter(filter) {
+    const separator = filter.indexOf(":");
+    if (separator < 0)
+        return { value: filter };
+    const field = copilotTeamFilterFields.get(filter.slice(0, separator).trim());
+    return field
+        ? { field, value: filter.slice(separator + 1).trim() }
+        : { value: filter };
+}
+function includesFilter(values, filter) {
+    return Boolean(filter) && values.some((value) => value?.toLowerCase().includes(filter));
+}
+function equalsFilter(values, filter) {
+    return Boolean(filter) && values.some((value) => value?.toLowerCase() === filter);
+}
+function memberMatches(member, filter, effectiveState) {
+    if (!filter)
+        return true;
+    const query = parseCopilotTeamFilter(filter);
+    if (query.field === "tool")
+        return includesFilter(member.tools ?? [], query.value);
+    if (query.field === "capability")
+        return includesFilter([member.capacity], query.value);
+    if (query.field === "skill")
+        return includesFilter(member.skills ?? [], query.value);
+    if (query.field === "status")
+        return equalsFilter([effectiveState], query.value);
+    if (query.field === "model")
+        return includesFilter([member.configuredModel], query.value);
+    if (query.field === "member")
+        return includesFilter([member.id], query.value);
+    if (query.field === "kind")
+        return equalsFilter([member.kind], query.value);
+    if (query.field === "description")
+        return includesFilter([member.description], query.value);
+    if (query.field)
+        return false;
+    return includesFilter([
+        member.id,
+        member.description,
+        member.capacity,
+        member.configuredModel,
+    ], query.value) || equalsFilter([member.kind, member.availability], query.value);
 }
 function activityMatches(run, filter) {
-    return !filter || [run.id, run.agent, run.kind, run.state, run.task, formatCopilotReasoning(run), formatCopilotModel(run)]
-        .some((value) => value.toLowerCase().includes(filter));
+    if (!filter)
+        return true;
+    const query = parseCopilotTeamFilter(filter);
+    const models = [run.model, ...run.observedModels];
+    const reasoning = [run.reasoningEffort, ...run.observedReasoningEfforts];
+    if (query.field === "status")
+        return equalsFilter([run.state], query.value);
+    if (query.field === "model")
+        return includesFilter(models, query.value);
+    if (query.field === "reasoning")
+        return equalsFilter(reasoning, query.value);
+    if (query.field === "task")
+        return includesFilter([run.task], query.value);
+    if (query.field === "run")
+        return includesFilter([run.id], query.value);
+    if (query.field === "member")
+        return includesFilter([run.agent], query.value);
+    if (query.field === "kind")
+        return equalsFilter([run.kind], query.value);
+    if (query.field)
+        return false;
+    return includesFilter([run.agent, run.task, run.id, ...models], query.value)
+        || equalsFilter([run.kind, run.state, ...reasoning], query.value);
 }
 function availabilitySymbol(state) {
     if (state === "ready")
@@ -159,6 +264,37 @@ function renderActivity(runs, hasOtherActiveWork) {
         `  ${formatCopilotModel(run)} · ${formatCopilotReasoning(run)} · ${formatCopilotNativeTelemetry(run, false)}`,
     ]);
 }
+function compactRunTelemetry(run) {
+    const uncertainIdentity = run.usageIdentityTruncated || run.usageIdentityAmbiguous;
+    const total = formatCopilotTokenCount(run.usage.total, run.usageLowerBounds.includes("total") || run.usageAttributionUnverified || uncertainIdentity);
+    if (run.usageAttributionUnverified)
+        return `tok ${total} (unverified)`;
+    if (run.usageAggregateConflict)
+        return `tok ${total} (conflict)`;
+    const calls = run.nativeCalls === undefined
+        ? "calls —"
+        : `calls ${formatCopilotTokenCount(run.nativeCalls, uncertainIdentity)}`;
+    const identityNote = run.usageIdentityTruncated ? " (capped)" : run.usageIdentityAmbiguous ? " (ambiguous)" : "";
+    return `${calls} · tok ${total}${identityNote}`;
+}
+function compactRunLine(run) {
+    const agent = copilotPublicIdentifier(run.agent, 24) ?? "unknown";
+    const id = copilotPublicIdentifier(run.id, 16) ?? "unknown";
+    const mixedModels = run.observedModels.length > 1 || run.observedModelsTruncated;
+    const rawModel = mixedModels ? "mixed models" : run.model ?? "model unknown";
+    const model = copilotPublicIdentifier(rawModel, 16) ?? "model unknown";
+    const source = mixedModels ? "observed" : run.modelSource ?? "unobserved";
+    return `${run.parentRunId ? "↳" : "●"} ${agent} · ${id} · ${run.state} · ${formatCopilotElapsed(run.elapsedMs)} · ${model} (${source}) · ${compactRunTelemetry(run)}`;
+}
+function renderCompactRuns(runs, omittedLabel) {
+    const shown = runs.slice(0, maximumVisibleCopilotOverviewRuns).map(compactRunLine);
+    return [
+        ...shown,
+        ...(runs.length > maximumVisibleCopilotOverviewRuns
+            ? [`+${runs.length - maximumVisibleCopilotOverviewRuns} ${omittedLabel} omitted; narrow with /team run:<id> or member:<id>.`]
+            : []),
+    ];
+}
 function renderRoster(members, activeMemberStates, suppressNativeDiscoveryRepair = false) {
     return members.flatMap((member) => {
         const activity = activeMemberStates.get(member.id) ?? member.availability;
@@ -171,9 +307,9 @@ function renderRoster(members, activeMemberStates, suppressNativeDiscoveryRepair
                     : member.repairKind === "native-discovery" && !suppressNativeDiscoveryRepair
                         ? ["  Repair: reload the Copilot session and run /team again before delegation."]
                         : [];
-        const description = copilotPublicIdentifier(member.description, 500) ?? "Description unavailable";
-        const capacity = copilotPublicIdentifier(member.capacity, 500) ?? "unavailable";
-        const model = copilotPublicIdentifier(member.configuredModel, 200);
+        const description = publicMetadataText(member.description, 500) ?? "Description unavailable";
+        const capacity = publicMetadataText(member.capacity, 500) ?? "unavailable";
+        const model = publicMetadataText(member.configuredModel ?? "", 200);
         return [
             `${availabilitySymbol(member.availability)} ${member.id}${member.id === scoutPlayer.name ? " (/scout)" : ""} · ${member.kind} · ${activity}`,
             `  ${description}`,
@@ -181,6 +317,31 @@ function renderRoster(members, activeMemberStates, suppressNativeDiscoveryRepair
             ...repair,
         ];
     });
+}
+function renderCompactRoster(members, activeMemberStates) {
+    const shown = members.slice(0, maximumVisibleCopilotOverviewRosterMembers).map((member) => {
+        const activity = activeMemberStates.get(member.id) ?? member.availability;
+        return `${availabilitySymbol(member.availability)} ${member.id}${member.id === scoutPlayer.name ? " (/scout)" : ""} · ${member.kind} · ${activity}`;
+    });
+    return [
+        ...shown,
+        ...(members.length > maximumVisibleCopilotOverviewRosterMembers
+            ? [`+${members.length - maximumVisibleCopilotOverviewRosterMembers} more roster members; narrow with /team member:<id>.`]
+            : []),
+    ];
+}
+function renderCompactMission(runtime, rootRunId, runs) {
+    const root = runs.find((run) => run.parentRunId === undefined) ?? runs[0];
+    if (!root)
+        return ["No completed mission snapshot is available."];
+    const attributionUnverified = runtime.missionUsageAttributionUnverified(rootRunId);
+    const aggregateConflict = runtime.missionUsageAggregateConflict(rootRunId);
+    const total = runtime.missionUsage(rootRunId).total;
+    const lowerBound = runtime.missionUsageLowerBounds(rootRunId).includes("total") || attributionUnverified;
+    return [
+        compactRunLine(root),
+        `Mission: ${runs.length} tracked run${runs.length === 1 ? "" : "s"} · total ${formatCopilotTokenCount(total, lowerBound)} native tokens${attributionUnverified ? " · attribution unverified" : ""}${aggregateConflict ? " · token conflict" : ""} · details: /team run:${root.id}.`,
+    ];
 }
 function compactMemberIds(members, limit = 12) {
     if (!members.length)
@@ -202,6 +363,20 @@ function renderLeadAccess(members, working, selectionGate) {
         ...(busy.length ? [`Busy (double-booking blocked): ${compactMemberIds(busy)}`] : []),
         `SDLC coverage: ${bundled.filter((member) => member.availability === "ready").length}/${bundled.length} enabled · ${benched.length} benched`,
         ...(benched.length ? [`Enable SDLC: /bench on ${benched.map(({ id }) => id).join(" ")}`] : []),
+        ...(unhealthy.length ? [`Repair before delegation: ${compactMemberIds(unhealthy)}`] : []),
+    ];
+}
+function renderCompactLeadAccess(members, working, selectionGate) {
+    const specialists = members.filter((member) => member.id !== "team-lead" && member.kind !== "manager" && member.kind !== "utility" && member.availability === "ready");
+    const busy = specialists.filter((member) => working.has(member.id));
+    const eligibleNow = selectionGate ? [] : specialists.filter((member) => !working.has(member.id));
+    const bundled = members.filter((member) => member.kind === "bundled");
+    const benched = bundled.filter((member) => member.availability === "bench");
+    const unhealthy = members.filter((member) => member.availability !== "ready" && member.availability !== "bench");
+    return [
+        `Enabled specialists: ${specialists.length} · 6 sequential delegations · Can delegate now: ${compactMemberIds(eligibleNow)}`,
+        ...(busy.length ? [`Busy (double-booking blocked): ${compactMemberIds(busy)}`] : []),
+        `SDLC coverage: ${bundled.filter((member) => member.availability === "ready").length}/${bundled.length} enabled · ${benched.length} benched${benched.length ? " · enable: /bench on <id...>" : ""}`,
         ...(unhealthy.length ? [`Repair before delegation: ${compactMemberIds(unhealthy)}`] : []),
     ];
 }
@@ -263,14 +438,16 @@ export async function formatCopilotTeamView(project, runtime, options = {}) {
             rootOrder.set(run.rootRunId, run.sequence);
     }
     const allActive = unorderedActive.sort((left, right) => rootOrder.get(left.rootRunId) - rootOrder.get(right.rootRunId) || left.sequence - right.sequence);
-    const members = allMembers.filter((member) => memberMatches(member, filter));
+    const activeMemberStates = new Map(allActive
+        .filter((run) => run.kind !== "contractor")
+        .map((run) => [run.agent, run.state]));
+    const members = allMembers.filter((member) => memberMatches(member, filter, activeMemberStates.get(member.id) ?? member.availability));
     const activity = allActive.filter((run) => activityMatches(run, filter));
     const latest = runtime.latestRoot(project);
     const latestMission = !allActive.length && latest ? runtime.mission(latest.rootRunId) : [];
     const historicalMatches = latestMission.filter((run) => activityMatches(run, filter));
-    const activeMemberStates = new Map(allActive
-        .filter((run) => run.kind !== "contractor")
-        .map((run) => [run.agent, run.state]));
+    const richDetails = options.title === "bench"
+        || (Boolean(filter) && members.length + activity.length + historicalMatches.length <= 2);
     const working = new Set(activeMemberStates.keys());
     const activeChild = allActive.find((run) => run.parentRunId !== undefined);
     const activeNonManagerRoot = allActive.find((run) => run.parentRunId === undefined && run.kind !== "manager");
@@ -288,7 +465,7 @@ export async function formatCopilotTeamView(project, runtime, options = {}) {
             ? ["Native agent discovery/coordinator is not ready; no teammate can be selected. Reload the Copilot session."]
             : [];
     if (!members.length && !activity.length && !historicalMatches.length) {
-        const shown = copilotPublicIdentifier(options.filter?.trim(), 80) || "the requested filter";
+        const shown = publicMetadataText(options.filter?.trim() ?? "", 80) || "the requested filter";
         const projectName = copilotPublicIdentifier(runtime.projectName(project), 80) ?? "project";
         return wrapPlainLines([
             `Agent Harbor Copilot ${(options.title ?? "team")} · ${projectName} · 0 model tokens`,
@@ -310,35 +487,134 @@ export async function formatCopilotTeamView(project, runtime, options = {}) {
         .join(" · ");
     const nextModel = copilotPublicIdentifier(options.nextModel, 200);
     const nextReasoning = copilotPublicIdentifier(options.nextReasoning, 80);
-    const hostDefault = `Host/session default: ${nextModel ? `${nextModel} (inherited)` : "unknown/default (unobserved)"} · reasoning ${nextReasoning ?? "unknown"}`;
+    const unobservedModel = options.nextModelUnreported ? "no model reported (unobserved)" : "unknown/default (unobserved)";
+    const hostDefault = `Host/session default: ${nextModel ? `${nextModel} (inherited)` : unobservedModel} · reasoning ${nextReasoning ?? "unknown"}`;
+    const compactHostDefault = `Host default: ${nextModel ? `${nextModel} (inherited)` : unobservedModel} · reasoning ${nextReasoning ?? "unknown"}`;
     const lines = [
         `Agent Harbor Copilot ${(options.title ?? "team")} · ${copilotPublicIdentifier(runtime.projectName(project), 80) ?? "project"} · 0 model tokens`,
         `${filter ? "Overall Team" : "Team"}: ${ready} ready · ${allActive.length} active${activeBreakdown ? ` (${activeBreakdown})` : ""} · ${benched} benched · ${unhealthy} unhealthy`,
-        `${hostDefault}${options.nextMaxOutputTokens === undefined ? "" : ` · model max output per response ${formatCopilotTokenCount(options.nextMaxOutputTokens)} tokens`}`,
+        `${richDetails ? hostDefault : compactHostDefault}${options.nextMaxOutputTokens === undefined
+            ? ""
+            : richDetails
+                ? ` · model max output per response ${formatCopilotTokenCount(options.nextMaxOutputTokens)} tokens`
+                : ` · max output ${formatCopilotTokenCount(options.nextMaxOutputTokens)} tokens`}`,
         ...globalWarnings,
         ...(selectionGate ? [`Selection gate: ${selectionGate}.`] : []),
         "",
         filter ? "LEAD ACCESS · OVERALL" : "LEAD ACCESS",
-        ...renderLeadAccess(allMembers, working, selectionGate),
+        ...(richDetails
+            ? renderLeadAccess(allMembers, working, selectionGate)
+            : renderCompactLeadAccess(allMembers, working, selectionGate)),
         "",
         "ACTIVITY",
-        ...renderActivity(activity, allActive.length > 0),
+        ...(richDetails
+            ? renderActivity(activity, allActive.length > 0)
+            : activity.length
+                ? renderCompactRuns(activity, filter ? "matching active runs" : "active runs")
+                : [allActive.length ? "No active work matches this filter." : "No one is working right now."]),
         "",
         "ROSTER",
         ...(members.length
-            ? [
-                ...renderRoster(members.slice(0, maximumVisibleCopilotRosterMembers), activeMemberStates, globalNativeDiscoveryFailure),
-                ...(members.length > maximumVisibleCopilotRosterMembers
-                    ? [`+${members.length - maximumVisibleCopilotRosterMembers} more roster members; use /team <filter> to narrow the view.`]
-                    : []),
-            ]
+            ? richDetails
+                ? [
+                    ...renderRoster(members.slice(0, maximumVisibleCopilotRosterMembers), activeMemberStates, globalNativeDiscoveryFailure),
+                    ...(members.length > maximumVisibleCopilotRosterMembers
+                        ? [`+${members.length - maximumVisibleCopilotRosterMembers} more roster members; use /team <filter> to narrow the view.`]
+                        : []),
+                ]
+                : renderCompactRoster(members, activeMemberStates)
             : ["No roster member matches this filter."]),
     ];
     if (!allActive.length && latest && historicalMatches.length) {
-        lines.push("", filter ? "LAST MISSION · MATCHING MEMBERS" : "LAST MISSION", ...(filter
-            ? [...formatCopilotRunDetails(historicalMatches), "Filtered history · run /team without a filter for full mission accounting."]
-            : formatCopilotMissionDetails(runtime, latest.rootRunId)));
+        lines.push("", filter ? "LAST MISSION · MATCHING MEMBERS" : "LAST MISSION", ...(richDetails
+            ? [...formatCopilotRunDetails(historicalMatches), "Filtered history · run /team without a filter for mission summary."]
+            : filter
+                ? renderCompactRuns(historicalMatches, "matching historical runs")
+                : renderCompactMission(runtime, latest.rootRunId, latestMission)));
     }
-    lines.push("", "Commands: /team [filter] · /team stop <run-id|all> · /player <id> <task> · /contract <json> · /bench list [filter] · /bench on <id...> · /bench off <id...> · /join <json> · /retire <id> · /scout <need>");
-    return wrapPlainLines(lines).join("\n");
+    if (!richDetails)
+        lines.push("", "Details: /team member:<id> · activity/history: /team run:<id>.");
+    lines.push("", ...(richDetails
+        ? ["Commands: /team [filter] · /team help|--help · /team stop <run-id|all> · /player <id> <task> · /contract <json> · /list-skills [--descriptions|-d] [filter] · /bench list [filter] · /bench on|off <id...> · /join <json> · /retire <id> · /scout <need>"]
+        : ["Commands: /<id> <task> · /team help|<filter>|stop <run|all> · /bench · /join · /retire · /scout · /contract · /list-skills"]));
+    const wrapped = wrapPlainLines(lines);
+    if (filter || options.title === "bench" || wrapped.length <= maximumCopilotTeamOverviewLines) {
+        return wrapped.join("\n");
+    }
+    // Preserve every factory identity in the first viewport and spend only the
+    // remaining wrapped-line budget on personal rows and activity. Filtered
+    // member/run views remain rich and are never clipped by this overview path.
+    const factoryMembers = allMembers.filter(({ kind }) => kind !== "personal");
+    const personalMembers = allMembers.filter(({ kind }) => kind === "personal");
+    const specialists = allMembers.filter((member) => member.id !== "team-lead"
+        && member.kind !== "manager" && member.kind !== "utility" && member.availability === "ready");
+    const busySpecialists = specialists.filter(({ id }) => working.has(id));
+    const bundled = allMembers.filter(({ kind }) => kind === "bundled");
+    const enabledBundled = bundled.filter(({ availability }) => availability === "ready").length;
+    const overviewModel = nextModel
+        ? `${copilotPublicIdentifier(nextModel, 40) ?? "unknown"} (inherited)`
+        : options.nextModelUnreported
+            ? "no model reported (unobserved)"
+            : "unknown/default (unobserved)";
+    const overviewReasoning = copilotPublicIdentifier(nextReasoning, 24) ?? "unknown";
+    const overviewOutput = options.nextMaxOutputTokens === undefined
+        ? "unknown"
+        : `${formatCopilotTokenCount(options.nextMaxOutputTokens)} tokens`;
+    const safetyLines = [
+        ...globalWarnings,
+        ...(selectionGate ? [`Selection gate: ${selectionGate}.`] : []),
+    ].flatMap((value) => copilotPublicIdentifier(value, 72) ?? []);
+    const activityLimit = Math.min(maximumVisibleCopilotOverviewRuns, Math.max(1, allActive.length));
+    const overviewLeadLines = specialists.length <= 12
+        ? renderCompactLeadAccess(allMembers, working, selectionGate)
+        : [
+            `Enabled specialists: ${specialists.length} · 6 sequential delegations · Can delegate now: ${selectionGate ? "none" : specialists.length - busySpecialists.length}`,
+            ...(busySpecialists.length ? [`Busy (double-booking blocked): ${busySpecialists.length} specialists`] : []),
+            `SDLC coverage: ${enabledBundled}/${bundled.length} enabled · ${bundled.length - enabledBundled} benched · enable with /bench on <id...>`,
+            ...(unhealthy ? [`Repair before delegation: ${unhealthy} unhealthy member${unhealthy === 1 ? "" : "s"}; filter status:stale or status:unavailable.`] : []),
+        ];
+    const compactOverview = (personalLimit, runLimit) => {
+        const selectedMembers = [...factoryMembers, ...personalMembers.slice(0, personalLimit)];
+        const omittedPersonal = personalMembers.length - Math.min(personalLimit, personalMembers.length);
+        const shownRuns = allActive.slice(0, runLimit);
+        const overviewLines = [
+            `Agent Harbor Copilot ${(options.title ?? "team")} · ${copilotPublicIdentifier(runtime.projectName(project), 40) ?? "project"} · 0 model tokens`,
+            `Team: ${ready} ready · ${allActive.length} active${activeBreakdown ? ` (${activeBreakdown})` : ""} · ${benched} benched · ${unhealthy} unhealthy`,
+            `Host default: ${overviewModel} · reasoning ${overviewReasoning} · max output ${overviewOutput}`,
+            ...safetyLines,
+            "",
+            "LEAD ACCESS",
+            ...overviewLeadLines,
+            "",
+            ...(allActive.length
+                ? [
+                    "ACTIVITY",
+                    ...shownRuns.map(compactRunLine),
+                    ...(allActive.length > shownRuns.length
+                        ? [`+${allActive.length - shownRuns.length} active runs omitted; use /team run:<id> or member:<id>.`]
+                        : []),
+                ]
+                : latest && latestMission.length
+                    ? ["LAST MISSION", ...renderCompactMission(runtime, latest.rootRunId, latestMission)]
+                    : ["ACTIVITY", "No one is working right now."]),
+            "",
+            "ROSTER",
+            ...renderCompactRoster(selectedMembers, activeMemberStates),
+            ...(omittedPersonal
+                ? [`+${omittedPersonal} personal member${omittedPersonal === 1 ? "" : "s"} omitted; use /team kind:personal or /team member:<id>.`]
+                : []),
+            "",
+            "Details: /team member:<id> · /team run:<id> · /team help",
+            "Actions: /<id> <task> · /team stop <run|all> · /bench · /join · /retire · /scout",
+        ];
+        return wrapPlainLines(overviewLines);
+    };
+    for (let runLimit = activityLimit; runLimit >= Math.min(1, allActive.length); runLimit -= 1) {
+        for (let personalLimit = Math.min(3, personalMembers.length); personalLimit >= 0; personalLimit -= 1) {
+            const candidate = compactOverview(personalLimit, runLimit);
+            if (candidate.length <= maximumCopilotTeamOverviewLines)
+                return candidate.join("\n");
+        }
+    }
+    return compactOverview(0, Math.min(1, allActive.length)).join("\n");
 }

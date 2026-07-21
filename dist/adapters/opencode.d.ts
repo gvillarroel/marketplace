@@ -1,4 +1,3 @@
-/** OpenCode plugin entrypoint and translation to Agent Harbor's shared core. */
 import type { Plugin } from "@opencode-ai/plugin";
 /**
  * Creates the OpenCode plugin configuration, command tools, named players, and

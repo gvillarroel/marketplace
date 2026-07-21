@@ -26,7 +26,7 @@ export interface PiTeamRunSnapshot {
         readonly provider: string;
         readonly id: string;
     };
-    readonly modelSource?: "inherited" | "observed";
+    readonly modelSource?: "configured" | "inherited" | "observed";
     readonly observedModels: readonly {
         readonly provider: string;
         readonly id: string;
@@ -37,6 +37,8 @@ export interface PiTeamRunSnapshot {
     /** Fields whose visible value is a known lower bound because at least one turn lacked native usage. */
     readonly usageLowerBounds: readonly PiNativeUsageField[];
     readonly nativeMessages: number;
+    /** True when message identity/retention bounds mean additional native turns may have been omitted. */
+    readonly nativeMessagesLowerBound: boolean;
 }
 export interface PiRunStart {
     readonly project: string;
@@ -48,8 +50,10 @@ export interface PiRunStart {
         readonly provider: string;
         readonly id: string;
     };
+    readonly modelSource?: "configured" | "inherited";
     readonly thinking?: PiObservedThinkingLevel;
 }
+export declare const maximumPiObservedMessages = 4096;
 export declare function piPublicIdentifier(value: unknown, limit?: number): string | undefined;
 /** Produces a useful but deliberately lossy task label without retaining prompts, paths, or likely secrets. */
 export declare function piTaskLabel(task: string): string;

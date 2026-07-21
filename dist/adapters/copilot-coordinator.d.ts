@@ -30,18 +30,11 @@ interface ToolHookInput extends HookBaseInput {
     toolName: string;
     toolArgs: unknown;
 }
-interface PreMcpToolCallHookInput extends HookBaseInput {
-    toolCallId?: string;
-    serverName: string;
-    toolName: string;
-    arguments: unknown;
-    _meta?: Record<string, unknown>;
-}
 interface PostToolHookInput extends ToolHookInput {
     toolResult?: unknown;
 }
 interface PostToolFailureHookInput extends ToolHookInput {
-    error?: string;
+    error?: unknown;
 }
 interface UserPromptHookInput extends HookBaseInput {
     prompt?: string;
@@ -130,6 +123,12 @@ export interface CopilotCoordinatorNativeUsage {
     /** Computed only when both native input and output counters are present. */
     totalTokens?: number;
 }
+export interface CopilotCoordinatorNativeBilling {
+    /** Copilot's model-multiplier cost; this value is not USD. */
+    modelMultiplier?: number;
+    /** Copilot's native nano-AI-unit charge. */
+    totalNanoAiu?: number;
+}
 export interface CopilotCoordinatorRunUsageEvent extends CopilotCoordinatorRunCorrelation {
     type: "run.usage";
     apiCallId?: string;
@@ -140,6 +139,7 @@ export interface CopilotCoordinatorRunUsageEvent extends CopilotCoordinatorRunCo
     /** The host payload matched prior usage from another lifecycle owner, so no counters were attributed. */
     attributionUnverified?: boolean;
     usage: CopilotCoordinatorNativeUsage;
+    billing: CopilotCoordinatorNativeBilling;
 }
 export interface CopilotCoordinatorRunFinishedEvent extends CopilotCoordinatorRunCorrelation {
     type: "run.finished";
@@ -168,15 +168,31 @@ export type CopilotCoordinatorAdmissionHook = (input: {
 /** Hook callbacks installed into the Copilot extension session. */
 export interface CopilotCoordinatorHooks {
     onUserPromptSubmitted(input: UserPromptHookInput, invocation: HookInvocation): Promise<void>;
-    onPreMcpToolCall(input: PreMcpToolCallHookInput, invocation: HookInvocation): Promise<void>;
     onPreToolUse(input: ToolHookInput, invocation: HookInvocation): Promise<PreToolDecision | void>;
     onPostToolUse(input: PostToolHookInput, invocation: HookInvocation): Promise<void>;
     onPostToolUseFailure(input: PostToolFailureHookInput, invocation: HookInvocation): Promise<void>;
 }
+/** Exact native custom-tool invocation supplied by the extension handler. */
+export interface CopilotContractToolInvocation {
+    readonly sessionId: string;
+    readonly toolCallId: string;
+    readonly toolName: string;
+    readonly arguments: unknown;
+    readonly traceparent?: string;
+    readonly tracestate?: string;
+}
+/** Descriptor returned by the deterministic contract validator. */
+export interface CopilotContractDescriptor {
+    readonly agent_type: string;
+    readonly description: string;
+    readonly prompt: string;
+}
 /** Stateful guard plus host-event observer used by the Copilot extension. */
 export interface CopilotCoordinatorGuard {
     hooks: CopilotCoordinatorHooks;
-    refresh(expectedCurrentId?: string): Promise<void>;
+    contractToolSucceeded(invocation: CopilotContractToolInvocation, descriptor: CopilotContractDescriptor): Promise<void>;
+    contractToolFailed(invocation: CopilotContractToolInvocation): Promise<void>;
+    refresh(expectedCurrent?: string | CopilotAgentIdentity): Promise<void>;
     refreshAuthoritative(): Promise<void>;
     lifecycleIdentityUnverified(): boolean;
     /** @deprecated Use lifecycleIdentityUnverified; retained for compatible generated extensions. */
@@ -199,6 +215,10 @@ export interface CopilotCoordinatorHostEvent {
         apiCallId?: string;
         cacheReadTokens?: number;
         cacheWriteTokens?: number;
+        cost?: number;
+        copilotUsage?: {
+            totalNanoAiu?: number;
+        };
         arguments?: Record<string, unknown>;
         currentModel?: string;
         durationMs?: number;
@@ -209,8 +229,6 @@ export interface CopilotCoordinatorHostEvent {
         hookInvocationId?: string;
         hookType?: string;
         model?: string;
-        mcpServerName?: string;
-        mcpToolName?: string;
         messageId?: string;
         name?: string;
         newModel?: string;
@@ -244,6 +262,13 @@ export interface CopilotCoordinatorHostEvent {
 export declare const copilotFixedAgentIds: ReadonlyMap<string, string>;
 /** Plugin-qualified identity used only by the explicit `/scout` command. */
 export declare const copilotScoutAgentId = "agent-foundry:talent-scout";
+/** Exact bundled plugin asset path for one fixed Copilot identity. */
+export declare function copilotFixedAgentPath(id: string): string;
+/**
+ * Compares the complete bounded native identity used for a selection proof.
+ * A path-bearing identity cannot be proven by an id-only host response.
+ */
+export declare function copilotAgentIdentityMatches(expected: CopilotAgentIdentity, actual: unknown): boolean;
 /** Lists canonical active project profile IDs without trusting arbitrary files. */
 export declare function listCopilotActiveProfileIds(project: string): string[];
 /** Resolves one logical ID to exactly one currently invocable Copilot identity. */

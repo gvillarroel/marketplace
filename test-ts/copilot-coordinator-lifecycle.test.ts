@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   copilotFixedAgentIds,
+  copilotFixedAgentPath,
   copilotScoutAgentId,
   createCopilotCoordinatorGuard,
   resolveCopilotPlayer,
@@ -14,15 +15,62 @@ import { CopilotTeamRuntime } from "../src/adapters/copilot-team-runtime.js";
 import { Roster } from "../src/core/lifecycle.js";
 import { harnessSpec } from "../src/core/profiles.js";
 
+function fixedCopilotIdentity(nativeId: string) {
+  const logicalId = nativeId === copilotScoutAgentId
+    ? "talent-scout"
+    : [...copilotFixedAgentIds].find(([, candidate]) => candidate === nativeId)?.[0];
+  if (!logicalId) throw new Error(`unknown fixed Copilot test identity: ${nativeId}`);
+  return { id: nativeId, path: copilotFixedAgentPath(logicalId), userInvocable: true };
+}
+
+function fixedCopilotAgents() {
+  return [...copilotFixedAgentIds.values()].map(fixedCopilotIdentity);
+}
+
+test("Copilot coordinator refresh proves normalized full agent identity", async () => {
+  const base = join(tmpdir(), "harbor-exact-copilot-identity");
+  const canonical = join(base, "team.agent.md");
+  const equivalent = join(base, "roles", "..", "team.agent.md");
+  let current = { id: "same-id", path: canonical };
+  const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+    getCurrent: async () => ({ agent: current }),
+    reload: async () => ({ agents: [{ id: "same-id", path: canonical }] }),
+  } } }));
+
+  await coordinator.refresh({ id: "same-id", path: equivalent });
+  current = { id: "same-id", path: join(base, "foreign.agent.md") };
+  await assert.rejects(
+    () => coordinator.refresh({ id: "same-id", path: equivalent }),
+    /exact identity/u,
+  );
+});
+
+test("Copilot coordinator denies a same-ID foreign team-lead identity", async () => {
+  const teamLead = copilotFixedAgentIds.get("team-lead")!;
+  const expectedPath = join(process.cwd(), "owned-team-lead.agent.md");
+  const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+    getCurrent: async () => ({ agent: { id: teamLead, path: join(process.cwd(), "foreign-team-lead.agent.md") } }),
+    reload: async () => ({ agents: [{ id: teamLead, path: expectedPath, userInvocable: true }] }),
+  } } }));
+  const decision = await coordinator.hooks.onPreToolUse({
+    sessionId: "foreign-team-lead-session",
+    workingDirectory: process.cwd(),
+    toolName: "task",
+    toolArgs: { agent_type: "crafter", description: "Review", prompt: "Review safely" },
+  }, { sessionId: "foreign-team-lead-session" });
+  assert.equal(decision?.permissionDecision, "deny");
+  assert.match(decision?.permissionDecisionReason ?? "", /not active in Copilot/u);
+});
+
 test("Copilot coordinator emits correlated content-minimized root and child lifecycle events", async () => {
   const timelineBase = Date.now() + 10_000;
   const timeline = (offset: number): string => new Date(timelineBase + offset).toISOString();
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents }),
   } } }), undefined, (event) => { lifecycle.push(event); });
 
@@ -138,6 +186,8 @@ test("Copilot coordinator emits correlated content-minimized root and child life
       reasoningTokens: 3,
       cacheReadTokens: 4,
       cacheWriteTokens: 2,
+      cost: 0.75,
+      copilotUsage: { totalNanoAiu: 30 },
     },
   });
   // Replayed native usage IDs must not double count downstream.
@@ -202,6 +252,8 @@ test("Copilot coordinator emits correlated content-minimized root and child life
       reasoningEffort: "low",
       inputTokens: 20,
       outputTokens: 5,
+      cost: 1.25,
+      copilotUsage: { totalNanoAiu: 70 },
     },
   });
   coordinator.observeEvent({
@@ -242,6 +294,7 @@ test("Copilot coordinator emits correlated content-minimized root and child life
     cacheWriteTokens: 2,
     totalTokens: 17,
   });
+  assert.deepEqual(childUsage.billing, { modelMultiplier: 0.75, totalNanoAiu: 30 });
   assert.equal(lifecycle.filter((event) => event.type === "run.usage" && event.kind === "child").length, 1);
   assert.ok(lifecycle.some((event) => event.type === "run.model" && event.runId === childStarted.runId &&
     event.model === "openai/gpt-child-observed"));
@@ -264,6 +317,7 @@ test("Copilot coordinator emits correlated content-minimized root and child life
   assert.ok(rootUsage);
   assert.equal(rootUsage.serviceRequestId, "service-root-1");
   assert.equal(rootUsage.providerCallId, "provider-root-1");
+  assert.deepEqual(rootUsage.billing, { modelMultiplier: 1.25, totalNanoAiu: 70 });
 
   const serialized = JSON.stringify(lifecycle);
   for (const privateValue of [
@@ -288,10 +342,10 @@ test("Copilot coordinator emits correlated content-minimized root and child life
 
 test("Copilot keeps long opaque usage identities unique through the lifecycle/runtime handoff", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents }),
   } } }), undefined, (event) => { lifecycle.push(event); });
   await coordinator.refresh();
@@ -369,19 +423,21 @@ test("Copilot keeps long opaque usage identities unique through the lifecycle/ru
 test("Copilot fixed and scout registry collisions fail closed for selection and lead delegation", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  assert.throws(() => resolveCopilotPlayer("team-lead", [{ id: teamLead }, { id: teamLead }], process.cwd()), /ambiguous/u);
+  assert.throws(() => resolveCopilotPlayer("team-lead", [
+    fixedCopilotIdentity(teamLead), fixedCopilotIdentity(teamLead),
+  ], process.cwd()), /ambiguous/u);
   assert.throws(() => resolveCopilotPlayer("talent-scout", [
-    { id: copilotScoutAgentId }, { id: copilotScoutAgentId },
+    fixedCopilotIdentity(copilotScoutAgentId), fixedCopilotIdentity(copilotScoutAgentId),
   ], process.cwd()), /ambiguous/u);
 
   const duplicateAgents = [
-    { id: teamLead, userInvocable: true },
-    { id: teamLead, userInvocable: true },
-    { id: crafter, userInvocable: true },
+    fixedCopilotIdentity(teamLead),
+    fixedCopilotIdentity(teamLead),
+    fixedCopilotIdentity(crafter),
   ];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead, userInvocable: true } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents: duplicateAgents }),
   } } }), undefined, (event) => { lifecycle.push(event); });
   await coordinator.refresh();
@@ -399,12 +455,124 @@ test("Copilot fixed and scout registry collisions fail closed for selection and 
   assert.equal(lifecycle.some((event) => event.type === "child.started"), false);
 });
 
+test("Copilot bounds and minimizes hostile agent registry snapshots", async () => {
+  const teamLead = copilotFixedAgentIds.get("team-lead")!;
+  const crafter = copilotFixedAgentIds.get("crafter")!;
+  const unreadExtra = Object.defineProperty({
+    id: teamLead,
+    userInvocable: true,
+    payload: "PRIVATE".repeat(100_000),
+  }, "hostSecret", {
+    enumerable: true,
+    get: () => { throw new Error("unknown registry fields must not be read"); },
+  });
+  const minimized = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+    getCurrent: async () => ({ agent: unreadExtra }),
+    reload: async () => ({ agents: [
+      unreadExtra,
+        fixedCopilotIdentity(crafter),
+      { id: "third-party  agent", path: join(process.cwd(), "valid  path", "third-party.agent.md") },
+    ] }),
+  } } }));
+  await minimized.refreshAuthoritative();
+
+  const oversizedRegistry = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
+    reload: async () => ({
+      agents: Array.from({ length: 1_025 }, (_, index) => ({ id: `bounded-${index}` })),
+    }),
+  } } }));
+  await assert.rejects(() => oversizedRegistry.refreshAuthoritative(), /exceeds 1024 bounded identities/u);
+
+  for (const [label, identity, pattern] of [
+    ["ID", { id: "x".repeat(257) }, /oversized ID/u],
+    ["path", { id: teamLead, path: "x".repeat(2_049) }, /oversized path/u],
+    ["model", { id: teamLead, model: "x".repeat(257) }, /oversized model/u],
+  ] as const) {
+    const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
+      reload: async () => ({ agents: [identity] }),
+    } } }));
+    await assert.rejects(() => coordinator.refreshAuthoritative(), pattern, `${label} was retained`);
+  }
+});
+
+test("Copilot hashes and bounds unclaimed native task correlations and clears them on abort", async () => {
+  const teamLead = copilotFixedAgentIds.get("team-lead")!;
+  const crafter = copilotFixedAgentIds.get("crafter")!;
+  const agents = fixedCopilotAgents();
+  const saturated = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
+    reload: async () => ({ agents }),
+  } } }));
+  await saturated.refreshAuthoritative();
+  const privateFragment = "PRIVATE-HOST-CORRELATION";
+  const startedAt = performance.now();
+  saturated.observeEvent({
+    type: "tool.execution_start",
+    id: "host-task-start-oversized",
+    data: {
+      toolName: "task",
+      toolCallId: `${privateFragment}-${"x".repeat(2_000_000)}`,
+    },
+  });
+  assert.ok(performance.now() - startedAt < 500, "an oversized host ID was hashed before rejection");
+  assert.equal(saturated.lifecycleIdentityUnverified(), true,
+    "an oversized native correlation did not fail closed");
+  const denied = await saturated.hooks.onPreToolUse({
+    sessionId: "hostile-correlations",
+    workingDirectory: process.cwd(),
+    toolName: "task",
+    toolArgs: { agent_type: crafter, prompt: "must not run" },
+  }, { sessionId: "hostile-correlations" });
+  assert.equal(denied?.permissionDecision, "deny");
+  assert.match(denied?.permissionDecisionReason ?? "", /identity is unverified/u);
+  assert.equal(JSON.stringify(denied).includes(privateFragment), false);
+
+  const evidence: Array<{ phase: string; invocationId?: string }> = [];
+  const cleared = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
+    reload: async () => ({ agents }),
+  } } }), (event) => { evidence.push(event); });
+  await cleared.refreshAuthoritative();
+  const invocation = { sessionId: "abort-clears-correlation" };
+  await cleared.hooks.onUserPromptSubmitted({
+    sessionId: invocation.sessionId,
+    workingDirectory: process.cwd(),
+    prompt: "coordinate after cancellation",
+  }, invocation);
+  cleared.observeEvent({
+    type: "tool.execution_start",
+    id: "stale-task-start",
+    data: { toolName: "task", toolCallId: "PRIVATE-STALE-TASK-ID" },
+  });
+  cleared.observeEvent({ type: "abort", id: "root-abort" });
+  const allowed = await cleared.hooks.onPreToolUse({
+    sessionId: invocation.sessionId,
+    workingDirectory: process.cwd(),
+    toolName: "task",
+    toolArgs: { agent_type: crafter, prompt: "fresh work" },
+  }, invocation);
+  assert.equal(allowed?.permissionDecision, "allow");
+  const resolved = evidence.find((event) => event.phase === "target.resolved");
+  assert.ok(resolved);
+  assert.equal(resolved.invocationId, undefined, "abort left a stale native task correlation queued");
+  assert.equal(JSON.stringify(evidence).includes("PRIVATE-STALE-TASK-ID"), false);
+  await cleared.hooks.onPostToolUseFailure({
+    sessionId: invocation.sessionId,
+    workingDirectory: process.cwd(),
+    toolName: "task",
+    toolArgs: { agent_type: crafter, prompt: "fresh work" },
+    error: "cleanup",
+  }, invocation);
+});
+
 test("Copilot lifecycle observer failures cannot change guard decisions", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents }),
   } } }), undefined, () => { throw new Error("observer failure"); });
   await coordinator.refresh();
@@ -424,10 +592,10 @@ test("Copilot lifecycle observer failures cannot change guard decisions", async 
 
 test("Copilot session.error closes the active root without retaining its error body", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents }),
   } } }), undefined, (event) => { lifecycle.push(event); });
   await coordinator.refresh();
@@ -452,10 +620,10 @@ test("Copilot session.error closes the active root without retaining its error b
 test("Copilot session terminals close an admitted child before its root and clear in-flight state", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents }),
   } } }), undefined, (event) => { lifecycle.push(event); });
   await coordinator.refresh();
@@ -493,7 +661,7 @@ test("Copilot session terminals close an admitted child before its root and clea
 test("Copilot child-scoped session terminals never terminate or clear the parent mission", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   const cases = [
     { label: "idle-agent", type: "session.idle", agentId: "native-child", data: { aborted: false } },
     { label: "error-agent", type: "session.error", agentId: "native-child", data: { message: "PRIVATE CHILD ERROR" } },
@@ -504,7 +672,7 @@ test("Copilot child-scoped session terminals never terminate or clear the parent
   for (const terminal of cases) {
     const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
     const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-      getCurrent: async () => ({ agent: { id: teamLead } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
       reload: async () => ({ agents }),
     } } }), undefined, (event) => { lifecycle.push(event); });
     await coordinator.refresh();
@@ -583,11 +751,11 @@ test("Copilot child-scoped session terminals never terminate or clear the parent
 test("Copilot subagent failures retain only a fingerprint, never the native error body", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   const evidence: unknown[] = [];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents }),
   } } }), (event) => { evidence.push(event); }, (event) => { lifecycle.push(event); });
   await coordinator.refresh();
@@ -626,10 +794,10 @@ test("Copilot subagent failures retain only a fingerprint, never the native erro
 test("Copilot steering prompts preserve an active root and admitted child until a native terminal", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents }),
   } } }), undefined, (event) => { lifecycle.push(event); });
   await coordinator.refresh();
@@ -663,11 +831,11 @@ test("Copilot steering prompts preserve an active root and admitted child until 
 test("Copilot child admission denies before native work without poisoning the next delegation", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   const observed: Array<{ project: string; parentRunId: string; agent: string; taskLabel: string }> = [];
   let attempts = 0;
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents }),
   } } }), undefined, undefined, (input) => {
     attempts += 1;
@@ -708,10 +876,10 @@ test("Copilot child admission denies before native work without poisoning the ne
 test("Copilot lifecycle closes inferred children and cancelled roots without error bodies", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents }),
   } } }), undefined, (event) => { lifecycle.push(event); });
   await coordinator.refresh();
@@ -756,7 +924,7 @@ test("Copilot coordinator ignores an older refresh that settles after a newer re
     releaseOld = resolve;
   });
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead, userInvocable: true } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => {
       reloadCalls += 1;
       if (reloadCalls === 1) {
@@ -764,8 +932,8 @@ test("Copilot coordinator ignores an older refresh that settles after a newer re
         return oldReload;
       }
       return { agents: [
-        { id: teamLead, userInvocable: true },
-        { id: crafter, userInvocable: true },
+        fixedCopilotIdentity(teamLead),
+        fixedCopilotIdentity(crafter),
       ] };
     },
   } } }));
@@ -773,7 +941,7 @@ test("Copilot coordinator ignores an older refresh that settles after a newer re
   const older = coordinator.refresh();
   await oldStarted;
   await coordinator.refresh();
-  releaseOld({ agents: [{ id: teamLead, userInvocable: true }] });
+  releaseOld({ agents: [fixedCopilotIdentity(teamLead)] });
   await older;
 
   const invocation = { sessionId: "refresh-generation-session" };
@@ -794,14 +962,14 @@ test("Copilot coordinator ignores an older refresh that settles after a newer re
 
 test("Copilot selection synchronization fails closed when superseded or changed during reload", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   let firstReload = true;
   let releaseSuperseded!: () => void;
   let announceSuperseded!: () => void;
   const supersededStarted = new Promise<void>((resolve) => { announceSuperseded = resolve; });
   const supersededGate = new Promise<void>((resolve) => { releaseSuperseded = resolve; });
   const superseded = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead, userInvocable: true } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => {
       if (firstReload) {
         firstReload = false;
@@ -822,7 +990,7 @@ test("Copilot selection synchronization fails closed when superseded or changed 
   const changedStarted = new Promise<void>((resolve) => { announceChanged = resolve; });
   const changedGate = new Promise<void>((resolve) => { releaseChanged = resolve; });
   const changed = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead, userInvocable: true } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => {
       announceChanged();
       await changedGate;
@@ -839,7 +1007,7 @@ test("Copilot selection synchronization fails closed when superseded or changed 
 test("Copilot task guard reads manual selection authoritatively without intercepting third-party agents", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   let current: { id: string; userInvocable: boolean } | undefined;
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
@@ -847,7 +1015,7 @@ test("Copilot task guard reads manual selection authoritatively without intercep
     reload: async () => ({ agents }),
   } } }), undefined, (event) => { lifecycle.push(event); });
   await coordinator.refresh();
-  current = { id: teamLead, userInvocable: true };
+  current = fixedCopilotIdentity(teamLead);
   const invocation = { sessionId: "manual-selection-event-lag" };
   const base = { sessionId: invocation.sessionId, workingDirectory: process.cwd() };
   await coordinator.hooks.onUserPromptSubmitted({ ...base, prompt: "manually selected lead" }, invocation);
@@ -875,7 +1043,7 @@ test("Copilot task guard reads manual selection authoritatively without intercep
     reload: async () => ({ agents }),
   } } }), undefined, (event) => { specialistLifecycle.push(event); });
   await specialist.refresh();
-  specialistCurrent = { id: crafter, userInvocable: true };
+  specialistCurrent = fixedCopilotIdentity(crafter);
   const specialistInvocation = { sessionId: "manual-specialist-event-lag" };
   await specialist.hooks.onUserPromptSubmitted({
     sessionId: specialistInvocation.sessionId,
@@ -909,8 +1077,8 @@ test("Copilot task guard reads manual selection authoritatively without intercep
     workingDirectory: process.cwd(),
     prompt: "use the observed snapshot",
   }, { sessionId: "manual-selection-fallback" });
-  assert.ok(fallbackLifecycle.some((event) => event.type === "root.started" && event.agent === "team-lead"),
-    "a best-effort getCurrent failure discarded a valid native selection snapshot");
+  assert.equal(fallbackLifecycle.some((event) => event.type === "root.started"), false,
+    "an id-only selection event bypassed the required native path proof during an RPC outage");
 
   const previousRpcTimeout = process.env.AGENT_HARBOR_COPILOT_RPC_TIMEOUT_MS;
   process.env.AGENT_HARBOR_COPILOT_RPC_TIMEOUT_MS = "250";
@@ -933,7 +1101,7 @@ test("Copilot task guard reads manual selection authoritatively without intercep
       prompt: "do not delay the user prompt",
     }, { sessionId: "manual-selection-bounded-fallback" });
     assert.ok(Date.now() - startedAt < 1_000, "best-effort prompt observation inherited the 15s guard timeout");
-    assert.ok(boundedLifecycle.some((event) => event.type === "root.started" && event.agent === "team-lead"));
+    assert.equal(boundedLifecycle.some((event) => event.type === "root.started"), false);
   } finally {
     if (previousRpcTimeout === undefined) delete process.env.AGENT_HARBOR_COPILOT_RPC_TIMEOUT_MS;
     else process.env.AGENT_HARBOR_COPILOT_RPC_TIMEOUT_MS = previousRpcTimeout;
@@ -951,7 +1119,7 @@ test("Copilot task guard reads manual selection authoritatively without intercep
       if (racedCurrentReads === 1) return { agent: undefined };
       announceRead();
       await readGate;
-      return { agent: { id: teamLead, userInvocable: true } };
+      return { agent: fixedCopilotIdentity(teamLead) };
     },
     reload: async () => ({ agents }),
   } } }), undefined, (event) => { racedLifecycle.push(event); });
@@ -965,8 +1133,8 @@ test("Copilot task guard reads manual selection authoritatively without intercep
   raced.observeEvent({ type: "subagent.selected", data: { agentName: "crafter" } });
   releaseRead();
   await racedPrompt;
-  assert.ok(racedLifecycle.some((event) => event.type === "root.started" && event.agent === "crafter"),
-    "an older getCurrent read overwrote a newer native selection generation");
+  assert.equal(racedLifecycle.some((event) => event.type === "root.started"), false,
+    "an id-only newer selection event was upgraded to a path-bearing identity without proof");
 
   let thirdPartyReloads = 0;
   const thirdParty = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
@@ -985,8 +1153,11 @@ test("Copilot task guard reads manual selection authoritatively without intercep
   assert.equal(unrelated, undefined, "Agent Harbor intercepted a task from a non-Harbor coordinator");
   assert.equal(thirdPartyReloads, 0, "third-party delegation unnecessarily depended on Harbor registry reload");
 
+  const hugePrivateError = `current agent unavailable at C:/Users/alice/private.txt with Bearer abcdefghijklmnop ${"x".repeat(2_000_000)} private-tail`;
   const unverifiable = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => { throw new Error("current agent unavailable"); },
+    getCurrent: async () => {
+      throw new Error(hugePrivateError);
+    },
     reload: async () => ({ agents }),
   } } }));
   const failClosed = await unverifiable.hooks.onPreToolUse({
@@ -997,14 +1168,50 @@ test("Copilot task guard reads manual selection authoritatively without intercep
   }, { sessionId: "unknown-session" });
   assert.equal(failClosed?.permissionDecision, "deny");
   assert.match(failClosed?.permissionDecisionReason ?? "", /fails closed/u);
+  assert.match(failClosed?.permissionDecisionReason ?? "", /\[path\].*\[redacted\]/u);
+  assert.doesNotMatch(failClosed?.permissionDecisionReason ?? "", /alice|private\.txt|abcdefghijklmnop|private-tail/u);
+  assert.ok((failClosed?.permissionDecisionReason?.length ?? 0) <= 600);
+});
+
+test("Copilot task arguments and selected IDs reject multi-megabyte values before host work", async () => {
+  const teamLead = copilotFixedAgentIds.get("team-lead")!;
+  const crafter = copilotFixedAgentIds.get("crafter")!;
+  const agents = fixedCopilotAgents();
+  const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
+  const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
+    reload: async () => ({ agents }),
+  } } }), undefined, (event) => { lifecycle.push(event); });
+  await coordinator.refresh();
+
+  const invocation = { sessionId: "huge-task-arguments" };
+  const base = {
+    sessionId: invocation.sessionId,
+    workingDirectory: process.cwd(),
+    toolName: "task",
+  };
+  const huge = "x".repeat(2_000_000);
+  const stringDecision = await coordinator.hooks.onPreToolUse({ ...base, toolArgs: huge }, invocation);
+  assert.equal(stringDecision?.permissionDecision, "deny");
+  assert.match(stringDecision?.permissionDecisionReason ?? "", /bounded object/u);
+  const objectDecision = await coordinator.hooks.onPreToolUse({
+    ...base,
+    toolArgs: { agent_type: crafter, description: "work", prompt: huge },
+  }, invocation);
+  assert.equal(objectDecision?.permissionDecision, "deny");
+  assert.match(objectDecision?.permissionDecisionReason ?? "", /bounded object/u);
+  assert.equal(lifecycle.some((event) => event.type === "child.started"), false);
+
+  coordinator.observeEvent({ type: "subagent.selected", data: { agentName: `team-lead-${huge}` } });
+  assert.equal(coordinator.lifecycleIdentityUnverified(), true);
 });
 
 test("Copilot ignores stale session.idle until the current root has native activity and a current terminal", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead, userInvocable: true } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents }),
   } } }), undefined, (event) => { lifecycle.push(event); });
   await coordinator.refresh();
@@ -1097,9 +1304,75 @@ test("Copilot ignores stale session.idle until the current root has native activ
   assert.equal(new Set(usage.map((event) => event.runId)).size, 1, "stale idle split one root mission");
 });
 
+test("Copilot non-critical replays cannot seed an empty current lifecycle chain", async () => {
+  const teamLead = copilotFixedAgentIds.get("team-lead")!;
+  const agents = fixedCopilotAgents();
+  const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
+  const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
+    reload: async () => ({ agents }),
+  } } }), undefined, (event) => { lifecycle.push(event); });
+  await coordinator.refresh();
+  const sessionId = "non-critical-chain-seed";
+  const invocation = { sessionId };
+  const base = Date.now() + 1_000;
+
+  await coordinator.hooks.onUserPromptSubmitted({
+    sessionId, workingDirectory: process.cwd(), prompt: "first mission",
+  }, invocation);
+  coordinator.observeEvent({
+    type: "assistant.turn_start", id: "chain-A-turn", parentId: "prior-chain",
+    timestamp: new Date(base).toISOString(), data: { turnId: "chain-A-turn", model: "model-A" },
+  });
+  coordinator.observeEvent({
+    type: "assistant.message_delta", id: "chain-A-delta", parentId: "chain-A-turn",
+    timestamp: new Date(base + 60_000).toISOString(), data: {},
+  });
+  coordinator.observeEvent({
+    type: "session.idle", id: "chain-A-idle", parentId: "chain-A-delta",
+    timestamp: new Date(base + 60_001).toISOString(), data: { aborted: false },
+  });
+  assert.equal(lifecycle.filter((event) => event.type === "run.finished" && event.kind === "root").length, 1);
+
+  await coordinator.hooks.onUserPromptSubmitted({
+    sessionId, workingDirectory: process.cwd(), prompt: "second mission",
+  }, invocation);
+  const replayedDelta = {
+    type: "assistant.message_delta", id: "chain-A-delta-replayed", parentId: "chain-A-turn",
+    timestamp: new Date(base + 60_000).toISOString(), data: {},
+  } as const;
+  coordinator.observeEvent(replayedDelta);
+  assert.equal(coordinator.hostEventDisposition(replayedDelta), "claimed");
+
+  coordinator.observeEvent({
+    type: "assistant.turn_start", id: "chain-B-turn", parentId: "chain-A-idle",
+    timestamp: new Date(base + 60_010).toISOString(), data: { turnId: "chain-B-turn", model: "model-B" },
+  });
+  coordinator.observeEvent({
+    type: "assistant.usage", id: "chain-B-usage", parentId: "chain-B-turn",
+    timestamp: new Date(base + 60_011).toISOString(),
+    data: { apiCallId: "chain-B-api", model: "model-B", inputTokens: 7, outputTokens: 3 },
+  });
+  coordinator.observeEvent({
+    type: "session.idle", id: "chain-B-idle", parentId: "chain-B-usage",
+    timestamp: new Date(base + 60_012).toISOString(), data: { aborted: false },
+  });
+
+  const roots = lifecycle.filter((event) => event.type === "root.started");
+  assert.equal(roots.length, 2);
+  const secondRootId = roots[1].rootRunId;
+  assert.ok(lifecycle.some((event) => event.type === "run.model" &&
+    event.rootRunId === secondRootId && event.model === "model-B"));
+  assert.ok(lifecycle.some((event) => event.type === "run.usage" &&
+    event.rootRunId === secondRootId && event.usage.totalTokens === 10));
+  assert.ok(lifecycle.some((event) => event.type === "run.finished" &&
+    event.rootRunId === secondRootId && event.outcome === "completed"));
+  assert.equal(coordinator.lifecycleIdentityUnverified(), false);
+});
+
 test("Copilot admits the first current event once and keeps child-scoped defaults out of later roots", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [{ id: teamLead, userInvocable: true, model: "host-A" }];
+  const agents = [{ ...fixedCopilotIdentity(teamLead), model: "host-A" }];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
     getCurrent: async () => ({ agent: agents[0] }),
@@ -1159,7 +1432,7 @@ test("Copilot admits the first current event once and keeps child-scoped default
 
 test("Copilot treats a root-scoped model change as activity so idle closes the mission", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [{ id: teamLead, userInvocable: true, model: "host-A" }];
+  const agents = [{ ...fixedCopilotIdentity(teamLead), model: "host-A" }];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
     getCurrent: async () => ({ agent: agents[0] }),
@@ -1192,7 +1465,7 @@ test("Copilot treats a root-scoped model change as activity so idle closes the m
 
 test("Copilot host-event replays and older model observations cannot revert current telemetry", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [{ id: teamLead, userInvocable: true }];
+  const agents = [fixedCopilotIdentity(teamLead)];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
     getCurrent: async () => ({ agent: agents[0] }),
@@ -1263,7 +1536,7 @@ test("Copilot host-event replays and older model observations cannot revert curr
 
 test("Copilot state timestamps reject an early replay after the bounded global event cache rotates", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [{ id: teamLead, userInvocable: true }];
+  const agents = [fixedCopilotIdentity(teamLead)];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
     getCurrent: async () => ({ agent: agents[0] }),
@@ -1295,7 +1568,7 @@ test("Copilot state timestamps reject an early replay after the bounded global e
 
 test("Copilot same-timestamp model identities survive global cache rotation without reverting defaults", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [{ id: teamLead, userInvocable: true }];
+  const agents = [fixedCopilotIdentity(teamLead)];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
     getCurrent: async () => ({ agent: agents[0] }),
@@ -1348,7 +1621,7 @@ test("Copilot same-timestamp model identities survive global cache rotation with
 
 test("Copilot selection timestamps reject an evicted selected replay after a newer deselection", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [{ id: teamLead, userInvocable: true }];
+  const agents = [fixedCopilotIdentity(teamLead)];
   let currentReadFails = false;
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
@@ -1403,12 +1676,12 @@ test("Copilot selection timestamps reject an evicted selected replay after a new
   await sameTime.hooks.onUserPromptSubmitted({
     sessionId: "same-time-selected", workingDirectory: process.cwd(), prompt: "new same-time selection wins",
   }, { sessionId: "same-time-selected" });
-  assert.equal(sameTimeLifecycle.filter((event) => event.type === "root.started").at(-1)?.agent, "team-lead");
+  assert.equal(sameTimeLifecycle.some((event) => event.type === "root.started"), false);
 });
 
 test("Copilot critical ownership survives cache rotation across roots and future-skewed usage", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [{ id: teamLead, userInvocable: true }];
+  const agents = [fixedCopilotIdentity(teamLead)];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
     getCurrent: async () => ({ agent: agents[0] }),
@@ -1477,7 +1750,7 @@ test("Copilot critical ownership survives cache rotation across roots and future
 
 test("Copilot usage ownership learns enriched aliases before generic replay rejection", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [{ id: teamLead, userInvocable: true }];
+  const agents = [fixedCopilotIdentity(teamLead)];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
     getCurrent: async () => ({ agent: agents[0] }), reload: async () => ({ agents }),
@@ -1520,7 +1793,7 @@ test("Copilot weak identity bridge rejects anonymous and stable usage transition
     for (const acrossRoots of [false, true]) {
       await context.test(`${direction}-${acrossRoots ? "cross-root" : "same-root"}`, async () => {
         const teamLead = copilotFixedAgentIds.get("team-lead")!;
-        const agents = [{ id: teamLead, userInvocable: true }];
+  const agents = [fixedCopilotIdentity(teamLead)];
         const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
         const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
           getCurrent: async () => ({ agent: agents[0] }), reload: async () => ({ agents }),
@@ -1614,7 +1887,7 @@ test("Copilot anonymous weak shapes reject optional scope drift instead of bindi
 
 test("Copilot rejects identity-free usage reused by another root without phantom attribution", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [{ id: teamLead, userInvocable: true }];
+  const agents = [fixedCopilotIdentity(teamLead)];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
     getCurrent: async () => ({ agent: agents[0] }), reload: async () => ({ agents }),
@@ -1654,7 +1927,7 @@ test("Copilot rejects identity-free usage reused by another root without phantom
 
 test("Copilot identity-free model payload drift fails closed before it can change telemetry", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [{ id: teamLead, userInvocable: true }];
+  const agents = [fixedCopilotIdentity(teamLead)];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
     getCurrent: async () => ({ agent: agents[0] }), reload: async () => ({ agents }),
@@ -1687,7 +1960,7 @@ test("Copilot identity-free model payload drift fails closed before it can chang
 
 test("Copilot critical fallback capacity saturates fail-closed without evicting prior owners", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
-  const agents = [{ id: teamLead, userInvocable: true }];
+  const agents = [fixedCopilotIdentity(teamLead)];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
     getCurrent: async () => ({ agent: agents[0] }), reload: async () => ({ agents }),
@@ -1712,6 +1985,52 @@ test("Copilot critical fallback capacity saturates fail-closed without evicting 
   assert.equal(coordinator.hostEventDisposition(overflow), "unverified");
   assert.equal(coordinator.lifecycleIdentityUnverified(), true);
   assert.equal(lifecycle.filter((event) => event.type === "run.state").at(-1)?.state, "working");
+});
+
+test("Copilot session.start identity ignores new native IDs and mutable default payload drift", async () => {
+  const teamLead = copilotFixedAgentIds.get("team-lead")!;
+  const agents = [fixedCopilotIdentity(teamLead)];
+  const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
+  const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+    getCurrent: async () => ({ agent: agents[0] }), reload: async () => ({ agents }),
+  } } }), undefined, (event) => { lifecycle.push(event); });
+  await coordinator.refresh();
+  const timestamp = new Date(Date.now() + 1_000).toISOString();
+  const first = {
+    type: "session.start", id: "session-start-native-A", timestamp,
+    data: { sessionId: "sdk-session-identity", selectedModel: "valid-default", reasoningEffort: "low" },
+  } as const;
+  coordinator.observeEvent(first);
+  const replay = {
+    type: "session.start", id: "session-start-native-B", timestamp,
+    data: { sessionId: "sdk-session-identity", selectedModel: "drifted-default", reasoningEffort: "high" },
+  } as const;
+  coordinator.observeEvent(replay);
+  assert.equal(coordinator.hostEventDisposition(replay), "replay");
+  await coordinator.hooks.onUserPromptSubmitted({
+    sessionId: "session-start-defaults", workingDirectory: process.cwd(), prompt: "use valid defaults",
+  }, { sessionId: "session-start-defaults" });
+  const root = lifecycle.find((event) => event.type === "root.started")!;
+  assert.equal(root.model, "valid-default");
+  assert.equal(root.reasoningEffort, "low");
+});
+
+test("Copilot stable events with one SDK semantic envelope require a shared alias", () => {
+  const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+    getCurrent: async () => ({ agent: undefined }), reload: async () => ({ agents: [] }),
+  } } }));
+  const timestamp = new Date(Date.now() + 1_000).toISOString();
+  coordinator.observeEvent({
+    type: "assistant.message", id: "stable-envelope-event-A", parentId: "stable-parent", timestamp,
+    data: { model: "payload-A" },
+  });
+  const ambiguous = {
+    type: "assistant.message", id: "stable-envelope-event-B", parentId: "stable-parent", timestamp,
+    data: { model: "payload-B" },
+  } as const;
+  coordinator.observeEvent(ambiguous);
+  assert.equal(coordinator.hostEventDisposition(ambiguous), "unverified");
+  assert.equal(coordinator.lifecycleIdentityUnverified(), true);
 });
 
 test("Copilot hook and message aliases survive enriched replay identities", () => {
@@ -1807,7 +2126,7 @@ test("Copilot anonymous terminals are inert without a root and fail closed with 
   for (const terminalType of ["session.idle", "session.error", "session.shutdown"] as const) {
     await context.test(terminalType, async () => {
       const teamLead = copilotFixedAgentIds.get("team-lead")!;
-      const agents = [{ id: teamLead, userInvocable: true }];
+  const agents = [fixedCopilotIdentity(teamLead)];
       const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
       const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
         getCurrent: async () => ({ agent: agents[0] }), reload: async () => ({ agents }),
@@ -1844,7 +2163,7 @@ test("Copilot terminal semantic ownership blocks scope loss and cross-root nativ
   for (const terminalType of ["session.idle", "session.error", "session.shutdown"] as const) {
     await context.test(terminalType, async () => {
       const teamLead = copilotFixedAgentIds.get("team-lead")!;
-      const agents = [{ id: teamLead, userInvocable: true }];
+  const agents = [fixedCopilotIdentity(teamLead)];
       const terminalData = terminalType === "session.idle"
         ? { aborted: false }
         : terminalType === "session.shutdown" ? { shutdownType: "normal" } : {};
@@ -1864,6 +2183,34 @@ test("Copilot terminal semantic ownership blocks scope loss and cross-root nativ
         });
         return { coordinator, lifecycle, sessionId, turnId };
       };
+
+      const orphanLifecycle: CopilotCoordinatorLifecycleEvent[] = [];
+      const orphanCoordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+        getCurrent: async () => ({ agent: agents[0] }), reload: async () => ({ agents }),
+      } } }), undefined, (event) => { orphanLifecycle.push(event); });
+      await orphanCoordinator.refresh();
+      const orphanTimestamp = new Date(Date.now() + 60_000).toISOString();
+      const orphan = {
+        type: terminalType, id: `${terminalType}-orphan-A`, parentId: null,
+        timestamp: orphanTimestamp, data: { ...terminalData },
+      } as const;
+      orphanCoordinator.observeEvent(orphan);
+      assert.equal(orphanCoordinator.terminalEventDisposition(orphan), "claimed");
+      const orphanSessionId = `terminal-semantic-${terminalType}-orphan`;
+      await orphanCoordinator.hooks.onUserPromptSubmitted({
+        sessionId: orphanSessionId, workingDirectory: process.cwd(), prompt: "root after orphan terminal",
+      }, { sessionId: orphanSessionId });
+      orphanCoordinator.observeEvent({
+        type: "assistant.turn_start", id: `${terminalType}-orphan-turn`,
+        data: { turnId: "orphan-root", model: "model" },
+      });
+      const rootAfterOrphan = orphanLifecycle.filter((event) => event.type === "root.started").at(-1)!;
+      const orphanReplay = { ...orphan, id: `${terminalType}-orphan-B` };
+      orphanCoordinator.observeEvent(orphanReplay);
+      assert.equal(orphanCoordinator.terminalEventDisposition(orphanReplay), "replay");
+      assert.equal(orphanCoordinator.lifecycleIdentityUnverified(), false);
+      assert.equal(orphanLifecycle.some((event) =>
+        event.type === "run.finished" && event.runId === rootAfterOrphan.runId), false);
 
       const coexist = await makeCoordinator("coexist");
       const firstTimestamp = new Date(Date.now() + 1_000).toISOString();
@@ -1995,7 +2342,7 @@ test("Copilot terminal semantic ownership blocks scope loss and cross-root nativ
   }
 });
 
-test("Copilot enriches an id-only manual personal selection from the exact owned registry entry", async () => {
+test("Copilot requires the exact owned path for a manual personal selection", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-copilot-manual-personal-"));
   const home = join(root, "home");
   const project = join(root, "project");
@@ -2040,10 +2387,12 @@ test("Copilot enriches an id-only manual personal selection from the exact owned
         event.agent === "manual-reviewer" && event.runtimeAgent === "manual-reviewer");
     };
 
-    assert.equal(await startsRoot("manual-personal-foreign-first", [foreign, exactOwned]), true,
-      "registry order hid the exact owned personal definition");
-    assert.equal(await startsRoot("manual-personal-owned-first", [exactOwned, foreign]), true,
-      "a later foreign collision invalidated an otherwise exact owned definition");
+    assert.equal(await startsRoot("manual-personal-foreign-first", [foreign, exactOwned]), false,
+      "an id-only current selection was upgraded to an owned path without host proof");
+    assert.equal(await startsRoot("manual-personal-owned-first", [exactOwned, foreign]), false,
+      "registry order allowed an id-only current selection to bypass the path proof");
+    assert.equal(await startsRoot("manual-personal-id-only", [exactOwned]), false,
+      "an id-only current selection was accepted despite a path-bearing exact registry identity");
     assert.equal(await startsRoot("manual-personal-foreign-only", [foreign]), false,
       "a foreign same-id definition was accepted as the personal player");
     assert.equal(await startsRoot("manual-personal-duplicate-owned", [exactOwned, { ...exactOwned }]), false,
@@ -2064,10 +2413,10 @@ test("Copilot enriches an id-only manual personal selection from the exact owned
 test("Copilot contiguous tool completion finalizes the child before session idle", async () => {
   const teamLead = copilotFixedAgentIds.get("team-lead")!;
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true }));
+  const agents = fixedCopilotAgents();
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: teamLead, userInvocable: true } }),
+    getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents }),
   } } }), undefined, (event) => { lifecycle.push(event); });
   await coordinator.refresh();
@@ -2096,4 +2445,72 @@ test("Copilot contiguous tool completion finalizes the child before session idle
   assert.equal(root.outcome, "completed");
   assert.ok(finishes.indexOf(child) < finishes.indexOf(root), "root terminal preceded its contiguous child terminal");
   assert.equal(JSON.stringify(lifecycle).includes("PRIVATE RESULT"), false);
+});
+
+test("Copilot bounds hostile hook results, native results, and errors before evidence hashing", async () => {
+  const teamLead = copilotFixedAgentIds.get("team-lead")!;
+  const crafter = copilotFixedAgentIds.get("crafter")!;
+  const agents = fixedCopilotAgents();
+  const evidence: any[] = [];
+  let getterCalls = 0;
+  const hostile: any = { huge: `PRIVATE:${"x".repeat(5_000_000)}:UNRETAINED` };
+  hostile.self = hostile;
+  Object.defineProperty(hostile, "secret", {
+    enumerable: true,
+    get: () => { getterCalls += 1; throw new Error("hostile getter executed"); },
+  });
+
+  const setup = async (sessionId: string) => {
+    const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
+      getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
+      reload: async () => ({ agents }),
+    } } }), (event) => { evidence.push(event); });
+    await coordinator.refresh();
+    const invocation = { sessionId };
+    const input = {
+      sessionId,
+      workingDirectory: process.cwd(),
+      toolName: "task",
+      toolArgs: { agent_type: crafter, prompt: "inspect hostile evidence" },
+    };
+    await coordinator.hooks.onUserPromptSubmitted({
+      sessionId, workingDirectory: process.cwd(), prompt: "coordinate",
+    }, invocation);
+    assert.equal((await coordinator.hooks.onPreToolUse(input, invocation))?.permissionDecision, "allow");
+    return { coordinator, input, invocation };
+  };
+
+  const started = performance.now();
+  const hook = await setup("hostile-hook-result");
+  await hook.coordinator.hooks.onPostToolUse({ ...hook.input, toolResult: hostile }, hook.invocation);
+
+  const nativeResult = await setup("hostile-native-result");
+  nativeResult.coordinator.observeEvent({
+    type: "tool.execution_complete",
+    data: { toolDescription: { name: "task" }, success: true, result: hostile },
+  });
+
+  const nativeError = await setup("hostile-native-error");
+  nativeError.coordinator.observeEvent({
+    type: "tool.execution_start",
+    data: { toolName: "task", toolCallId: "hostile-error-call" },
+  });
+  // Re-admit with the now-observed native call identity.
+  await nativeError.coordinator.hooks.onPostToolUseFailure(nativeError.input, nativeError.invocation);
+
+  const correlatedError = await setup("hostile-correlated-error");
+  correlatedError.coordinator.observeEvent({
+    type: "subagent.failed",
+    agentId: "hostile-error-child",
+    data: { agentName: crafter, error: hostile },
+  });
+  await correlatedError.coordinator.hooks.onPostToolUseFailure(correlatedError.input, correlatedError.invocation);
+
+  assert.equal(getterCalls, 0);
+  assert.ok(performance.now() - started < 1_500, "hostile evidence was serialized without a bounded projection");
+  const fingerprints = evidence.flatMap((event) => [event.evidence, event.error]).filter(Boolean);
+  assert.ok(fingerprints.length >= 3);
+  assert.ok(fingerprints.every(({ sha256, utf8Bytes }) => /^[a-f0-9]{64}$/u.test(sha256)
+    && utf8Bytes > 0 && utf8Bytes <= 30_000));
+  assert.equal(JSON.stringify(evidence).includes("PRIVATE"), false);
 });

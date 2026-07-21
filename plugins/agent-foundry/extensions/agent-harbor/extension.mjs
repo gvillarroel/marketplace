@@ -3,25 +3,47 @@
  * explicit player commands select one validated native agent for one bounded
  * host turn and expose process-local activity through `/team`.
  */
+import { createHash } from "node:crypto";
+import { posix, resolve, win32 } from "node:path";
 import { joinSession } from "@github/copilot-sdk/extension";
 import {
   copilotFixedAgentIds,
+  copilotScoutAgentId,
+  copilotAgentIdentityMatches,
   createCopilotCoordinatorGuard,
   listCopilotActiveProfileIds,
   resolveCopilotPlayer,
 } from "../../runtime/dist/adapters/copilot-coordinator.js";
 import {
   copilotPublicIdentifier,
+  copilotTaskLabel,
   CopilotTeamRuntime,
   formatCopilotMissionReport,
 } from "../../runtime/dist/adapters/copilot-team-runtime.js";
 import {
+  collectCopilotTeamMembers,
   formatCopilotDegradedTeamView,
   formatCopilotTeamView,
 } from "../../runtime/dist/adapters/copilot-team-view.js";
+import { runCopilotControl } from "../../runtime/dist/adapters/copilot.js";
 import { runDeterministicCommand } from "../../runtime/dist/adapters/direct.js";
-import { bundledPlayers, rolePlayers, scoutPlayer } from "../../runtime/dist/core/defaults.js";
+import { discoverStartupActiveProfiles, requireInvocablePlayer } from "../../runtime/dist/core/active.js";
+import {
+  assertHarborCustomToolAccess,
+  formatHarborTeamRosterSnapshot,
+  harborCustomToolNames,
+  harborCustomToolPolicy,
+  harborPlayerSkillToolSpec,
+  harborStaticCustomToolSpecs,
+  HarborScoutTurnGuard,
+  validateHarborCustomToolArguments,
+} from "../../runtime/dist/core/custom-tools.js";
+import { bundledPlayers, rolePlayers, scoutPlayer, trustedSkills } from "../../runtime/dist/core/defaults.js";
+import { GhResolver } from "../../runtime/dist/core/github.js";
 import { isHarborId } from "../../runtime/dist/core/identity.js";
+import { filterTrustedSkills, formatScoutSkillMatches } from "../../runtime/dist/core/scout.js";
+import { formatLoadedSkillGroup, loadConfiguredSkills } from "../../runtime/dist/core/skills.js";
+import { publicErrorText, publicMetadataText } from "../../runtime/dist/core/public-metadata.js";
 import { wrapPlainText } from "../../runtime/dist/core/text-layout.js";
 
 const controls = [
@@ -30,6 +52,27 @@ const controls = [
   ["retire", "0 model tokens · Unregister one personal teammate and deactivate it here."],
   ["list-skills", "0 model tokens · Search trusted skill snapshots and optional public descriptions."],
 ];
+const directChainSeedEventTypes = new Set([
+  "session.start",
+  "assistant.turn_start",
+  "session.model_change",
+  "assistant.usage",
+  "assistant.message",
+  "assistant.idle",
+  "tool.execution_start",
+  "tool.execution_complete",
+  "hook.end",
+  "skill.invoked",
+  "subagent.selected",
+  "subagent.deselected",
+  "subagent.started",
+  "subagent.completed",
+  "subagent.failed",
+  "abort",
+  "session.error",
+  "session.shutdown",
+  "session.idle",
+]);
 const directTimeoutMs = boundedEnvironmentNumber("AGENT_HARBOR_COPILOT_TIMEOUT_MS", 180_000, 1_000, 600_000);
 const abortSettlementMs = boundedEnvironmentNumber("AGENT_HARBOR_COPILOT_SETTLE_MS", 10_000, 250, 60_000);
 const hostRpcTimeoutMs = boundedEnvironmentNumber("AGENT_HARBOR_COPILOT_RPC_TIMEOUT_MS", 15_000, 250, 60_000);
@@ -42,10 +85,25 @@ const teamFormatTimeoutMs = boundedEnvironmentNumber(
   3_000,
 );
 const startupRefreshTimeoutMs = Math.min(300, teamBudgetMs);
+const directEventLedgerCapacity = 256;
+const maximumTeamArgumentBytes = 4_096;
+const maximumLifecycleArgumentBytes = 4_096;
+const maximumDefinitionArgumentBytes = 100_000;
+const maximumOpaqueHostIdBytes = 4_096;
 
 function boundedEnvironmentNumber(name, fallback, minimum, maximum) {
   const value = Number(process.env[name]);
   return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, Math.floor(value))) : fallback;
+}
+
+function opaqueDigest(namespace, value) {
+  if (typeof value !== "string" || !value || value.length > maximumOpaqueHostIdBytes ||
+      Buffer.byteLength(value, "utf8") > maximumOpaqueHostIdBytes) return undefined;
+  const digest = createHash("sha256");
+  digest.update(namespace, "utf8");
+  digest.update("\0", "utf8");
+  digest.update(value, "utf8");
+  return digest.digest("base64url");
 }
 
 class HostRpcTimeoutError extends Error {
@@ -84,7 +142,64 @@ async function boundedTeamCall(label, action, deadline, maximumSliceMs) {
 }
 
 function activeProfileIds(project) { return listCopilotActiveProfileIds(project); }
-function errorMessage(error) { return error instanceof Error ? error.message : String(error); }
+function errorMessage(error) {
+  try {
+    const raw = typeof error === "string"
+      ? error
+      : error instanceof Error && typeof error.message === "string"
+        ? error.message
+        : undefined;
+    return raw ? publicErrorText(raw, 600) ?? "Agent Harbor operation failed." : "Agent Harbor operation failed.";
+  } catch {
+    return "Agent Harbor operation failed.";
+  }
+}
+function publicErrorName(error, fallback = "Error") {
+  try {
+    return error instanceof Error
+      ? copilotPublicIdentifier(error.name, 80) ?? fallback
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
+function boundedAggregateErrors(error) {
+  try {
+    return error instanceof AggregateError && Array.isArray(error.errors)
+      ? error.errors.slice(0, 8)
+      : [];
+  } catch {
+    return [];
+  }
+}
+function publicFacingError(error, safeUsageCommand, depth = 0) {
+  const exactGeneratedUsage = error instanceof PlayerPreflightError &&
+    typeof safeUsageCommand === "string" && isHarborId(safeUsageCommand) &&
+    error.message === `usage: /${safeUsageCommand} <task>`;
+  const message = exactGeneratedUsage ? error.message : errorMessage(error);
+  const visible = error instanceof PlayerPreflightError
+    ? new PlayerPreflightError(message)
+    : error instanceof AggregateError && depth < 3
+      ? new AggregateError(
+          boundedAggregateErrors(error).map((child) => publicFacingError(child, undefined, depth + 1)),
+          message,
+        )
+      : new Error(message);
+  visible.name = publicErrorName(error, visible.name);
+  return visible;
+}
+function publicNativeToolError(error, depth = 0) {
+  const visible = error instanceof AggregateError && depth < 3
+    ? new AggregateError(
+        boundedAggregateErrors(error).map((child) => publicNativeToolError(child, depth + 1)),
+        errorMessage(error),
+      )
+    : new Error(errorMessage(error));
+  visible.name = publicErrorName(error, "Error") === "AbortError"
+    ? "AbortError"
+    : publicErrorName(error, visible.name);
+  return visible;
+}
 function memberKind(id) {
   if (id === "contract") return "utility";
   if (id === "team-lead") return "manager";
@@ -100,37 +215,101 @@ function benchListFilter(args) {
   return value.startsWith("list ") ? value.slice(5).trim() : undefined;
 }
 
-function conciseCopilotJoinResult(args) {
+function conciseCopilotJoinResult(args, refreshReady = true) {
   const input = JSON.parse(args);
   const id = copilotPublicIdentifier(input.name, 48) ?? "joined-player";
-  const role = copilotPublicIdentifier(input.description, 240) ?? "Personal Agent Harbor teammate";
+  const role = publicMetadataText(input.description, 240) ?? "Personal Agent Harbor teammate";
   const tools = Array.isArray(input.tools)
     ? input.tools.flatMap((tool) => copilotPublicIdentifier(tool, 80) ?? [])
     : [];
   const skills = Array.isArray(input.skills)
     ? input.skills.flatMap((skill) => copilotPublicIdentifier(skill?.name, 80) ? [`skill:${copilotPublicIdentifier(skill.name, 80)}`] : [])
     : [];
+  const configuredModel = publicMetadataText(typeof input.model === "string" ? input.model : "", 200);
   const capacity = [...tools, ...skills].join(", ") || "advisory";
-  return [
-    `✓ ${id} joined · personal · ready in this project`,
-    `Role: ${role}`,
-    `Capacity: ${capacity}`,
-    `Run now: /player ${id} <task>`,
-    `After restarting Copilot: /${id} <task>`,
-  ].join("\n");
+  const skillLoaderReady = skills.length === 0 || registeredNativeSkillTools.has(
+    harborPlayerSkillToolSpec({ name: input.name }).name,
+  );
+  const readyNow = refreshReady && skillLoaderReady;
+  return readyNow
+    ? [
+        `✓ ${id} joined · personal · registered in this project`,
+        `Role: ${role}`,
+        `Capacity: ${capacity}`,
+        `Model: ${configuredModel ? `configured ${configuredModel}` : "inherits the current Copilot host when run"}`,
+        `Availability: verify with /team member:${id}; run only when it reports ready.`,
+        `When ready: /player ${id} <task>`,
+        `After restarting Copilot: /${id} <task>`,
+      ].join("\n")
+    : [
+        `✓ ${id} stored · personal · pending Copilot reload`,
+        `Role: ${role}`,
+        `Capacity: ${capacity}`,
+        `Model: ${configuredModel ? `configured ${configuredModel}` : "inherits the current Copilot host when run"}`,
+        ...(skills.length && !skillLoaderReady
+          ? ["Configured skills require the extension tools registered at startup; reload Copilot before invoking this player."]
+          : ["Next: reload the Copilot session, then inspect /team before invoking this player."]),
+        `After reload: /player ${id} <task> or /${id} <task>`,
+      ].join("\n");
+}
+
+function playersPendingNativeSkillReload(project) {
+  return activeProfileIds(project).flatMap((id) => {
+    try {
+      const player = requireInvocablePlayer("copilot", project, id).definition;
+      if (!player.skills?.length || registeredNativeSkillTools.has(harborPlayerSkillToolSpec(player).name)) return [];
+      return [id];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function updateSessionPersonalAdmission(command, args, refreshReady) {
+  const value = args?.trim() ?? "";
+  if (command === "join") {
+    if (!refreshReady) return;
+    try {
+      const id = JSON.parse(value)?.name;
+      if (isHarborId(id)) sessionInvocablePersonalIds.add(id);
+    } catch { /* The deterministic command already validates successful joins. */ }
+    return;
+  }
+  if (command === "retire") {
+    // Keep the session admission tombstone so a retired player receives the
+    // precise missing/retired repair instead of being confused with a profile
+    // that startup discovery deliberately omitted.
+    return;
+  }
+  if (command !== "bench") return;
+  const match = /^(on|off)\s+([a-z0-9-]+)$/u.exec(value);
+  if (!match) return;
+  if (match[1] === "on" && refreshReady && startupActiveDiscovery.complete) {
+    sessionInvocablePersonalIds.add(match[2]);
+  }
 }
 
 async function inactivePlayerError(id, project) {
-  if (bundledPlayers.has(id)) {
-    return `Agent Harbor player is benched: ${id}; run /bench on ${id}`;
-  }
   try {
-    const inventory = await runDeterministicCommand("copilot", "bench", `list ${id}`, project);
-    if (new RegExp(`^${id} \\| personal \\| bench$`, "mu").test(inventory)) {
-      return `Agent Harbor personal player is benched: ${id}; run /bench on ${id}`;
+    const member = (await collectCopilotTeamMembers(project)).find((candidate) => candidate.id === id);
+    if (!member) {
+      return `Agent Harbor personal player is missing or retired: ${id}; re-run /join with the full definition or inspect /team ${id}`;
     }
-    if (new RegExp(`^${id} \\| personal \\| (?:stale|conflict)$`, "mu").test(inventory)) {
-      return `Agent Harbor personal player needs repair: ${id}; inspect /team ${id}, then re-run /join with the full definition and "replace":true if owned`;
+    if (member.availability === "ready") return undefined;
+    if (member.availability === "bench") {
+      return `Agent Harbor ${member.kind === "personal" ? "personal " : ""}player is benched: ${id}; run /bench on ${id}`;
+    }
+    if (member.availability === "conflict") {
+      return `Agent Harbor personal player has an unmanaged collision: ${id}; inspect /team ${id} and the colliding file. Agent Harbor will never overwrite it.`;
+    }
+    if (member.repairKind === "personal-active") {
+      return `Agent Harbor personal active profile is stale: ${id}; run /bench on ${id}, then reload the Copilot session.`;
+    }
+    if (member.repairKind === "personal-registration") {
+      return `Agent Harbor personal registration is stale: ${id}; re-run /join with the full definition and "replace":true, then reload the Copilot session.`;
+    }
+    if (member.repairKind === "bundled-profile") {
+      return `Agent Harbor bundled profile is stale: ${id}; run /bench on ${id}, then reload the Copilot session.`;
     }
   } catch { /* Preserve the missing/retired remediation below. */ }
   return `Agent Harbor personal player is missing or retired: ${id}; re-run /join with the full definition or inspect /team ${id}`;
@@ -145,7 +324,17 @@ let unsettledSelection;
 let selectionRestoreHazard;
 let coordinatorReady = false;
 let selectionQueue = Promise.resolve();
-let notificationLogPending = false;
+let selectionClaimed = false;
+const nativeToolCallsByRun = new Map();
+const nativeScoutGuardsByRun = new Map();
+const nativeToolControllers = new Map();
+const registeredNativeSkillTools = new Set();
+const sessionInvocablePersonalIds = new Set();
+const maximumNotificationLogQueue = 8;
+const notificationLogQueue = [];
+let notificationLogDraining = false;
+let logCircuitOpenUntil = 0;
+const logCircuitCooldownMs = Math.min(1_000, Math.max(100, logRpcTimeoutMs));
 let lastKnownProject;
 let projectScopeVerified = false;
 
@@ -156,30 +345,75 @@ function rememberProjectScope(project) {
   return project;
 }
 
-function safeLog(message, options = {}) {
-  if (notificationLogPending) return Promise.resolve();
-  notificationLogPending = true;
-  return emitLog(message, options)
-    .catch(() => undefined)
-    .finally(() => { notificationLogPending = false; });
+function safeLog(message, options = {}, priority = "normal") {
+  return new Promise((resolve) => {
+    if (notificationLogQueue.length >= maximumNotificationLogQueue) {
+      if (priority !== "terminal") {
+        resolve();
+        return;
+      }
+      const normalIndex = notificationLogQueue.findIndex((entry) => entry.priority !== "terminal");
+      const evictedIndex = normalIndex >= 0 ? normalIndex : 0;
+      const [evicted] = notificationLogQueue.splice(evictedIndex, 1);
+      evicted?.resolve();
+    }
+    notificationLogQueue.push({ message, options, priority, resolve });
+    void drainNotificationLogs();
+  });
+}
+
+async function drainNotificationLogs() {
+  if (notificationLogDraining) return;
+  notificationLogDraining = true;
+  try {
+    while (notificationLogQueue.length) {
+      const terminalIndex = notificationLogQueue.findIndex((entry) => entry.priority === "terminal");
+      const [entry] = notificationLogQueue.splice(terminalIndex >= 0 ? terminalIndex : 0, 1);
+      try { await emitLog(entry.message, entry.options); }
+      catch { /* Best-effort notifications never block the requested command. */ }
+      entry.resolve();
+    }
+  } finally {
+    notificationLogDraining = false;
+    if (notificationLogQueue.length) void drainNotificationLogs();
+  }
 }
 
 function displayLog(message, options = {}) {
   return emitLog(message, options);
 }
 
-function emitLog(message, options = {}) {
-  return boundedHostCall(
-    "Copilot session.log",
-    () => session.log(wrapPlainText(message), { ephemeral: true, ...options }),
-    logRpcTimeoutMs,
-  );
+async function emitLog(message, options = {}) {
+  const remainingCircuitMs = logCircuitOpenUntil - Date.now();
+  if (remainingCircuitMs > 0) {
+    throw new HostRpcTimeoutError("Copilot session.log circuit open after a prior timeout", remainingCircuitMs);
+  }
+  try {
+    const result = await boundedHostCall(
+      "Copilot session.log",
+      () => session.log(wrapPlainText(message), { ephemeral: true, ...options }),
+      logRpcTimeoutMs,
+    );
+    logCircuitOpenUntil = 0;
+    return result;
+  } catch (error) {
+    if (error instanceof HostRpcTimeoutError) {
+      logCircuitOpenUntil = Date.now() + logCircuitCooldownMs;
+    }
+    throw error;
+  }
 }
 
 function withSelectionLock(action) {
+  if (selectionClaimed) {
+    return Promise.reject(new PlayerPreflightError(
+      "Another Agent Harbor player selection is already queued or in progress; inspect /team and retry after it settles",
+    ));
+  }
+  selectionClaimed = true;
   const result = selectionQueue.then(action, action);
   selectionQueue = result.then(() => undefined, () => undefined);
-  return result;
+  return result.finally(() => { selectionClaimed = false; });
 }
 
 function deferred() {
@@ -203,15 +437,24 @@ async function currentProject() {
   throw new Error("Copilot project scope is unavailable; project-scoped controls fail closed");
 }
 
+function normalizedCurrentModelSettings(current) {
+  const modelId = typeof current?.modelId === "string" && current.modelId.length <= 300
+    ? current.modelId.trim()
+    : "";
+  const modelUnreported = !modelId || /^(?:unknown(?:\/default)?|default)$/iu.test(modelId);
+  return {
+    ...(modelUnreported ? { modelUnreported: true } : { model: modelId }),
+    reasoningEffort: current?.reasoningEffort === null ? "none" : current?.reasoningEffort,
+  };
+}
+
 async function currentModelSettings() {
   try {
-    const current = await boundedHostCall("Copilot current model", () => session.rpc.model.getCurrent());
-    return {
-      model: current.modelId,
-      reasoningEffort: current.reasoningEffort === null ? "none" : current.reasoningEffort,
-    };
+    return normalizedCurrentModelSettings(
+      await boundedHostCall("Copilot current model", () => session.rpc.model.getCurrent()),
+    );
   } catch {
-    return {};
+    return { modelUnreported: true };
   }
 }
 
@@ -220,11 +463,22 @@ async function restoreSelection(previous) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       if (previous.agent) {
-        await boundedHostCall("Copilot selection restore", () => session.rpc.agent.select({ name: previous.agent.id }));
+        const restored = await boundedHostCall(
+          "Copilot selection restore",
+          () => session.rpc.agent.select({ name: previous.agent.id }),
+        );
+        if (!copilotAgentIdentityMatches(previous.agent, restored?.agent)) {
+          throw new Error("Copilot selection restore returned a different native identity");
+        }
+        await boundedHostCall("Copilot coordinator refresh", () => coordinator.refresh(previous.agent));
       } else {
         await boundedHostCall("Copilot selection restore", () => session.rpc.agent.deselect());
+        const restored = await boundedHostCall("Copilot deselection verification", () => session.rpc.agent.getCurrent());
+        if (restored.agent !== undefined && restored.agent !== null) {
+          throw new Error("Copilot deselection did not restore an empty native selection");
+        }
+        await boundedHostCall("Copilot coordinator refresh", () => coordinator.refreshAuthoritative());
       }
-      await boundedHostCall("Copilot coordinator refresh", () => coordinator.refreshAuthoritative());
       coordinatorReady = true;
       return;
     } catch (error) {
@@ -242,14 +496,20 @@ function finishDirectRuntime(runId, terminal) {
 
 function releaseDirectControl(runId) {
   abortableRoots.delete(runId);
+  nativeToolCallsByRun.delete(runId);
+  nativeScoutGuardsByRun.get(runId)?.terminate("Copilot root run ended");
+  nativeScoutGuardsByRun.delete(runId);
   if (activeDirect?.runId === runId) activeDirect = undefined;
 }
 
 async function runPlayer(id, rawTask, command = id) {
-  const task = rawTask?.trim() ?? "";
+  const raw = typeof rawTask === "string" ? rawTask : "";
+  if (raw.length > 30_000 || Buffer.byteLength(raw, "utf8") > 30_000) {
+    throw new PlayerPreflightError("Agent Harbor task exceeds 30000 bytes");
+  }
+  const task = raw.trim();
   if (!task) throw new PlayerPreflightError(`usage: /${command} ${command === "player" ? "<id> <task>" : "<task>"}`);
   if (!isHarborId(id)) throw new PlayerPreflightError("invalid Agent Harbor player ID; expected 1-48 lowercase letters, digits, or hyphens");
-  if (Buffer.byteLength(task, "utf8") > 30_000) throw new PlayerPreflightError("Agent Harbor task exceeds 30000 bytes");
 
   let modelAttempted = false;
   try {
@@ -273,8 +533,26 @@ async function runPlayer(id, rawTask, command = id) {
       const detail = tracked ? ` (tracked as ${tracked.rootRunId})` : "";
       throw new Error(`Copilot already has active work${detail}; wait or use /team stop <run-id|all> before selecting another player`);
     }
-    if (id !== scoutPlayer.name && !copilotFixedAgentIds.has(id) && !activeProfileIds(project).includes(id)) {
-      throw new Error(await inactivePlayerError(id, project));
+    if (id !== scoutPlayer.name && !copilotFixedAgentIds.has(id)) {
+      if (!bundledPlayers.has(id) && !sessionInvocablePersonalIds.has(id)) {
+        throw new Error(
+          `Agent Harbor personal player was not admitted by this session's bounded startup discovery: ${id}; ` +
+          "repair any startup warning and reload Copilot, or join/activate the player explicitly in this session",
+        );
+      }
+      const inactive = await inactivePlayerError(id, project);
+      if (inactive) throw new Error(inactive);
+    }
+    if (id !== scoutPlayer.name) {
+      const player = requireInvocablePlayer("copilot", project, id).definition;
+      if (player.skills?.length) {
+        const skillTool = harborPlayerSkillToolSpec(player).name;
+        if (!registeredNativeSkillTools.has(skillTool)) {
+          throw new Error(
+            `Agent Harbor player ${id} has configured skills whose native loader was not registered at startup; reload Copilot before invoking it`,
+          );
+        }
+      }
     }
 
     const previous = await boundedHostCall("Copilot current agent", () => session.rpc.agent.getCurrent());
@@ -309,7 +587,14 @@ async function runPlayer(id, rawTask, command = id) {
     let stopRequested = false;
     let promptAttempted = false;
     let promptPhase = "before";
-    const acceptanceTerminals = [];
+    // Prompt acceptance can lag behind the native event stream. Retain only
+    // one strongest terminal plus one idle candidate: an adversarial terminal
+    // flood must not become an unbounded queue, and a provider/session error
+    // must always dominate a weaker cancellation or idle observation.
+    let acceptanceStrongTerminal;
+    let acceptanceIdleTerminal;
+    let acceptanceSignalVersion = 0;
+    let acceptanceSignalWaiter = deferred();
     const directStartedAt = runtime.get(runId)?.startedAt ?? Date.now();
     const directEventIds = new Set();
     let idleValidationGeneration = 0;
@@ -318,8 +603,34 @@ async function runPlayer(id, rawTask, command = id) {
       terminalValue = value;
       terminal.resolve(value);
     };
+    const signalAcceptanceTerminal = () => {
+      acceptanceSignalVersion += 1;
+      acceptanceSignalWaiter.resolve(acceptanceSignalVersion);
+      acceptanceSignalWaiter = deferred();
+    };
+    const waitForAcceptanceTerminal = (observedVersion) => acceptanceSignalVersion !== observedVersion
+      ? Promise.resolve(acceptanceSignalVersion)
+      : acceptanceSignalWaiter.promise;
+    const acceptanceTerminalPriority = (value) => value.outcome === "failed" ? 2 : 1;
+    const bufferAcceptanceTerminal = (kind, value) => {
+      if (kind === "error") {
+        if (!acceptanceStrongTerminal ||
+            acceptanceTerminalPriority(value) > acceptanceTerminalPriority(acceptanceStrongTerminal)) {
+          acceptanceStrongTerminal = value;
+          acceptanceIdleTerminal = undefined;
+          signalAcceptanceTerminal();
+        }
+        return;
+      }
+      if (!acceptanceStrongTerminal && !acceptanceIdleTerminal) {
+        acceptanceIdleTerminal = value;
+        signalAcceptanceTerminal();
+      }
+    };
     const settleStrong = (value) => {
-      if (promptPhase === "accepting" && !stopRequested) acceptanceTerminals.push({ kind: "error", value });
+      if (promptPhase === "accepting" && !stopRequested) {
+        bufferAcceptanceTerminal("error", value);
+      }
       else settle(value);
     };
     const directTimestamp = (event) => event.timestamp === undefined ? Number.NaN : Date.parse(event.timestamp);
@@ -327,11 +638,26 @@ async function runPlayer(id, rawTask, command = id) {
       const timestamp = directTimestamp(event);
       return !Number.isFinite(timestamp) || timestamp >= directStartedAt;
     };
-    const directOpaqueId = (value) => typeof value === "string" && value ? value : undefined;
+    // Event IDs are correlation-only. Keep fixed-size digests rather than raw
+    // host-controlled IDs, which may be very large or contain private data.
+    const directOpaqueId = (value) => opaqueDigest("direct-event", value);
+    const directEventIdsAreBounded = (event) => [event.id, event.parentId].every((value) =>
+      value === undefined || value === null ||
+      (typeof value === "string" && value.length <= maximumOpaqueHostIdBytes &&
+        Buffer.byteLength(value, "utf8") <= maximumOpaqueHostIdBytes));
     const directEventBelongs = (event) => {
+      if (!directEventIdsAreBounded(event)) return false;
       if (!directTimestampIsCurrent(event)) return false;
       const parentId = directOpaqueId(event.parentId);
-      if (parentId !== undefined) return directEventIds.has(parentId) || directEventIds.size === 0;
+      const canSeedChain = directChainSeedEventTypes.has(event.type);
+      if (parentId !== undefined) {
+        if (directEventIds.has(parentId)) return true;
+        return canSeedChain && directEventIds.size === 0;
+      }
+      // Stream fragments and other non-lifecycle notifications cannot prove
+      // ownership on their own. They may extend a known native parent, but
+      // must never poison an empty direct-run chain with a replayed ID.
+      if (!canSeedChain) return false;
       const timestamp = directTimestamp(event);
       if (Number.isFinite(timestamp)) return true;
       // Untimed, unparented events can seed a run only with a new native ID.
@@ -344,7 +670,7 @@ async function runPlayer(id, rawTask, command = id) {
     const rememberDirectEvent = (event) => {
       const eventId = directOpaqueId(event.id);
       if (!eventId || directEventIds.has(eventId)) return;
-      if (directEventIds.size >= 256) {
+      if (directEventIds.size >= directEventLedgerCapacity) {
         const oldest = directEventIds.values().next().value;
         if (oldest) directEventIds.delete(oldest);
       }
@@ -371,11 +697,13 @@ async function runPlayer(id, rawTask, command = id) {
       }).catch(() => undefined);
     };
     const reconcileAcceptanceTerminals = async () => {
-      if (!acceptanceTerminals.length || terminalValue) return;
-      const errorCandidate = acceptanceTerminals.find(({ kind }) => kind === "error");
-      if (errorCandidate) {
-        acceptanceTerminals.length = 0;
-        settle(errorCandidate.value);
+      if ((!acceptanceStrongTerminal && !acceptanceIdleTerminal) || terminalValue) return;
+      const strongCandidate = acceptanceStrongTerminal;
+      const idleCandidate = acceptanceIdleTerminal;
+      acceptanceStrongTerminal = undefined;
+      acceptanceIdleTerminal = undefined;
+      if (strongCandidate) {
+        settle(strongCandidate);
         return;
       }
       // A pre-acceptance idle may belong to the previous turn. Give host
@@ -386,15 +714,40 @@ async function runPlayer(id, rawTask, command = id) {
           boundedHostCall("Copilot post-acceptance activity", () => session.rpc.metadata.activity()),
           boundedHostCall("Copilot post-acceptance processing state", () => session.rpc.metadata.isProcessing()),
         ]);
-        if (!activity.hasActiveWork && !processing.processing) {
-          const candidate = acceptanceTerminals.at(-1);
-          if (candidate) settle(candidate.value);
+        // A strong terminal may have arrived while activity was stabilizing.
+        // It remains dominant over the earlier idle candidate.
+        if (acceptanceStrongTerminal) {
+          const lateStrong = acceptanceStrongTerminal;
+          acceptanceStrongTerminal = undefined;
+          acceptanceIdleTerminal = undefined;
+          settle(lateStrong);
+        } else if (!activity.hasActiveWork && !processing.processing && idleCandidate) {
+          settle(idleCandidate);
         }
       } catch { /* Uncertain host state must not restore selection early. */ }
-      acceptanceTerminals.length = 0;
+    };
+    const awaitPromptAcceptance = async (action) => {
+      const call = boundedHostCall("Copilot prompt acceptance", action).then(
+        () => ({ kind: "accepted" }),
+        (error) => ({ kind: "error", error }),
+      );
+      let observedSignalVersion = acceptanceSignalVersion;
+      while (true) {
+        const outcome = await Promise.race([
+          call,
+          waitForAcceptanceTerminal(observedSignalVersion)
+            .then((version) => ({ kind: "terminal-signal", version })),
+        ]);
+        if (outcome.kind !== "terminal-signal") return outcome;
+        observedSignalVersion = outcome.version;
+        await reconcileAcceptanceTerminals();
+        if (terminalValue) return { kind: "terminal", result: terminalValue };
+      }
     };
     const unsubscribe = session.on((event) => {
       if (!promptAttempted && !stopRequested) return;
+      if (["abort", "session.error", "session.idle", "session.shutdown"].includes(event.type) &&
+          !eventMatchesCurrentSession(event)) return;
       const hostDisposition = coordinator.hostEventDisposition(event);
       if (hostDisposition === "replay") return;
       if (hostDisposition === "unverified") return;
@@ -428,7 +781,9 @@ async function runPlayer(id, rawTask, command = id) {
         const value = event.data?.aborted
           ? { outcome: "cancelled", error: new Error(`Agent Harbor player was cancelled: ${id}`) }
           : { outcome: "completed" };
-        if (promptPhase === "accepting" && !stopRequested) acceptanceTerminals.push({ kind: "idle", value });
+        if (promptPhase === "accepting" && !stopRequested) {
+          bufferAcceptanceTerminal("idle", value);
+        }
         else validateAcceptedIdle(event, value);
       } else if (directEventBelongs(event)) {
         rememberDirectEvent(event);
@@ -440,6 +795,11 @@ async function runPlayer(id, rawTask, command = id) {
         settle({ outcome: "cancelled", error: new Error(`Agent Harbor player was cancelled before prompt acceptance: ${id}`) });
       }
       runtime.setState(runId, "cleaning");
+      abortNativeTools(`Agent Harbor stop requested for run ${runId}`, {
+        project,
+        runIds: new Set([runId]),
+        includeUnbound: true,
+      });
       try { await boundedHostCall("Copilot abort", () => session.abort()); }
       finally {
         void safeLog(`[Agent Harbor player · ${id} · run ${runId}]\nStop requested; waiting for Copilot to settle…`, { level: "warning" });
@@ -483,15 +843,29 @@ async function runPlayer(id, rawTask, command = id) {
     try {
       selectionAttempted = true;
       try {
-        await boundedHostCall("Copilot player selection", () => session.rpc.agent.select({ name: agent.id }));
+        const selected = await boundedHostCall(
+          "Copilot player selection",
+          () => session.rpc.agent.select({ name: agent.id }),
+        );
+        if (!copilotAgentIdentityMatches(agent, selected?.agent)) {
+          throw new Error("Copilot player selection returned a different native identity");
+        }
       } catch (error) {
         ambiguousSelection = error instanceof HostRpcTimeoutError;
         throw error;
       }
-      await boundedHostCall("Copilot coordinator selection sync", () => coordinator.refresh(agent.id));
+      await boundedHostCall("Copilot coordinator selection sync", () => coordinator.refresh(agent));
       coordinatorReady = true;
       const safeTask = runtime.get(runId)?.task ?? "(task not disclosed)";
-      await safeLog(`[Agent Harbor player · ${id} · run ${runId}]\nStarting: selected ${id}; sending “${safeTask}”\nInspect progress with /team.`, { level: "info" });
+      if (stopRequested) {
+        const cancelled = { outcome: "cancelled", error: new Error(`Agent Harbor player was cancelled before prompt acceptance: ${id}`) };
+        settle(cancelled);
+        throw cancelled.error;
+      }
+      await safeLog(`[Agent Harbor player · ${id} · run ${runId}]\nPrepared: selected ${id}; no model call yet.\nTask: “${safeTask}” · inspect progress with /team.`, { level: "info" });
+      // Give a stop command queued while the preparation notice was being
+      // displayed one event-loop turn to claim the run before session.send.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       if (stopRequested) {
         const cancelled = { outcome: "cancelled", error: new Error(`Agent Harbor player was cancelled before prompt acceptance: ${id}`) };
         settle(cancelled);
@@ -500,8 +874,7 @@ async function runPlayer(id, rawTask, command = id) {
       let result;
       let timeoutFailure;
       let abortFailure;
-      try {
-        await boundedHostCall("Copilot prompt acceptance", () => {
+      const acceptance = await awaitPromptAcceptance(() => {
           // The check and call are one synchronous event-loop step. A queued
           // /team stop can therefore win before this callback, but never in
           // between the check and session.send itself.
@@ -513,15 +886,18 @@ async function runPlayer(id, rawTask, command = id) {
           modelAttempted = true;
           return session.send({ prompt: task });
         });
+      if (acceptance.kind === "error" && !(acceptance.error instanceof HostRpcTimeoutError)) {
+        throw acceptance.error;
+      }
+      if (acceptance.kind === "accepted" || acceptance.kind === "terminal" ||
+          acceptance.error instanceof HostRpcTimeoutError) {
         sendAccepted = true;
         promptPhase = "accepted";
-        await reconcileAcceptanceTerminals();
-        if (!terminalValue) runtime.setState(runId, "working");
-      } catch (error) {
-        if (!(error instanceof HostRpcTimeoutError)) throw error;
-        sendAccepted = true;
-        promptPhase = "accepted";
-        timeoutFailure = error;
+      }
+      if (acceptance.kind === "terminal") {
+        result = acceptance.result;
+      } else if (acceptance.kind === "error") {
+        timeoutFailure = acceptance.error;
         await reconcileAcceptanceTerminals();
         if (terminalValue) {
           result = terminalValue;
@@ -529,6 +905,10 @@ async function runPlayer(id, rawTask, command = id) {
         } else {
           ({ result, abortFailure } = await waitAfterAbort(`Run ${runId} timed out waiting for Copilot to accept the prompt`));
         }
+      } else {
+        await reconcileAcceptanceTerminals();
+        if (terminalValue) result = terminalValue;
+        else runtime.setState(runId, "working");
       }
 
       if (!result) result = await Promise.race([terminal.promise, delay(directTimeoutMs, { timeout: true })]);
@@ -607,6 +987,12 @@ function mapLifecycleState(state) {
 function registerAbortableRoot(runId) {
   abortableRoots.set(runId, async () => {
     runtime.setState(runId, "cleaning");
+    const run = runtime.get(runId);
+    abortNativeTools(`Agent Harbor stop requested for run ${runId}`, {
+      project: run?.project,
+      runIds: new Set([runId]),
+      includeUnbound: true,
+    });
     await boundedHostCall("Copilot abort", () => session.abort());
   });
 }
@@ -723,6 +1109,10 @@ function lifecycleHook(event) {
             ? "none"
             : event.reasoningEffort ?? run?.reasoningEffort,
           ...event.usage,
+          cost: event.billing?.modelMultiplier,
+          ...(event.billing?.totalNanoAiu === undefined
+            ? {}
+            : { copilotUsage: { totalNanoAiu: event.billing.totalNanoAiu } }),
         },
       }, runId);
     } else if (event.type === "run.finished") {
@@ -747,17 +1137,62 @@ function lifecycleHook(event) {
       correlationRuns.delete(event.runId);
       void safeLog(`[Agent Harbor team · run ${run?.rootRunId ?? runId}]\n${event.agent} ${event.outcome} · ${runId}.`, {
         level: event.outcome === "completed" ? "info" : "warning",
-      });
+      }, "terminal");
     }
   } catch (error) {
     void safeLog(`[Agent Harbor observability]\nLifecycle event could not be recorded: ${errorMessage(error)}`, { level: "warning" });
   }
 }
 
+const maximumGuardEvidenceQueue = 6;
+const maximumGuardEvidenceLogQueue = 8;
 const guardEvidenceQueue = [];
-let guardEvidenceLogging = Promise.resolve();
+const guardEvidenceLogQueue = [];
+let guardEvidenceLogDraining = false;
+let guardEvidenceGeneration = 0;
+async function drainGuardEvidenceLogs() {
+  if (guardEvidenceLogDraining) return;
+  guardEvidenceLogDraining = true;
+  try {
+    while (guardEvidenceLogQueue.length) {
+      const entry = guardEvidenceLogQueue.shift();
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (entry.generation !== guardEvidenceGeneration) break;
+        try {
+          await boundedHostCall(
+            "Copilot guard evidence log",
+            () => session.log(entry.message, { level: "info", type: "agent-harbor-guard", ephemeral: true }),
+            logRpcTimeoutMs,
+          );
+          break;
+        } catch (error) {
+          if (error instanceof HostRpcTimeoutError || entry.generation !== guardEvidenceGeneration) break;
+          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+        }
+      }
+    }
+  } finally {
+    guardEvidenceLogDraining = false;
+    if (guardEvidenceLogQueue.length) void drainGuardEvidenceLogs();
+  }
+}
+function queueGuardEvidenceLog(evidence) {
+  if (guardEvidenceLogQueue.length >= maximumGuardEvidenceLogQueue) return;
+  guardEvidenceLogQueue.push({ message: JSON.stringify(evidence), generation: guardEvidenceGeneration });
+  void drainGuardEvidenceLogs();
+}
+function clearGuardEvidenceQueues() {
+  guardEvidenceGeneration += 1;
+  guardEvidenceQueue.length = 0;
+  guardEvidenceLogQueue.length = 0;
+}
 const coordinator = createCopilotCoordinatorGuard(() => session, (event) => {
   if (event.phase !== "target.resolved") return;
+  if (guardEvidenceQueue.length >= maximumGuardEvidenceQueue) {
+    guardEvidenceQueue.length = 0;
+    void safeLog("[Agent Harbor guard]\nGuard evidence queue saturated and was cleared; delegation remains fail-closed in the coordinator.", { level: "warning" });
+    return;
+  }
   guardEvidenceQueue.push({
     schema: event.schema,
     source: event.source,
@@ -794,6 +1229,374 @@ const coordinator = createCopilotCoordinatorGuard(() => session, (event) => {
   });
   correlationRuns.set(input.runId, runId);
 });
+
+function looksLikeWindowsPath(value) {
+  return typeof value === "string" && (win32.isAbsolute(value) || /^[A-Za-z]:[\\/]/u.test(value));
+}
+
+function normalizedAuthorizationPath(value, windowsStyle) {
+  if (typeof value !== "string" || !value || value.includes("\0")) return undefined;
+  if (windowsStyle) {
+    return win32.normalize(value).replace(/\\/gu, "/").replace(/\/+$/u, "").toLowerCase();
+  }
+  const normalized = posix.isAbsolute(value) ? posix.normalize(value) : resolve(value);
+  return normalized.length > 1 ? normalized.replace(/\/+$/u, "") : normalized;
+}
+
+function equivalentAuthorizationPath(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  const windowsStyle = looksLikeWindowsPath(left) || looksLikeWindowsPath(right);
+  const normalizedLeft = normalizedAuthorizationPath(left, windowsStyle);
+  const normalizedRight = normalizedAuthorizationPath(right, windowsStyle);
+  return normalizedLeft !== undefined && normalizedLeft === normalizedRight;
+}
+
+function sameProject(left, right) {
+  return equivalentAuthorizationPath(left, right);
+}
+
+function exactNativeToolInvocation(expectedName, args, invocation) {
+  const allowedKeys = new Set(["arguments", "sessionId", "toolCallId", "toolName", "traceparent", "tracestate"]);
+  if (!invocation || typeof invocation !== "object" || Array.isArray(invocation) ||
+      Object.keys(invocation).some((key) => !allowedKeys.has(key)) ||
+      !Object.hasOwn(invocation, "arguments") ||
+      invocation.sessionId !== session.sessionId ||
+      typeof invocation.toolCallId !== "string" || !invocation.toolCallId ||
+      invocation.toolCallId.length > maximumOpaqueHostIdBytes ||
+      Buffer.byteLength(invocation.toolCallId, "utf8") > maximumOpaqueHostIdBytes ||
+      invocation.toolName !== expectedName ||
+      (invocation.traceparent !== undefined && typeof invocation.traceparent !== "string") ||
+      (invocation.tracestate !== undefined && typeof invocation.tracestate !== "string")) {
+    throw new Error(`Agent Harbor custom tool ${expectedName} received an invalid Copilot invocation identity`);
+  }
+  const handlerCall = validateHarborCustomToolArguments(expectedName, args);
+  const nativeCall = validateHarborCustomToolArguments(expectedName, invocation.arguments);
+  if (JSON.stringify(handlerCall) !== JSON.stringify(nativeCall)) {
+    throw new Error(`Agent Harbor custom tool ${expectedName} handler arguments do not match its native invocation`);
+  }
+  // Preserve the host-provided identity and arguments. In particular, never
+  // replace `invocation.arguments` with the separately supplied handler args:
+  // the coordinator authenticates this exact native object.
+  return invocation;
+}
+
+class DuplicateNativeToolCallError extends Error {
+  constructor() {
+    super("Agent Harbor rejected duplicate active native tool call ID");
+    this.name = "DuplicateNativeToolCallError";
+  }
+}
+
+async function withNativeToolAbort(expectedName, args, invocation, action) {
+  const exactInvocation = exactNativeToolInvocation(expectedName, args, invocation);
+  const callKey = opaqueDigest("native-tool-call", exactInvocation.toolCallId);
+  if (!callKey) throw new Error(`Agent Harbor custom tool ${expectedName} received an invalid Copilot call ID`);
+  if (nativeToolControllers.has(callKey)) {
+    throw new DuplicateNativeToolCallError();
+  }
+  const controller = new AbortController();
+  const control = {
+    controller,
+    sessionId: exactInvocation.sessionId,
+    project: undefined,
+    runId: undefined,
+    committed: false,
+    bind(project, runId) {
+      this.project = project;
+      this.runId = runId;
+    },
+    markCommitted() { this.committed = true; },
+  };
+  nativeToolControllers.set(callKey, control);
+  try {
+    return await action(controller.signal, exactInvocation, control);
+  } finally {
+    if (nativeToolControllers.get(callKey) === control) {
+      nativeToolControllers.delete(callKey);
+    }
+  }
+}
+
+function abortNativeTools(reason, scope = {}) {
+  const abortReason = new DOMException(reason, "AbortError");
+  for (const control of nativeToolControllers.values()) {
+    if (scope.sessionId !== undefined && control.sessionId !== scope.sessionId) continue;
+    if (scope.project !== undefined && control.project !== undefined &&
+        !sameProject(scope.project, control.project)) continue;
+    if (scope.runIds instanceof Set) {
+      if (control.runId === undefined && !scope.includeUnbound) continue;
+      if (control.runId !== undefined && !scope.runIds.has(control.runId)) continue;
+    }
+    if (!control.controller.signal.aborted) control.controller.abort(abortReason);
+  }
+  if (scope.sessionId !== undefined && scope.sessionId !== session.sessionId) return;
+  for (const [runId, guard] of nativeScoutGuardsByRun) {
+    if (scope.runIds instanceof Set && !scope.runIds.has(runId)) continue;
+    const run = runtime.get(runId);
+    if (scope.project !== undefined && (!run || !sameProject(scope.project, run.project))) continue;
+    guard.terminate(reason);
+  }
+}
+
+function logicalCopilotAgentId(agent) {
+  if (!agent) return undefined;
+  if (agent.id === copilotScoutAgentId) return scoutPlayer.name;
+  for (const [logical, native] of copilotFixedAgentIds) {
+    if (agent.id === native) return logical;
+  }
+  return isHarborId(agent.id) ? agent.id : undefined;
+}
+
+async function authenticatedNativeToolContext(expectedName, args, invocation, expectedAgent) {
+  const exactInvocation = exactNativeToolInvocation(expectedName, args, invocation);
+  const project = await currentProject();
+  const current = await boundedHostCall("Copilot custom-tool current agent", () => session.rpc.agent.getCurrent());
+  const logicalCurrent = logicalCopilotAgentId(current.agent);
+  if (expectedAgent !== undefined) {
+    if (logicalCurrent !== expectedAgent) {
+      throw new Error(`Agent Harbor custom tool ${expectedName} is not owned by the current Copilot player`);
+    }
+    const listed = await boundedHostCall("Copilot custom-tool agent list", () => session.rpc.agent.list());
+    const resolved = resolveCopilotPlayer(expectedAgent, listed.agents, project);
+    if (!copilotAgentIdentityMatches(resolved, current.agent)) {
+      throw new Error(`Agent Harbor custom tool ${expectedName} could not verify current-player ownership`);
+    }
+  } else if (current.agent !== undefined) {
+    if (logicalCurrent === undefined || logicalCurrent === scoutPlayer.name) {
+      throw new Error(`Agent Harbor custom tool ${expectedName} could not verify current-player ownership`);
+    }
+    requireInvocablePlayer("copilot", project, logicalCurrent);
+    const listed = await boundedHostCall("Copilot custom-tool agent list", () => session.rpc.agent.list());
+    const resolved = resolveCopilotPlayer(logicalCurrent, listed.agents, project);
+    if (!copilotAgentIdentityMatches(resolved, current.agent)) {
+      throw new Error(`Agent Harbor custom tool ${expectedName} could not verify current-player ownership`);
+    }
+  }
+  return { exactInvocation, project, currentAgent: logicalCurrent };
+}
+
+function activeNativeToolRoot(expectedAgent, project, name) {
+  const direct = activeDirect;
+  const run = direct && runtime.get(direct.runId);
+  if (!direct || direct.sessionId !== session.sessionId || direct.id !== expectedAgent ||
+      !sameProject(direct.project, project) || !run || run.state === "cleaning" ||
+      run.state === "completed" || run.state === "failed" || run.state === "cancelled") {
+    throw new Error(`Agent Harbor custom tool ${name} requires an active ${expectedAgent} root run`);
+  }
+  return direct.runId;
+}
+
+function consumeNativeToolCall(runId, name) {
+  const policy = harborCustomToolPolicy(name);
+  if (!policy) throw new Error(`unknown Agent Harbor custom tool: ${name}`);
+  let counts = nativeToolCallsByRun.get(runId);
+  if (!counts) {
+    counts = new Map();
+    nativeToolCallsByRun.set(runId, counts);
+  }
+  const prior = counts.get(name) ?? 0;
+  if (prior >= policy.maximumCalls) {
+    throw new Error(`Agent Harbor custom tool ${name} reached its per-run limit (${policy.maximumCalls})`);
+  }
+  counts.set(name, prior + 1);
+}
+
+function scoutTurnGuard(runId) {
+  let guard = nativeScoutGuardsByRun.get(runId);
+  if (!guard) {
+    guard = new HarborScoutTurnGuard();
+    nativeScoutGuardsByRun.set(runId, guard);
+  }
+  return guard;
+}
+
+async function boundedScoutRoster(query, project, signal) {
+  signal.throwIfAborted();
+  const listed = await boundedHostCall(
+    "Copilot talent-scout native roster",
+    () => session.rpc.agent.list(),
+    Math.min(hostRpcTimeoutMs, 3_000),
+  );
+  if (!Array.isArray(listed?.agents)) throw new Error("Copilot native roster is unavailable");
+  const members = await boundedHostCall(
+    "Agent Harbor talent-scout roster inventory",
+    () => collectCopilotTeamMembers(project, {
+      agents: listed.agents,
+      discoveryAvailable: true,
+      coordinatorReady,
+      selectionRestoreUnverified: Boolean(selectionRestoreHazard),
+    }),
+    Math.min(hostRpcTimeoutMs, 3_000),
+  );
+  signal.throwIfAborted();
+  const busyAgents = new Set(runtime.activeProjectRuns(project)
+    .filter((run) => run.kind !== "contractor")
+    .map((run) => run.agent));
+  const specialists = members.flatMap((member) => {
+    if (member.availability !== "ready" || !["fixed", "bundled", "personal"].includes(member.kind)) return [];
+    const id = copilotPublicIdentifier(member.id, 48);
+    if (!id || id === "team-lead" || id === scoutPlayer.name) return [];
+    const configuredModel = copilotPublicIdentifier(member.configuredModel, 200);
+    return [{
+      id,
+      role: copilotTaskLabel(member.description),
+      tools: Array.isArray(member.tools) ? member.tools : [],
+      skills: Array.isArray(member.skills) ? member.skills : [],
+      ...(configuredModel ? { configuredModel } : {}),
+      availability: busyAgents.has(id) ? "busy" : "ready",
+    }];
+  });
+  return formatHarborTeamRosterSnapshot(specialists, query);
+}
+
+async function contractNativeTool(args, invocation) {
+  const name = harborCustomToolNames.contractPreflight;
+  let exactInvocation;
+  try {
+    return await withNativeToolAbort(name, args, invocation, async (signal, invocationIdentity, control) => {
+      exactInvocation = invocationIdentity;
+      signal.throwIfAborted();
+      const context = await authenticatedNativeToolContext(name, args, invocation);
+      const activeRoots = runtime.activeProjectRuns(context.project)
+        .filter((run) => !run.parentRunId);
+      const rootRunId = activeDirect?.project && sameProject(activeDirect.project, context.project)
+        ? activeDirect.runId
+        : activeRoots.length === 1 ? activeRoots[0].id : undefined;
+      control.bind(context.project, rootRunId);
+      signal.throwIfAborted();
+      assertHarborCustomToolAccess(name, { skill: "contract" });
+      const call = validateHarborCustomToolArguments(name, args);
+      if (call.kind !== "contract-preflight") throw new Error("invalid Agent Harbor contract dispatch");
+      const descriptor = JSON.parse(await runCopilotControl("contract", call.definition, context.project, signal));
+      signal.throwIfAborted();
+      await coordinator.contractToolSucceeded(exactInvocation, descriptor);
+      return descriptor;
+    });
+  } catch (error) {
+    if (error instanceof DuplicateNativeToolCallError) throw error;
+    const failedInvocation = exactInvocation ?? (() => {
+      try { return exactNativeToolInvocation(name, args, invocation); }
+      catch { return undefined; }
+    })();
+    if (failedInvocation) {
+      try { await coordinator.contractToolFailed(failedInvocation); }
+      catch (sealError) {
+        throw new AggregateError([error, sealError], "Agent Harbor contract preflight failed and its guard seal was rejected");
+      }
+    }
+    throw error;
+  }
+}
+
+async function playerSkillsNativeTool(player, args, invocation) {
+  const spec = harborPlayerSkillToolSpec(player);
+  return withNativeToolAbort(spec.name, args, invocation, async (signal, _invocationIdentity, control) => {
+    signal.throwIfAborted();
+    const context = await authenticatedNativeToolContext(spec.name, args, invocation, player.name);
+    signal.throwIfAborted();
+    assertHarborCustomToolAccess(spec.name, { agent: context.currentAgent });
+    const call = validateHarborCustomToolArguments(spec.name, args);
+    if (call.kind !== "player-skills" || call.player !== player.name) {
+      throw new Error("invalid Agent Harbor bound-skill dispatch");
+    }
+    const runId = activeNativeToolRoot(player.name, context.project, spec.name);
+    control.bind(context.project, runId);
+    consumeNativeToolCall(runId, spec.name);
+    const current = requireInvocablePlayer("copilot", context.project, player.name).definition;
+    const loaded = await loadConfiguredSkills(current, context.project, new GhResolver(), trustedSkills, signal);
+    signal.throwIfAborted();
+    return formatLoadedSkillGroup(loaded);
+  });
+}
+
+async function scoutNativeTool(name, args, invocation) {
+  return withNativeToolAbort(name, args, invocation, async (signal, _invocationIdentity, control) => {
+    signal.throwIfAborted();
+    const provisional = activeDirect;
+    const provisionalRun = provisional && runtime.get(provisional.runId);
+    if (!provisional || provisional.sessionId !== session.sessionId || provisional.id !== scoutPlayer.name ||
+        !provisionalRun || ["cleaning", "completed", "failed", "cancelled"].includes(provisionalRun.state)) {
+      throw new Error(`Agent Harbor custom tool ${name} requires an active ${scoutPlayer.name} root run`);
+    }
+    // Reserve the one ordered scout call before asynchronous host
+    // authentication. A stop/error during that RPC must not let the model retry
+    // an already-attempted roster inspection or create a late mutation.
+    const runId = provisional.runId;
+    const guard = scoutTurnGuard(runId);
+    const ticket = guard.begin(name, signal);
+    let ticketSettled = false;
+    try {
+      const context = await authenticatedNativeToolContext(name, args, invocation, scoutPlayer.name);
+      signal.throwIfAborted();
+      assertHarborCustomToolAccess(name, { agent: context.currentAgent });
+      const call = validateHarborCustomToolArguments(name, args);
+      const verifiedRunId = activeNativeToolRoot(scoutPlayer.name, context.project, name);
+      if (verifiedRunId !== runId) throw new Error("Agent Harbor talent-scout run identity changed during custom-tool authentication");
+      control.bind(context.project, runId);
+      if (call.kind === "team-roster") {
+        const snapshot = await boundedScoutRoster(call.query, context.project, signal);
+        signal.throwIfAborted();
+        guard.succeed(ticket, { rosterComplete: snapshot.complete });
+        ticketSettled = true;
+        return snapshot.text;
+      }
+      if (call.kind === "filter-skills") {
+        const matches = await filterTrustedSkills(call.query, trustedSkills, new GhResolver(), signal);
+        signal.throwIfAborted();
+        guard.succeed(ticket);
+        ticketSettled = true;
+        return formatScoutSkillMatches(matches);
+      }
+      if (call.kind !== "join-player") throw new Error("invalid Agent Harbor talent-scout dispatch");
+      await runDeterministicCommand("copilot", "join", call.definition, context.project, signal);
+      // Returning from the deterministic command is the transaction boundary.
+      // An abort racing after it must not turn a committed roster mutation into
+      // a reported failure or skip reconciliation.
+      guard.succeed(ticket);
+      ticketSettled = true;
+      control.markCommitted();
+      let refreshReady = true;
+      try {
+        await boundedHostCall("Copilot coordinator refresh", () => coordinator.refreshAuthoritative());
+        coordinatorReady = true;
+      } catch {
+        coordinatorReady = false;
+        refreshReady = false;
+      }
+      const cancelledAfterCommit = signal.aborted;
+      updateSessionPersonalAdmission("join", call.definition, refreshReady);
+      const concise = conciseCopilotJoinResult(call.definition, refreshReady);
+      const commitNotice = cancelledAfterCommit
+        ? "\nRoster commit preserved: cancellation arrived after the player was joined."
+        : "";
+      return refreshReady
+        ? `${concise}${commitNotice}`
+        : `${concise}\nRoster updated, but Copilot refresh failed; reload the session before invoking the changed player.${commitNotice}`;
+    } catch (error) {
+      if (!ticketSettled) {
+        try { guard.fail(ticket, signal); }
+        catch (guardError) {
+          throw new AggregateError([error, guardError], "Agent Harbor talent-scout call and shared guard settlement failed");
+        }
+      }
+      throw error;
+    }
+  });
+}
+
+function copilotNativeTool(spec, handler, defer = "auto") {
+  return {
+    name: spec.name,
+    description: spec.description,
+    parameters: spec.parameters,
+    handler: async (...args) => {
+      try { return await handler(...args); }
+      catch (error) { throw publicNativeToolError(error); }
+    },
+    skipPermission: true,
+    defer,
+  };
+}
 
 async function refreshTeamDiscovery(deadline) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -836,46 +1639,127 @@ async function listNativeTeamAgents(deadline, degraded) {
 }
 
 async function boundedTeamProject(deadline, degraded) {
+  let snapshot;
   try {
-    const metadata = await boundedTeamCall(
+    snapshot = await boundedTeamCall(
       "Copilot team metadata snapshot",
       () => session.rpc.metadata.snapshot(),
       deadline,
       350,
     );
-    const observed = rememberProjectScope(metadata.workingDirectory);
+    const observed = rememberProjectScope(snapshot.workingDirectory);
     if (!observed && !projectScopeVerified) throw new Error("Copilot metadata did not identify a project");
   } catch {
     degraded.push(projectScopeVerified ? "using cached project scope" : "project scope unavailable");
   }
-  return projectScopeVerified ? lastKnownProject : undefined;
+  return { project: projectScopeVerified ? lastKnownProject : undefined, snapshot };
 }
 
 async function boundedTeamModel(deadline, degraded) {
   try {
     const current = await boundedTeamCall("Copilot team current model", () => session.rpc.model.getCurrent(), deadline, 400);
-    return {
-      model: current.modelId,
-      reasoningEffort: current.reasoningEffort === null ? "none" : current.reasoningEffort,
-    };
+    return normalizedCurrentModelSettings(current);
   } catch {
     degraded.push("host model settings unavailable");
-    return {};
+    return { modelUnreported: true };
   }
 }
 
+function nonnegativeFinite(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function nonnegativeTokenCount(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function displayCount(value) {
+  return Number.isInteger(value) ? value.toLocaleString("en-US") : String(value);
+}
+
+async function boundedTeamHostActivity(deadline, degraded) {
+  const [activity, processing] = await Promise.allSettled([
+    boundedTeamCall("Copilot team activity", () => session.rpc.metadata.activity(), deadline, 300),
+    boundedTeamCall("Copilot team processing state", () => session.rpc.metadata.isProcessing(), deadline, 300),
+  ]);
+  if (activity.status === "rejected" || processing.status === "rejected") {
+    degraded.push("host activity state partially unavailable");
+  }
+  return {
+    hasActiveWork: activity.status === "fulfilled" && activity.value?.hasActiveWork === true,
+    processing: processing.status === "fulfilled" && processing.value?.processing === true,
+    abortable: activity.status === "fulfilled" && activity.value?.abortable === true,
+  };
+}
+
+async function boundedTeamContext(deadline, degraded) {
+  if (typeof session.rpc.metadata.contextInfo !== "function") return undefined;
+  try {
+    const result = await boundedTeamCall(
+      "Copilot team context usage",
+      () => session.rpc.metadata.contextInfo({ promptTokenLimit: 0, outputTokenLimit: 0 }),
+      deadline,
+      350,
+    );
+    const info = result?.contextInfo;
+    if (!info) return undefined;
+    // Current SDK names are totalTokens/promptTokenLimit; accept the equivalent
+    // usage-info names if a host exposes that shape directly.
+    const currentTokens = nonnegativeTokenCount(info.currentTokens ?? info.totalTokens);
+    const tokenLimit = nonnegativeTokenCount(info.tokenLimit ?? info.promptTokenLimit);
+    const totalLimit = nonnegativeTokenCount(info.limit);
+    const outputTokenLimit = tokenLimit !== undefined && totalLimit !== undefined && totalLimit > tokenLimit
+      ? totalLimit - tokenLimit
+      : undefined;
+    const toolDefinitionsTokens = nonnegativeTokenCount(info.toolDefinitionsTokens);
+    if (currentTokens === undefined && tokenLimit === undefined && outputTokenLimit === undefined &&
+        toolDefinitionsTokens === undefined) return undefined;
+    return { currentTokens, tokenLimit, outputTokenLimit, toolDefinitionsTokens };
+  } catch {
+    degraded.push("host context usage unavailable");
+    return undefined;
+  }
+}
+
+function teamSdkContextLines(context, snapshot) {
+  const parts = [];
+  if (context?.currentTokens !== undefined) parts.push(`currentTokens ${displayCount(context.currentTokens)}`);
+  if (context?.tokenLimit !== undefined) parts.push(`tokenLimit ${displayCount(context.tokenLimit)}`);
+  if (context?.outputTokenLimit !== undefined) {
+    parts.push(`outputTokenLimit ${displayCount(context.outputTokenLimit)}`);
+  }
+  if (context?.toolDefinitionsTokens !== undefined) {
+    parts.push(`toolDefinitionsTokens ${displayCount(context.toolDefinitionsTokens)}`);
+  }
+  const maxAiCredits = nonnegativeFinite(snapshot?.sessionLimits?.maxAiCredits);
+  const lines = parts.length ? [`Context (Copilot SDK): ${parts.join(" · ")}`] : [];
+  if (maxAiCredits !== undefined) {
+    lines.push(`AI-credit limit (Copilot SDK): maxAiCredits ${displayCount(maxAiCredits)}`);
+  }
+  return lines;
+}
+
 async function showTeam(args, title = "team", allowStop = true) {
-  const value = args?.trim() ?? "";
+  const raw = typeof args === "string" ? args : "";
+  if (raw.length > maximumTeamArgumentBytes || Buffer.byteLength(raw, "utf8") > maximumTeamArgumentBytes) {
+    throw new Error(`Agent Harbor /${title} arguments exceed ${maximumTeamArgumentBytes} bytes`);
+  }
+  const value = raw.trim();
   const deadline = Date.now() + teamBudgetMs;
   if (title === "team" && (value === "help" || value === "--help")) {
     const output = [
       "Agent Harbor Copilot team help · 0 model tokens",
-      "/team                         Show roster, live work, telemetry, and last mission.",
-      "/team <filter>                Match member, description, role/kind, status/state, task, or run ID.",
-      "                               Also matches capability/tool/skill and model/reasoning.",
+      "/team                         Show roster, live work or, when idle, the last mission.",
+      "/team <filter>                Match free text, or use a field prefix:",
+      "  member:/id: · kind:/role: · description:",
+      "  tool: · capability: · skill: · status:/state: · model: · reasoning: · task: · run:",
       "/team stop <run-id|all>       Request cancellation for one mission or all active missions.",
+      "Choose one teammate: /<id> <task> or /player <id> <task>.",
+      "Personal model: /join JSON with model:\"provider/model\"; add replace:true to change it.",
       "Limits: 32 concurrent roots per project; 6 sequential team-lead delegations per prompt.",
       "Bounded views disclose omitted rows; tasks are lossy/redacted and activity is process-local.",
+      "Tokens, AI credits, and max-output are observed only when Copilot SDK reports them.",
+      "Agent Harbor does not simulate a hard per-run token cap; its own gates are concurrency and six delegations.",
     ].join("\n");
     await boundedTeamCall(
       "Copilot team help display",
@@ -887,7 +1771,7 @@ async function showTeam(args, title = "team", allowStop = true) {
   }
   const observationDeadline = deadline - Math.min(250, Math.floor(teamBudgetMs / 4));
   const degraded = [];
-  const project = await boundedTeamProject(observationDeadline, degraded);
+  const { project, snapshot } = await boundedTeamProject(observationDeadline, degraded);
   if (!project) {
     if (allowStop && /^stop(?:\s|$)/u.test(value)) {
       throw new Error("Copilot project scope is unavailable; /team stop fails closed without inspecting another project");
@@ -928,24 +1812,70 @@ async function showTeam(args, title = "team", allowStop = true) {
       }
       throw new Error(`unknown active Agent Harbor run: ${target}; run /team to inspect current IDs`);
     }
-    await Promise.all(roots.map(async (run) => {
+    abortNativeTools(`Agent Harbor /team stop requested for ${target}`, {
+      project,
+      runIds: new Set(roots.map(({ id }) => id)),
+      includeUnbound: target === "all" || roots.length === 1,
+    });
+    const stopResults = await Promise.allSettled(roots.map(async (run) => {
       const abort = abortableRoots.get(run.id);
       if (!abort) throw new Error(`Agent Harbor run is no longer controlled: ${run.id}`);
       await boundedTeamCall(`Copilot stop ${run.id}`, abort, deadline, teamBudgetMs);
     }));
+    const stopping = [];
+    const failed = [];
+    for (let index = 0; index < stopResults.length; index += 1) {
+      const run = roots[index];
+      const outcome = stopResults[index];
+      if (outcome.status === "fulfilled") stopping.push(run.id);
+      else failed.push({
+        id: run.id,
+        state: runtime.get(run.id)?.state ?? run.state,
+        reason: errorMessage(outcome.reason),
+      });
+    }
+    const output = [
+      "Agent Harbor Copilot stop · 0 model tokens",
+      ...(stopping.length
+        ? [`Stopping ${stopping.length} root run(s): ${stopping.join(", ")}.`]
+        : ["No root stop request was confirmed by Copilot."]),
+      ...(failed.length
+        ? [
+            `Failed or unconfirmed ${failed.length} root stop request(s):`,
+            ...failed.map(({ id, state, reason }) => `• ${id} · state ${state} · ${reason}`),
+            "Inspect /team: a cleaning run remains blocked from reuse until its terminal event.",
+          ]
+        : []),
+    ].join("\n");
     await boundedTeamCall(
       "Copilot team stop display",
-      () => displayLog(`Agent Harbor Copilot stop · 0 model tokens\nStopping ${roots.length} root run(s): ${roots.map(({ id }) => id).join(", ")}.`, { level: "warning" }),
+      () => displayLog(output, { level: "warning" }),
       deadline,
       logRpcTimeoutMs,
     );
+    if (failed.length) {
+      throw new Error(
+        `Agent Harbor could not confirm stop for ${failed.map(({ id }) => id).join(", ")}; ` +
+        "inspect /team and wait for every cleaning run to settle",
+      );
+    }
     return;
   }
-  const [model, nativeDiscovery] = await Promise.all([
+  const [model, nativeDiscovery, hostActivity, context] = await Promise.all([
     boundedTeamModel(observationDeadline, degraded),
     listNativeTeamAgents(observationDeadline, degraded),
+    boundedTeamHostActivity(observationDeadline, degraded),
+    boundedTeamContext(observationDeadline, degraded),
   ]);
-  const selectionGate = currentTeamSelectionGate();
+  const trackedActivity = runtime.activeProjectRuns(project).length > 0;
+  const untrackedHostActivity = !trackedActivity && (hostActivity.hasActiveWork || hostActivity.processing);
+  const selectionGates = [
+    currentTeamSelectionGate(),
+    ...(untrackedHostActivity
+      ? ["Copilot host work is active outside Agent Harbor tracking; wait or use Copilot's native stop control"]
+      : []),
+  ].filter(Boolean);
+  const selectionGate = selectionGates.join("; ") || undefined;
   if (selectionRestoreHazard) degraded.push("player selection restoration unverified");
   let output;
   let usedFallback = false;
@@ -956,7 +1886,9 @@ async function showTeam(args, title = "team", allowStop = true) {
         filter: value,
         title,
         nextModel: model.model,
+        nextModelUnreported: model.modelUnreported,
         nextReasoning: model.reasoningEffort,
+        nextMaxOutputTokens: context?.outputTokenLimit,
         selectionGate,
         native: {
           ...nativeDiscovery,
@@ -982,24 +1914,72 @@ async function showTeam(args, title = "team", allowStop = true) {
   if (reasons.length && !usedFallback) {
     output += `\n\nDegraded bounded snapshot (${teamBudgetMs}ms budget): ${reasons.join("; ")}.`;
   }
+  const sdkContextLines = teamSdkContextLines(context, snapshot);
+  if (sdkContextLines.length) output += `\n\n${sdkContextLines.join("\n")}`;
+  if (untrackedHostActivity) {
+    const sources = [
+      ...(hostActivity.hasActiveWork ? ["metadata.activity.hasActiveWork"] : []),
+      ...(hostActivity.processing ? ["metadata.isProcessing"] : []),
+    ];
+    const hostBlock = [
+      "HOST ACTIVITY (Copilot SDK; outside Agent Harbor tracking)",
+      `● Copilot host · active · ${sources.join(" + ")}`,
+      `  Cancellation: ${hostActivity.abortable ? "available through Copilot's native stop control" : "not reported as abortable by Copilot"}.`,
+      "  No Agent Harbor run ID exists for this work; delegation remains closed.",
+    ].join("\n");
+    output = output.replace(
+      "No one is working right now.",
+      "No Agent Harbor mission is tracked; Copilot reports other active host work below.",
+    );
+    output = output.includes("\n\nROSTER")
+      ? output.replace("\n\nROSTER", `\n\n${hostBlock}\n\nROSTER`)
+      : `${output}\n\n${hostBlock}`;
+  }
   await boundedTeamCall("Copilot team display", () => displayLog(output, { level: "info" }), deadline, logRpcTimeoutMs);
 }
 
 const knownPlayers = new Map([...rolePlayers, ...bundledPlayers]);
-const startupActiveIds = activeProfileIds(process.cwd());
+const startupActiveDiscovery = discoverStartupActiveProfiles("copilot", process.cwd());
+const startupActiveIds = startupActiveDiscovery.ids;
+for (const id of startupActiveIds) sessionInvocablePersonalIds.add(id);
 const callableIds = [...new Set([...knownPlayers.keys(), ...startupActiveIds])];
+const startupSkillPlayers = new Map(rolePlayers);
+for (const id of startupActiveIds) {
+  try {
+    const player = requireInvocablePlayer("copilot", process.cwd(), id).definition;
+    startupSkillPlayers.set(player.name, player);
+  } catch { /* Stale or conflicting startup profiles do not receive native tools. */ }
+}
+const copilotNativeTools = [
+  copilotNativeTool(
+    harborStaticCustomToolSpecs[harborCustomToolNames.contractPreflight],
+    contractNativeTool,
+    "never",
+  ),
+  ...[harborCustomToolNames.teamRoster, harborCustomToolNames.filterSkills, harborCustomToolNames.joinPlayer].map((name) =>
+    copilotNativeTool(harborStaticCustomToolSpecs[name], (args, invocation) =>
+      scoutNativeTool(name, args, invocation))),
+  ...[...startupSkillPlayers.values()]
+    .filter((player) => player.skills?.length)
+    .map((player) => {
+      const spec = harborPlayerSkillToolSpec(player);
+      registeredNativeSkillTools.add(spec.name);
+      return copilotNativeTool(spec, (args, invocation) => playerSkillsNativeTool(player, args, invocation));
+    }),
+];
 
 session = await joinSession({
+  tools: copilotNativeTools,
   hooks: coordinator.hooks,
   commands: [
     {
       name: "team",
-      description: "0 model tokens · /team [help|filter|stop <run-id|all>] · Show roster, live work, model/reasoning, native usage, and last mission.",
+      description: "0 model tokens · /team [help|filter|stop <run-id|all>] · Show roster, live work or, when idle, the last mission.",
       handler: async ({ args }) => {
         try { await showTeam(args); }
         catch (error) {
           void safeLog(`[Agent Harbor team · 0 model tokens]\n${errorMessage(error)}`, { level: "error" });
-          throw error;
+          throw publicFacingError(error);
         }
       },
     },
@@ -1007,7 +1987,13 @@ session = await joinSession({
       name: "player",
       description: "1 model root · /player <id> <task> · Run any currently active Agent Harbor teammate, including one just joined.",
       handler: async ({ args }) => {
-        const input = args?.trim() ?? "";
+        const raw = typeof args === "string" ? args : "";
+        if (raw.length > 30_000 || Buffer.byteLength(raw, "utf8") > 30_000) {
+          const error = new PlayerPreflightError("Agent Harbor task exceeds 30000 bytes");
+          await safeLog(`[Agent Harbor player · preflight · 0 model tokens]\n${error.message}`, { level: "error" });
+          throw error;
+        }
+        const input = raw.trim();
         const separator = input.search(/\s/u);
         const id = separator < 0 ? input : input.slice(0, separator);
         const task = separator < 0 ? "" : input.slice(separator).trim();
@@ -1020,7 +2006,7 @@ session = await joinSession({
         catch (error) {
           const budget = error instanceof PlayerPreflightError ? " · Preflight stopped · 0 model tokens" : "";
           await safeLog(`[Agent Harbor player · ${id}${budget}]\n${errorMessage(error)}`, { level: "error" });
-          throw error;
+          throw publicFacingError(error);
         }
       },
     },
@@ -1029,14 +2015,29 @@ session = await joinSession({
       description,
       handler: async ({ args }) => {
         try {
-          const value = (args ?? "").trim();
+          const raw = typeof args === "string" ? args : "";
+          const maximumBytes = name === "join" ? maximumDefinitionArgumentBytes : maximumLifecycleArgumentBytes;
+          if (raw.length > maximumBytes || Buffer.byteLength(raw, "utf8") > maximumBytes) {
+            throw new Error(`Agent Harbor /${name} arguments exceed ${maximumBytes} bytes`);
+          }
+          const value = raw.trim();
           const listFilter = name === "bench" ? benchListFilter(value) : undefined;
           if (name === "bench" && listFilter !== undefined) {
             await showTeam(listFilter, "bench", false);
             return;
           }
           const project = await currentProject();
-          const result = await runDeterministicCommand("copilot", name, args ?? "", project, undefined, name === "list-skills" ? "copilot" : "plain");
+          if (name === "retire") {
+            const busy = runtime.activeProjectRuns(project).find((run) =>
+              run.kind !== "contractor" && run.agent === value);
+            if (busy) {
+              throw new Error(
+                `cannot retire ${value} while it is ${busy.state} in ${busy.rootRunId}; ` +
+                `use /team stop ${busy.rootRunId}, then wait for cleanup to settle`,
+              );
+            }
+          }
+          const result = await runDeterministicCommand("copilot", name, raw, project, undefined, name === "list-skills" ? "copilot" : "plain");
           const committed = name === "join" || name === "retire" || (name === "bench" && /^(on|off)\b/u.test(value));
           let refreshWarning = "";
           if (committed) {
@@ -1049,8 +2050,17 @@ session = await joinSession({
               refreshWarning = "\nRoster updated, but Copilot refresh failed; reload the session before invoking the changed player.";
             }
           }
+          updateSessionPersonalAdmission(name, raw, !refreshWarning);
           const heading = name === "list-skills" ? "Agent Harbor · skill catalog · 0 model tokens" : `Agent Harbor /${name} · 0 model tokens`;
-          const publicResult = name === "join" ? conciseCopilotJoinResult(args ?? "") : result;
+          const pendingSkillReload = name === "bench" && /^on\b/u.test(value)
+            ? playersPendingNativeSkillReload(project)
+            : [];
+          const lifecycleNotice = name === "retire"
+            ? "\nThe retired player is blocked immediately through /player; a startup alias may remain visible until /reload."
+            : pendingSkillReload.length
+              ? `\nNative skill loader pending for ${pendingSkillReload.join(", ")}; /player stops before model use until /reload registers it.`
+              : "";
+          const publicResult = `${name === "join" ? conciseCopilotJoinResult(raw, !refreshWarning) : result}${lifecycleNotice}`;
           try {
             await displayLog(`[${heading}]\n${publicResult || "Done."}${refreshWarning}`, { level: refreshWarning ? "warning" : "info" });
           } catch (error) {
@@ -1061,7 +2071,7 @@ session = await joinSession({
           }
         } catch (error) {
           await safeLog(`[Agent Harbor /${name} · 0 model tokens]\n${errorMessage(error)}`, { level: "error" });
-          throw error;
+          throw publicFacingError(error);
         }
       },
     })),
@@ -1073,48 +2083,71 @@ session = await joinSession({
         catch (error) {
           const budget = error instanceof PlayerPreflightError ? " · Preflight stopped · 0 model tokens" : "";
           await safeLog(`[Agent Harbor scout${budget}]\n${errorMessage(error)}`, { level: "error" });
-          throw error;
+          throw publicFacingError(error);
         }
       },
     },
     ...callableIds.map((id) => ({
       name: id,
-      description: `1 model root · /${id} <task> · ${knownPlayers.get(id)?.description ?? `Run active Agent Harbor player ${id}.`}`,
+      description: `1 model root · /${id} <task> · ${publicMetadataText(
+        knownPlayers.get(id)?.description ?? `Run active Agent Harbor player ${id}.`,
+        240,
+      ) ?? `Run active Agent Harbor player ${id}.`}`,
       handler: async ({ args }) => {
         try { await runPlayer(id, args); }
         catch (error) {
           const budget = error instanceof PlayerPreflightError ? " · Preflight stopped · 0 model tokens" : "";
           await safeLog(`[Agent Harbor player · ${id}${budget}]\n${errorMessage(error)}`, { level: "error" });
-          throw error;
+          throw publicFacingError(error, id);
         }
       },
     })),
   ],
 });
 
+if (startupActiveDiscovery.diagnostics.length) {
+  const details = startupActiveDiscovery.diagnostics.flatMap((diagnostic) => [
+    `• ${copilotPublicIdentifier(diagnostic.message, 320) ?? "A project profile was omitted from startup discovery."}`,
+    `  Repair: ${copilotPublicIdentifier(diagnostic.repair, 320) ?? "Repair the active-profile directory and reload Copilot."}`,
+  ]);
+  void safeLog([
+    "[Agent Harbor startup · bounded profile discovery · 0 model tokens]",
+    "Some project profiles were omitted and cannot be invoked in this session.",
+    ...details,
+  ].join("\n"), { level: "warning" });
+}
+
+function eventMatchesCurrentSession(event) {
+  const explicitScopes = [event.sessionId, event.data?.sessionId]
+    .filter((value) => value !== undefined);
+  return explicitScopes.every((value) => value === session.sessionId);
+}
+
 session.on((event) => {
+  const terminalType = ["abort", "session.error", "session.idle", "session.shutdown"].includes(event.type);
+  if (terminalType && !eventMatchesCurrentSession(event)) return;
+  const sessionTerminal = terminalType;
+  if (sessionTerminal) {
+    const reason = {
+      abort: "Copilot aborted an active Agent Harbor native tool",
+      "session.error": "Copilot reported a session error while an Agent Harbor native tool was active",
+      "session.idle": "Copilot became idle while an Agent Harbor native tool was active",
+      "session.shutdown": "Copilot shut down while an Agent Harbor native tool was active",
+    }[event.type];
+    abortNativeTools(reason, { sessionId: session.sessionId });
+  }
   coordinator.observeEvent(event);
-  if (event.type !== "hook.end" || event.data.hookType !== "preToolUse") return;
+  if (sessionTerminal) {
+    clearGuardEvidenceQueues();
+  }
+  // Copilot exposes a hook ID only on hook.end, not to the preToolUse callback.
+  // Coordinator admission is sequential, so a bounded FIFO is the strongest
+  // correlation available; claimed replay filtering prevents a duplicate shift.
+  if (event.type !== "hook.end" || event.data?.hookType !== "preToolUse") return;
   if (coordinator.hostEventDisposition(event) !== "claimed") return;
   const evidence = guardEvidenceQueue.shift();
   if (!evidence) return;
-  const message = JSON.stringify(evidence);
-  const logEvidence = async () => {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      try {
-        await boundedHostCall(
-          "Copilot guard evidence log",
-          () => session.log(message, { level: "info", type: "agent-harbor-guard", ephemeral: true }),
-          logRpcTimeoutMs,
-        );
-        return;
-      } catch (error) {
-        if (error instanceof HostRpcTimeoutError) return;
-        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
-      }
-    }
-  };
-  guardEvidenceLogging = guardEvidenceLogging.then(logEvidence, logEvidence);
+  queueGuardEvidenceLog(evidence);
 });
 try {
   await boundedHostCall(
@@ -1125,5 +2158,5 @@ try {
   coordinatorReady = true;
 } catch {
   coordinatorReady = false;
-  void safeLog("[Agent Harbor startup · 0 model tokens]\nRoster controls remain available, but native player/delegation discovery is unavailable; reload the Copilot session.", { level: "warning" });
+  void safeLog("[Agent Harbor startup · 0 model tokens]\nInitial native discovery is still pending. /team will retry it; reload Copilot only if /team remains degraded.", { level: "info" });
 }

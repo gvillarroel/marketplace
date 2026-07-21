@@ -9,19 +9,28 @@ export interface OpenCodeModel {
     readonly modelID: string;
     readonly variant?: string;
 }
+export type OpenCodeChildLifecyclePhase = "starting" | "working" | "cleaning";
 /** Executes each OpenCode delegation or contract in one disposable session. */
 export declare class OpenCodeOrchestrator implements Orchestrator {
     private readonly client;
     private readonly directory;
     private readonly github;
     private readonly evidenceHook?;
+    private readonly cleanupTimeoutMs;
+    private readonly claimHome;
+    private readonly lifecyclePhaseHook?;
     readonly harness: "opencode";
-    constructor(client: Client, directory: string, github?: GithubResolver, evidenceHook?: HarborEvidenceHook | undefined);
+    constructor(client: Client, directory: string, github?: GithubResolver, evidenceHook?: HarborEvidenceHook | undefined, cleanupTimeoutMs?: number, claimHome?: string, lifecyclePhaseHook?: ((phase: OpenCodeChildLifecyclePhase) => void) | undefined);
     /** Runs an exact named OpenCode agent using an explicit inherited model. */
-    runAgent(agent: string, task: string, parentID: string | undefined, model: OpenCodeModel, signal?: AbortSignal): Promise<string>;
+    runAgent(agent: string, task: string, parentID: string | undefined, model: OpenCodeModel, signal?: AbortSignal, lifecyclePhaseHook?: (phase: OpenCodeChildLifecyclePhase) => void): Promise<string>;
     /** Runs one portable contract using a closed OpenCode tool policy. */
     run(definition: ContractDefinition, signal?: AbortSignal): Promise<string>;
     /** Owns the complete create/prompt/evidence/cleanup lifecycle for one disposable child. */
     private runChildLifecycle;
+    /** Gives orphan-prevention cleanup one bounded retry before blocking the project. */
+    private deleteUnclaimedChild;
+    /** Reconciles malformed create replies conservatively before any provenance or prompt RPC. */
+    private rejectMalformedCreatedChildID;
+    private runReservedChildLifecycle;
 }
 export {};

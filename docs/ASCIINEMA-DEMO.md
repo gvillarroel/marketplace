@@ -1,21 +1,28 @@
-# Asciinema command demo
+# GitHub Copilot CLI TUI command demo
 
-The checked-in recording starts GitHub Copilot CLI 1.0.73 with
-`--experimental`, loads the local `agent-foundry` plugin, and invokes its
-client commands through Copilot's native session RPC against an isolated
-temporary roster. It covers every command registered by Agent Harbor:
+The checked-in recording is captured directly from the interactive GitHub
+Copilot CLI 1.0.73 TUI. It shows Copilot's own startup animation, folder-trust
+dialog, extension permission dialog, command autocomplete, input editor,
+scrolling, status bar, model label, and AIC counter while the local
+`agent-foundry` plugin is loaded.
 
-- deterministic `/team`, `/bench`, `/join`, `/retire`, and `/list-skills`;
-- model-backed `/contract`, `/player`, `/scout`, `/team-lead`, and `/crafter`
-  boundaries;
-- all six bundled SDLC aliases and the immediate `/player` path for a joined
-  personal teammate.
+The PTY driver only answers terminal capability probes, accepts the two local
+startup permissions, types commands, and waits between them. It does not
+reconstruct Copilot output or draw a replacement interface.
 
-The model-backed commands are intentionally invoked without a task. Their real
-preflight rejects the request before inference, so regenerating the demo needs
-no model credentials and consumes no model tokens. The deterministic lifecycle
-commands run completely, including activation, join, catalog lookup, retire,
-and cleanup.
+The tour concentrates on the zero-model team-management surface:
+
+- `/team` before and after the roster changes;
+- `/bench on all`, a filtered `/bench list`, and `/bench off all`;
+- path-free `/join`, the new member's enriched `/team` row, and `/retire`;
+- `/team stop all` while idle and `/team help`, including search, cancellation,
+  concurrency, model and token-accounting guidance.
+
+Every command in the recording is deterministic and reports zero model tokens.
+The tour deliberately does not invoke `/player`, `/scout`, `/team-lead`, a
+specialist alias, or `/contract`, because those surfaces create model work by
+design; the checked-in recording therefore exercises the real TUI without
+consuming AIC.
 
 ## Play
 
@@ -30,48 +37,76 @@ Pre-rendered versions are also available:
 - [animated GIF](assets/agent-harbor-commands.gif);
 - [H.264 MP4](assets/agent-harbor-commands.mp4).
 
-The recording uses asciicast v3. Asciinema CLI 3.0 or newer and Asciinema
-Player 3.10 or newer can play this format.
+The asciicast is 100×42 cells and 184.95 seconds long. The checked-in GIF is
+168.85 seconds and the MP4 is 168.87 seconds because the renderer caps idle
+gaps at five seconds. It uses asciicast v3, which requires Asciinema CLI 3.0 or
+newer or Asciinema Player 3.10 or newer.
 
-## Regenerate
+## How the real TUI is captured
 
-Build Agent Harbor first, then record the deterministic driver in a terminal at
-least 100 columns wide:
+The Windows Copilot executable does not recognize a WSL PTY as an interactive
+Windows console. The recording therefore installs the official Linux build of
+the same Copilot CLI version inside WSL and runs it in a nested Linux PTY owned
+by Asciinema.
 
-```shell
-npm run build
-asciinema rec --overwrite --output-format asciicast-v3 \
-  --window-size 100x42 --idle-time-limit 10 \
-  --title "GitHub Copilot CLI · Agent Harbor command tour" \
-  --command "node scripts/asciinema-demo.mjs" \
-  docs/assets/agent-harbor-commands.cast
-```
+`scripts/asciinema-copilot-tui.py` supplies the terminal capability responses
+that a graphical terminal normally provides and sends literal keystrokes to
+Copilot. All screen drawing remains Copilot's native ANSI output.
 
-The driver requires GitHub Copilot CLI 1.0.73. If it is installed in a
-nonstandard location, set `AGENT_HARBOR_COPILOT_CLI` to the executable.
-`/list-skills` also requires an authenticated `gh` CLI because it validates the
-public skill snapshot through the same resolver used by the plugin.
+## Regenerate on Windows with WSL
 
-The driver creates its project, Copilot home, SDK state, and roster under the
-operating-system temporary directory and removes them at exit. It never mutates
-the checkout or the user's normal Copilot/Agent Harbor configuration. It also
-asserts that Copilot usage metrics remain unchanged and that no assistant or
-usage event was emitted.
-
-On Windows, Asciinema needs a Unix PTY. Run the driver with Windows Node and
-capture its ANSI transcript, then record that transcript from WSL with
-`scripts/asciinema-replay.mjs`. This bridge preserves the output produced by the
-real Windows Copilot process while Asciinema owns the recording PTY. Pause
-markers are replayed for their full duration, while `AGENT_HARBOR_DEMO_FAST`
-avoids waiting twice during transcript capture.
+Build Agent Harbor and install the official Copilot CLI 1.0.73 npm package in
+an ignored working directory:
 
 ```powershell
-$env:AGENT_HARBOR_DEMO_COLOR = "1"
-$env:AGENT_HARBOR_DEMO_FAST = "1"
-npm run demo:commands *> work/asciinema-demo.ansi
-wsl --cd $PWD asciinema rec --overwrite --output-format asciicast-v3 `
-  --window-size 100x42 --idle-time-limit 10 `
-  --title "GitHub Copilot CLI · Agent Harbor command tour" `
-  --command "node scripts/asciinema-replay.mjs work/asciinema-demo.ansi" `
-  docs/assets/agent-harbor-commands.cast
+npm run build
+wsl --cd $PWD bash -lc `
+  'mkdir -p work/copilot-linux && npm install --prefix work/copilot-linux --no-audit --no-fund @github/copilot@1.0.73'
 ```
+
+Prepare isolated temporary plugin and project directories:
+
+```powershell
+wsl --cd $PWD bash -lc `
+  'mkdir -p /tmp/agent-foundry-tui /tmp/agent-harbor-demo; `
+   cp -a plugins/agent-foundry/. /tmp/agent-foundry-tui/'
+```
+
+Record the native TUI with Asciinema 3:
+
+```powershell
+wsl --cd $PWD bash -lc `
+  'asciinema record --headless --return --overwrite --output-format asciicast-v3 `
+   --window-size 100x42 --idle-time-limit 10 `
+   --title "GitHub Copilot CLI 1.0.73 · Agent Harbor · TUI real" `
+   --command "env PATH=/usr/local/bin:/usr/bin:/bin `
+   python3 scripts/asciinema-copilot-tui.py `
+   --copilot work/copilot-linux/node_modules/.bin/copilot `
+   --plugin /tmp/agent-foundry-tui --project /tmp/agent-harbor-demo" `
+   docs/assets/agent-harbor-commands.cast'
+```
+
+Render the same compact, readable 798×671 GIF and a browser-compatible 30 fps
+H.264 MP4 padded to 798×672:
+
+```powershell
+agg --font-size 13 --line-height 1.2 `
+  docs/assets/agent-harbor-commands.cast `
+  docs/assets/agent-harbor-commands.gif
+ffmpeg -y -i docs/assets/agent-harbor-commands.gif `
+  -vf "fps=30,pad=ceil(iw/2)*2:ceil(ih/2)*2" `
+  -movflags +faststart -pix_fmt yuv420p -c:v libx264 `
+  docs/assets/agent-harbor-commands.mp4
+```
+
+The driver interleaves every keystroke with PTY reads, types characters slowly,
+holds each completed command for 1.5 seconds before Enter, and leaves 8–18
+seconds around command results. It uses temporary project and plugin copies,
+retires the demonstration player, returns all six SDLC agents to the bench, and
+exits Copilot normally.
+
+## Headless regression driver
+
+`npm run demo:commands` remains a faster zero-model SDK/RPC regression driver.
+It is useful for validating command registration and output, but it is not the
+source of the checked-in GIF, MP4, or asciicast.

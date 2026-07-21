@@ -1,11 +1,14 @@
 /** Deterministic, execution-allowlist-only skill discovery for the talent scout. */
 
 import { InvalidSkillDocumentError } from "./github.js";
-import type { GithubResolver, GithubSkill, TrustedGithubSkills } from "./types.js";
+import type { GithubResolver, GithubSkill, GithubSkillCatalogEntry, TrustedGithubSkills } from "./types.js";
 
 export interface ScoutSkillMatch extends GithubSkill {
   description: string;
 }
+
+const maximumScoutMetadataCandidates = 64;
+const maximumConcurrentScoutRequests = 4;
 
 const stopWords = new Set([
   "a", "al", "algo", "alguien", "con", "de", "del", "el", "en", "la", "las", "lo", "los", "para", "por", "que", "se", "un", "una", "usar", "usando",
@@ -19,6 +22,83 @@ function normalized(value: string): string {
 function tokens(value: string): string[] {
   return [...new Set(normalized(value).split(/[^a-z0-9+#.-]+/u)
     .filter((token) => token.length > 1 && !stopWords.has(token)))];
+}
+
+async function mapWithConcurrency<T, TResult>(
+  values: readonly T[],
+  maximumConcurrency: number,
+  operation: (value: T, index: number) => Promise<TResult>,
+  signal?: AbortSignal,
+): Promise<TResult[]> {
+  const results = new Array<TResult>(values.length);
+  let next = 0;
+  let failed = false;
+  let failure: unknown;
+  const workers = Array.from(
+    { length: Math.min(maximumConcurrency, values.length) },
+    async () => {
+      while (true) {
+        if (failed) return;
+        try {
+          signal?.throwIfAborted();
+          const index = next;
+          next += 1;
+          if (index >= values.length) return;
+          results[index] = await operation(values[index], index);
+        } catch (error) {
+          if (!failed) {
+            failed = true;
+            failure = error;
+          }
+          return;
+        }
+      }
+    },
+  );
+  await Promise.all(workers);
+  if (failed) throw failure;
+  return results;
+}
+
+interface ExactScoutCandidate {
+  readonly kind: "exact";
+  readonly skill: GithubSkill;
+}
+
+interface CatalogScoutCandidate {
+  readonly kind: "catalog";
+  readonly entry: GithubSkillCatalogEntry & { readonly track: string };
+}
+
+type ScoutCandidate = ExactScoutCandidate | CatalogScoutCandidate;
+
+function candidateCoordinates(candidate: ScoutCandidate): { readonly name: string; readonly coordinates: string } {
+  const value = candidate.kind === "exact" ? candidate.skill : candidate.entry;
+  return {
+    name: normalized(value.name),
+    coordinates: normalized(`${value.repo} ${value.path}`),
+  };
+}
+
+function prefilterMetadataCandidates(candidates: readonly ScoutCandidate[], wanted: readonly string[]): readonly ScoutCandidate[] {
+  if (candidates.length <= maximumScoutMetadataCandidates) return candidates;
+  const matches = candidates.filter((candidate) => {
+    const { name, coordinates } = candidateCoordinates(candidate);
+    return wanted.some((token) => name.includes(token) || coordinates.includes(token));
+  });
+  if (matches.length === 0) {
+    throw new Error(
+      `skill filter query cannot safely inspect descriptions across ${candidates.length} trusted skills; `
+      + `narrow the query to at most ${maximumScoutMetadataCandidates} candidates by skill name, repository, or path`,
+    );
+  }
+  if (matches.length > maximumScoutMetadataCandidates) {
+    throw new Error(
+      `skill filter query still matches ${matches.length} trusted skills before metadata lookup; `
+      + `narrow the query to at most ${maximumScoutMetadataCandidates} candidates by skill name, repository, or path`,
+    );
+  }
+  return matches;
 }
 
 /**
@@ -39,18 +119,37 @@ export async function filterTrustedSkills(
   if (!wanted.length) return [];
   const references = new Map<string, GithubSkill>();
   for (const skill of trusted) references.set(`${skill.repo.toLowerCase()}\0${skill.path}\0${skill.track}`, skill);
-  const described = await Promise.all([...references.values()].map(async (skill) => ({
-    skill,
-    description: (await resolver.describe!(skill, signal)).description,
-  })));
+  const candidates: ScoutCandidate[] = [...references.values()].map((skill) => ({ kind: "exact", skill }));
   if ((trusted.repositories?.length ?? 0) > 0) {
     if (!resolver.listCatalog) throw new Error("GitHub resolver cannot enumerate trusted repositories");
-    const groups = await Promise.all(trusted.repositories!.map((source) => resolver.listCatalog!(source, signal)));
-    const discovered = await Promise.all(groups.flat().map(async (entry) => {
+    const groups = await mapWithConcurrency(
+      trusted.repositories!,
+      maximumConcurrentScoutRequests,
+      (source) => resolver.listCatalog!(source, signal),
+      signal,
+    );
+    const discovered = new Set<string>();
+    for (const entry of groups.flat()) {
       const track = entry.track;
       if (!track) throw new Error("trusted repository row lacks branch metadata");
       const identity = `${entry.repo.toLowerCase()}\0${entry.path}\0${track}`;
-      if (references.has(identity)) return undefined;
+      if (references.has(identity) || discovered.has(identity)) continue;
+      discovered.add(identity);
+      candidates.push({ kind: "catalog", entry: { ...entry, track } });
+    }
+  }
+  const selected = prefilterMetadataCandidates(candidates, wanted);
+  const described = await mapWithConcurrency(
+    selected,
+    maximumConcurrentScoutRequests,
+    async (candidate) => {
+      if (candidate.kind === "exact") {
+        return {
+          skill: candidate.skill,
+          description: (await resolver.describe!(candidate.skill, signal)).description,
+        };
+      }
+      const { entry } = candidate;
       if (resolver.inspectCatalog) {
         let metadata;
         try { metadata = await resolver.inspectCatalog(entry, signal); }
@@ -59,16 +158,16 @@ export async function filterTrustedSkills(
           throw error;
         }
         return {
-          skill: { kind: "github", name: metadata.name, repo: entry.repo, path: entry.path, track } satisfies GithubSkill,
+          skill: { kind: "github", name: metadata.name, repo: entry.repo, path: entry.path, track: entry.track } satisfies GithubSkill,
           description: metadata.description,
         };
       }
-      const skill: GithubSkill = { kind: "github", name: entry.name, repo: entry.repo, path: entry.path, track };
+      const skill: GithubSkill = { kind: "github", name: entry.name, repo: entry.repo, path: entry.path, track: entry.track };
       return { skill, description: (await resolver.describe!(skill, signal)).description };
-    }));
-    described.push(...discovered.filter((value): value is NonNullable<typeof value> => value !== undefined));
-  }
-  return described.map(({ skill, description }) => {
+    },
+    signal,
+  );
+  return described.filter((value): value is NonNullable<typeof value> => value !== undefined).map(({ skill, description }) => {
     const name = normalized(skill.name);
     const coordinates = normalized(`${skill.repo} ${skill.path}`);
     const detail = normalized(description);

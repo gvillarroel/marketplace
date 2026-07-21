@@ -1,7 +1,8 @@
 /**
  * Canonical profile rendering, decoding, and runtime-specific least-privilege policies.
- * Revision-4 profiles carry a self-contained definition so active files can be validated without
- * trusting mutable registration state.
+ * Revision-5 profiles carry a self-contained definition so active files can be validated without
+ * trusting mutable registration state. Exact revision-4 profiles remain recognizable only as
+ * legacy owned state that must be repaired before invocation.
  */
 import type { ContractDefinition, HarnessName, HarnessSpec, HarborTool, PlayerDefinition } from "./types.js";
 type OpenCodePermissionAction = "allow" | "deny";
@@ -24,17 +25,20 @@ export declare function openCodePermissionPolicy(tools: readonly HarborTool[], a
 export declare function composePlayerInstructions(player: PlayerDefinition, harness?: HarnessName): string;
 /** Renders the complete one-shot task prompt while restating the contracted tool boundary. */
 export declare function composeContractPrompt(definition: ContractDefinition, additionalTools?: readonly string[]): string;
-/** Decodes a revision-4 embedded definition and verifies that it belongs to the requested player. */
+/** Opaque digest used to prove that a host-loaded agent matches the current managed definition. */
+export declare function playerDefinitionDigest(player: PlayerDefinition): string;
+/** Decodes an embedded managed definition and verifies that it belongs to the requested player. */
 export declare function decodePlayer(content: string, id: string): unknown;
 /**
- * Renders the canonical revision-4 active/registration profile for a harness.
+ * Renders the canonical revision-5 active/registration profile for a harness.
  * The ownership metadata, embedded definition, tool policy, and instructions form one executable
  * representation; discovery treats mutations to any of them as stale rather than silently trusting them.
  */
 export declare function renderPlayer(harness: HarnessName, player: PlayerDefinition, roster: "personal" | "sdlc", project?: string): string;
 /**
  * Tests whether an owned profile exactly matches its validated definition and current renderer.
- * Copilot skill profiles permit only a byte-verified relocation of the local MCP entrypoint.
+ * Revision-4 profiles remain legacy-owned for safe repair, but only exact
+ * revision-5 output is executable.
  */
 export declare function isCanonicalPlayerProfile(content: string, harness: HarnessName, player: PlayerDefinition, roster: "personal" | "sdlc", project?: string): boolean;
 /** Creates the filesystem layout and bound canonical renderer for one harness/project pair. */

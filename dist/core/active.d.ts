@@ -10,16 +10,40 @@ export interface InvocablePlayerIdentity {
     id: string;
     /** Whether the definition is built in or recovered from an active managed profile. */
     source: "fixed" | "active";
-    /** Validated definition recovered from a fixed role or revision-4 managed profile. */
+    /** Validated definition recovered from a fixed role or revision-5 managed profile. */
     definition: PlayerDefinition;
 }
+/** A bounded, path-free startup warning that is safe to show in the host UI. */
+export interface ActiveStartupDiagnostic {
+    readonly code: "unsafe-active-directory" | "foreign-profile-symlink" | "directory-entry-limit" | "profile-candidate-limit" | "profile-unreadable";
+    /** Public summary; deliberately excludes absolute paths and raw filesystem errors. */
+    readonly message: string;
+    /** Concrete local repair that does not weaken Agent Harbor ownership checks. */
+    readonly repair: string;
+}
+/**
+ * Startup-only discovery result. `ids` contains only canonical managed profiles;
+ * `complete` is false whenever an unsafe or bounded-away entry was observed.
+ */
+export interface ActiveStartupProfileDiscovery {
+    readonly ids: string[];
+    readonly complete: boolean;
+    readonly diagnostics: ActiveStartupDiagnostic[];
+}
+/**
+ * Discovers startup aliases without allowing foreign filesystem entries to abort
+ * the extension. The scan streams at most 513 directory entries and retains at
+ * most 200 candidates; every returned ID still passed full ownership, revision,
+ * validation, and canonical-profile checks. Direct invocation remains strict.
+ */
+export declare function discoverStartupActiveProfiles(harness: HarnessName, project: string): ActiveStartupProfileDiscovery;
 /**
  * Lists active files carrying a structurally valid Agent Harbor ownership marker.
- * The result may include stale revision-3 or modified revision-4 profiles; use
+ * The result may include exact legacy revision-4 or modified revision-5 profiles; use
  * {@link listManagedActiveIds} when selecting an invocation target.
  */
 export declare function listOwnedActiveIds(harness: HarnessName, project: string): string[];
-/** Lists owned revision-4 profiles whose complete executable representation is canonical. */
+/** Lists owned revision-5 profiles whose complete executable representation is canonical. */
 export declare function listManagedActiveIds(harness: HarnessName, project: string): string[];
 /** Lists fixed roles first, followed by canonical project profiles that are safe to invoke. */
 export declare function listInvocablePlayerIds(harness: HarnessName, project: string): string[];
@@ -29,7 +53,7 @@ export declare function listInvocablePlayerIds(harness: HarnessName, project: st
  * and then lose its preparation to a second filesystem read.
  */
 export declare function listInvocablePlayers(harness: HarnessName, project: string): InvocablePlayerIdentity[];
-/** Loads one active player only if it is owned, revision-4, validated, and canonical. */
+/** Loads one active player only if it is owned, revision-5, validated, and canonical. */
 export declare function loadManagedActivePlayer(harness: HarnessName, project: string, id: unknown): PlayerDefinition;
 /** Pi-specific convenience wrapper for loading a canonical active player. */
 export declare function loadPiActivePlayer(project: string, id: unknown): PlayerDefinition;

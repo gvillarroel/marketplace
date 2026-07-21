@@ -3,12 +3,21 @@
  * host lifecycle events into privacy-preserving Agent Harbor evidence.
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { listManagedActiveIds } from "../core/active.js";
+import { harborCustomToolNames } from "../core/custom-tools.js";
 import { rolePlayers } from "../core/defaults.js";
-import { emitHarborEvidence, fingerprintHarborEvidence, type HarborEvidenceHook } from "../core/evidence.js";
+import {
+  boundHarborEvidence,
+  emitHarborEvidence,
+  fingerprintHarborEvidence,
+  type HarborEvidenceHook,
+} from "../core/evidence.js";
 import { harnessProfileLayout } from "../core/harnesses.js";
 import { isHarborId } from "../core/identity.js";
+import { publicErrorText, publicMetadataText } from "../core/public-metadata.js";
 import { copilotTaskLabel } from "./copilot-team-runtime.js";
 
 /** Minimal host identity needed to resolve a logical Harbor player. */
@@ -32,15 +41,8 @@ export interface CopilotCoordinatorSession {
 interface HookInvocation { sessionId: string }
 interface HookBaseInput { sessionId: string; workingDirectory: string }
 interface ToolHookInput extends HookBaseInput { toolName: string; toolArgs: unknown }
-interface PreMcpToolCallHookInput extends HookBaseInput {
-  toolCallId?: string;
-  serverName: string;
-  toolName: string;
-  arguments: unknown;
-  _meta?: Record<string, unknown>;
-}
 interface PostToolHookInput extends ToolHookInput { toolResult?: unknown }
-interface PostToolFailureHookInput extends ToolHookInput { error?: string }
+interface PostToolFailureHookInput extends ToolHookInput { error?: unknown }
 interface UserPromptHookInput extends HookBaseInput { prompt?: string }
 interface PreToolDecision {
   permissionDecision: "allow" | "deny";
@@ -144,6 +146,13 @@ export interface CopilotCoordinatorNativeUsage {
   totalTokens?: number;
 }
 
+export interface CopilotCoordinatorNativeBilling {
+  /** Copilot's model-multiplier cost; this value is not USD. */
+  modelMultiplier?: number;
+  /** Copilot's native nano-AI-unit charge. */
+  totalNanoAiu?: number;
+}
+
 export interface CopilotCoordinatorRunUsageEvent extends CopilotCoordinatorRunCorrelation {
   type: "run.usage";
   apiCallId?: string;
@@ -154,6 +163,7 @@ export interface CopilotCoordinatorRunUsageEvent extends CopilotCoordinatorRunCo
   /** The host payload matched prior usage from another lifecycle owner, so no counters were attributed. */
   attributionUnverified?: boolean;
   usage: CopilotCoordinatorNativeUsage;
+  billing: CopilotCoordinatorNativeBilling;
 }
 
 export interface CopilotCoordinatorRunFinishedEvent extends CopilotCoordinatorRunCorrelation {
@@ -197,15 +207,37 @@ export type CopilotCoordinatorAdmissionHook = (input: {
 /** Hook callbacks installed into the Copilot extension session. */
 export interface CopilotCoordinatorHooks {
   onUserPromptSubmitted(input: UserPromptHookInput, invocation: HookInvocation): Promise<void>;
-  onPreMcpToolCall(input: PreMcpToolCallHookInput, invocation: HookInvocation): Promise<void>;
   onPreToolUse(input: ToolHookInput, invocation: HookInvocation): Promise<PreToolDecision | void>;
   onPostToolUse(input: PostToolHookInput, invocation: HookInvocation): Promise<void>;
   onPostToolUseFailure(input: PostToolFailureHookInput, invocation: HookInvocation): Promise<void>;
 }
+
+/** Exact native custom-tool invocation supplied by the extension handler. */
+export interface CopilotContractToolInvocation {
+  readonly sessionId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly arguments: unknown;
+  readonly traceparent?: string;
+  readonly tracestate?: string;
+}
+
+/** Descriptor returned by the deterministic contract validator. */
+export interface CopilotContractDescriptor {
+  readonly agent_type: string;
+  readonly description: string;
+  readonly prompt: string;
+}
+
 /** Stateful guard plus host-event observer used by the Copilot extension. */
 export interface CopilotCoordinatorGuard {
   hooks: CopilotCoordinatorHooks;
-  refresh(expectedCurrentId?: string): Promise<void>;
+  contractToolSucceeded(
+    invocation: CopilotContractToolInvocation,
+    descriptor: CopilotContractDescriptor,
+  ): Promise<void>;
+  contractToolFailed(invocation: CopilotContractToolInvocation): Promise<void>;
+  refresh(expectedCurrent?: string | CopilotAgentIdentity): Promise<void>;
   refreshAuthoritative(): Promise<void>;
   lifecycleIdentityUnverified(): boolean;
   /** @deprecated Use lifecycleIdentityUnverified; retained for compatible generated extensions. */
@@ -229,6 +261,8 @@ export interface CopilotCoordinatorHostEvent {
     apiCallId?: string;
     cacheReadTokens?: number;
     cacheWriteTokens?: number;
+    cost?: number;
+    copilotUsage?: { totalNanoAiu?: number };
     arguments?: Record<string, unknown>;
     currentModel?: string;
     durationMs?: number;
@@ -239,8 +273,6 @@ export interface CopilotCoordinatorHostEvent {
     hookInvocationId?: string;
     hookType?: string;
     model?: string;
-    mcpServerName?: string;
-    mcpToolName?: string;
     messageId?: string;
     name?: string;
     newModel?: string;
@@ -281,9 +313,56 @@ export const copilotFixedAgentIds: ReadonlyMap<string, string> = new Map(
 /** Plugin-qualified identity used only by the explicit `/scout` command. */
 export const copilotScoutAgentId = "agent-foundry:talent-scout";
 
+const coordinatorModuleDirectory = dirname(fileURLToPath(import.meta.url));
+const copilotPluginAgentDirectory = [
+  // Source/root dist layout.
+  resolve(coordinatorModuleDirectory, "../../plugins/agent-foundry/agents"),
+  // Plugin-local runtime/dist layout copied by scripts/build.mjs.
+  resolve(coordinatorModuleDirectory, "../../../agents"),
+].find((candidate) => existsSync(candidate));
+
+/** Exact bundled plugin asset path for one fixed Copilot identity. */
+export function copilotFixedAgentPath(id: string): string {
+  const filename = id === "talent-scout" ? "talent-scout" : copilotFixedAgentIds.has(id) ? id : undefined;
+  if (!filename || !copilotPluginAgentDirectory) {
+    throw new Error(`Agent Harbor cannot resolve the bundled Copilot agent asset: ${id}`);
+  }
+  return resolve(copilotPluginAgentDirectory, `${filename}.agent.md`);
+}
+
 function samePath(left: string, right: string): boolean {
   const normalize = (value: string) => process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value);
   return normalize(left) === normalize(right);
+}
+
+/**
+ * Compares the complete bounded native identity used for a selection proof.
+ * A path-bearing identity cannot be proven by an id-only host response.
+ */
+export function copilotAgentIdentityMatches(
+  expected: CopilotAgentIdentity,
+  actual: unknown,
+): boolean {
+  let bounded: CopilotAgentIdentity;
+  try {
+    bounded = boundedCopilotAgentIdentity(actual);
+  } catch {
+    return false;
+  }
+  if (bounded.id !== expected.id) return false;
+  if (bounded.path === undefined || expected.path === undefined) {
+    return bounded.path === expected.path;
+  }
+  return samePath(bounded.path, expected.path);
+}
+
+function sameOptionalCopilotAgentIdentity(
+  left: CopilotAgentIdentity | undefined,
+  right: CopilotAgentIdentity | undefined,
+): boolean {
+  return left === undefined || right === undefined
+    ? left === right
+    : copilotAgentIdentityMatches(left, right);
 }
 
 function activePath(project: string, id: string): string {
@@ -305,7 +384,9 @@ export function resolveCopilotPlayer(
 ): CopilotAgentIdentity {
   const fixedId = id === "talent-scout" ? copilotScoutAgentId : copilotFixedAgentIds.get(id);
   if (fixedId) {
-    const matches = agents.filter((agent) => agent.id === fixedId);
+    const expectedPath = copilotFixedAgentPath(id);
+    const matches = agents.filter((agent) =>
+      agent.id === fixedId && agent.path !== undefined && samePath(agent.path, expectedPath));
     if (matches.length === 1) return matches[0];
     if (matches.length > 1) throw new Error(`active Agent Harbor player is ambiguous: ${id}`);
     throw new Error(`Agent Harbor player is not active in Copilot: ${id}`);
@@ -322,38 +403,225 @@ export function resolveCopilotPlayer(
 }
 
 function deny(reason: string) {
-  return { permissionDecision: "deny" as const, permissionDecisionReason: reason };
+  return {
+    permissionDecision: "deny" as const,
+    permissionDecisionReason: publicErrorText(reason, 600) ?? "Agent Harbor delegation was denied safely",
+  };
 }
+
+function publicCoordinatorError(error: unknown, limit = 300): string {
+  try {
+    const message = typeof error === "string"
+      ? error
+      : error instanceof Error && typeof error.message === "string"
+        ? error.message
+        : undefined;
+    return message ? publicErrorText(message, limit) ?? "unavailable" : "unavailable";
+  } catch {
+    return "unavailable";
+  }
+}
+
+const structuredToolArgumentFields = new Set(["agent_type", "description", "prompt", "definition"]);
 
 function structuredToolArgs(value: unknown): Record<string, unknown> | undefined {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     try {
-      const serialized = JSON.stringify(value);
-      return Buffer.byteLength(serialized, "utf8") <= 100_000 ? value as Record<string, unknown> : undefined;
+      const keys = Object.keys(value);
+      if (keys.length > 3 || keys.some((key) => !structuredToolArgumentFields.has(key))) return undefined;
+      const bounded: Record<string, string> = {};
+      let directCodeUnits = 0;
+      for (const key of keys) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "string" ||
+            descriptor.value.length > 100_000) return undefined;
+        directCodeUnits += key.length + descriptor.value.length;
+        if (directCodeUnits > 100_000) return undefined;
+        bounded[key] = descriptor.value;
+      }
+      const serialized = JSON.stringify(bounded);
+      return serialized.length <= 100_000 && Buffer.byteLength(serialized, "utf8") <= 100_000
+        ? bounded
+        : undefined;
     } catch {
       return undefined;
     }
   }
-  if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > 100_000) return undefined;
+  if (typeof value !== "string" || value.length > 100_000 || !value.trim() ||
+      Buffer.byteLength(value, "utf8") > 100_000) return undefined;
   try {
     const parsed: unknown = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+    return structuredToolArgs(parsed);
   } catch {
     return undefined;
   }
 }
 
 function publicCopilotMetadata(value: unknown, limit = 200): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const normalized = value
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, " ")
-    .replace(/[\p{Cc}\p{Cf}\s]+/gu, " ")
-    .trim();
-  return normalized ? [...normalized].slice(0, limit).join("") : undefined;
+  return typeof value === "string" ? publicMetadataText(value, limit) : undefined;
+}
+
+const maximumCopilotRegistryAgents = 1_024;
+
+function boundedCopilotRegistryText(value: unknown, maximumCodeUnits: number, maximumBytes: number): string | undefined {
+  if (typeof value !== "string" || !value || value.length > maximumCodeUnits ||
+      Buffer.byteLength(value, "utf8") > maximumBytes || !value.trim() ||
+      /\x1b\[[0-?]*[ -/]*[@-~]|[\p{Cc}\p{Cf}]/u.test(value)) return undefined;
+  return value;
+}
+
+function boundedCopilotAgentIdentity(value: unknown): CopilotAgentIdentity {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Copilot agent registry returned a malformed identity");
+  }
+  const candidate = value as Record<string, unknown>;
+  const id = boundedCopilotRegistryText(candidate.id, 256, 1_024);
+  if (!id) {
+    throw new Error("Copilot agent registry returned an invalid or oversized ID");
+  }
+  const path = candidate.path === undefined || candidate.path === null
+    ? undefined
+    : boundedCopilotRegistryText(candidate.path, 2_048, 8_192);
+  if (candidate.path !== undefined && candidate.path !== null &&
+      !path) {
+    throw new Error("Copilot agent registry returned an invalid or oversized path");
+  }
+  const model = candidate.model === undefined || candidate.model === null
+    ? undefined
+    : boundedCopilotRegistryText(candidate.model, 256, 1_024);
+  if (candidate.model !== undefined && candidate.model !== null &&
+      !model) {
+    throw new Error("Copilot agent registry returned an invalid or oversized model");
+  }
+  if (candidate.userInvocable !== undefined && typeof candidate.userInvocable !== "boolean") {
+    throw new Error("Copilot agent registry returned an invalid invocation flag");
+  }
+  return {
+    id,
+    ...(path === undefined ? {} : { path }),
+    ...(model === undefined ? {} : { model }),
+    ...(candidate.userInvocable === undefined ? {} : { userInvocable: candidate.userInvocable }),
+  };
+}
+
+function boundedCopilotAgentRegistry(value: unknown): CopilotAgentIdentity[] {
+  if (!Array.isArray(value) || value.length > maximumCopilotRegistryAgents) {
+    throw new Error(`Copilot agent registry exceeds ${maximumCopilotRegistryAgents} bounded identities`);
+  }
+  return value.map(boundedCopilotAgentIdentity);
 }
 
 function nativeCounter(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+const maximumCopilotEvidenceProjectionDepth = 5;
+const maximumCopilotEvidenceProjectionNodes = 128;
+const maximumCopilotEvidenceEntriesPerObject = 32;
+const maximumCopilotEvidenceStringCodeUnits = 8_192;
+const maximumCopilotEvidenceRetainedCodeUnits = 24_000;
+
+interface CopilotEvidenceProjectionBudget {
+  nodes: number;
+  codeUnits: number;
+  readonly seen: WeakSet<object>;
+}
+
+function boundedProjectionString(
+  value: string,
+  budget: CopilotEvidenceProjectionBudget,
+  perValueLimit = maximumCopilotEvidenceStringCodeUnits,
+): string {
+  const retainedUnits = Math.max(0, Math.min(value.length, perValueLimit, budget.codeUnits));
+  const retained = value.slice(0, retainedUnits);
+  budget.codeUnits -= retainedUnits;
+  return retainedUnits === value.length
+    ? retained
+    : `${retained}[HARBOR-VALUE-TRUNCATED omitted_code_units_at_least=${value.length - retainedUnits}]`;
+}
+
+/** Projects unknown host evidence through own data descriptors only; accessors are never invoked. */
+function projectCopilotEvidence(
+  value: unknown,
+  budget: CopilotEvidenceProjectionBudget,
+  depth: number,
+): unknown {
+  if (value === undefined) return "[Undefined]";
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") return boundedProjectionString(value, budget);
+  if (typeof value === "number") return Number.isFinite(value) ? value : "[NonFiniteNumber]";
+  if (typeof value === "bigint") return "[BigInt]";
+  if (typeof value === "symbol") return "[Symbol]";
+  if (typeof value === "function") return "[Function]";
+  if (depth >= maximumCopilotEvidenceProjectionDepth) return "[MaximumDepth]";
+  if (budget.nodes >= maximumCopilotEvidenceProjectionNodes) return "[MaximumNodes]";
+  budget.nodes += 1;
+  if (budget.seen.has(value)) return "[Circular]";
+  budget.seen.add(value);
+
+  try {
+    if (Array.isArray(value)) {
+      const projected: unknown[] = [];
+      const inspected = Math.min(value.length, maximumCopilotEvidenceEntriesPerObject);
+      for (let index = 0; index < inspected; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor) projected.push("[ArrayHole]");
+        else if (!("value" in descriptor)) projected.push("[AccessorOmitted]");
+        else projected.push(projectCopilotEvidence(descriptor.value, budget, depth + 1));
+      }
+      if (value.length > inspected) {
+        projected.push({ omittedArrayItemsAtLeast: value.length - inspected });
+      }
+      return projected;
+    }
+
+    const entries: unknown[] = [];
+    let inspected = 0;
+    let hasMore = false;
+    for (const key in value as Record<string, unknown>) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor) continue;
+      if (inspected >= maximumCopilotEvidenceEntriesPerObject) {
+        hasMore = true;
+        break;
+      }
+      inspected += 1;
+      const projectedKey = boundedProjectionString(key, budget, 256);
+      entries.push([
+        projectedKey,
+        "value" in descriptor
+          ? projectCopilotEvidence(descriptor.value, budget, depth + 1)
+          : "[AccessorOmitted]",
+      ]);
+    }
+    return { kind: "object", entries, ...(hasMore ? { omittedProperties: true } : {}) };
+  } catch {
+    return "[UninspectableObject]";
+  }
+}
+
+/** Serializes only a bounded inert projection before hashing or measuring bytes. */
+function boundedCopilotEvidenceText(value: unknown): string {
+  if (value === undefined) return "";
+  const budget: CopilotEvidenceProjectionBudget = {
+    nodes: 0,
+    codeUnits: maximumCopilotEvidenceRetainedCodeUnits,
+    seen: new WeakSet<object>(),
+  };
+  if (typeof value === "string") {
+    return boundHarborEvidence(boundedProjectionString(value, budget, maximumCopilotEvidenceRetainedCodeUnits)).text;
+  }
+  const projected = projectCopilotEvidence(value, budget, 0);
+  return boundHarborEvidence(JSON.stringify(projected)).text;
+}
+
+function ownDataProperty(value: object, key: string): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** True only for events emitted by the main/root loop, including deprecated correlation fields. */
@@ -448,12 +716,44 @@ export function createCopilotCoordinatorGuard(
   lifecycleHook?: CopilotCoordinatorLifecycleHook,
   admissionHook?: CopilotCoordinatorAdmissionHook,
 ): CopilotCoordinatorGuard {
+  const maximumHostCorrelationCodeUnits = 4_096;
+  const maximumPrivateCorrelationCodeUnits = 100_000;
   const correlationKey = randomBytes(32);
+  const privateCorrelationPayload = (value: unknown): string => {
+    const budget = { remaining: maximumPrivateCorrelationCodeUnits };
+    const seen = new WeakSet<object>();
+    const inspect = (candidate: unknown, depth: number): boolean => {
+      if (typeof candidate === "string") {
+        if (candidate.length > budget.remaining) return false;
+        budget.remaining -= candidate.length;
+        return true;
+      }
+      if (candidate === null || typeof candidate === "boolean" || typeof candidate === "number") return true;
+      if (!candidate || typeof candidate !== "object" || depth > 6 || seen.has(candidate)) return false;
+      seen.add(candidate);
+      const keys = Object.keys(candidate);
+      if (keys.length > 64) return false;
+      for (const key of keys) {
+        if (key.length > budget.remaining) return false;
+        budget.remaining -= key.length;
+        const descriptor = Object.getOwnPropertyDescriptor(candidate, key);
+        if (!descriptor || !("value" in descriptor) || !inspect(descriptor.value, depth + 1)) return false;
+      }
+      return true;
+    };
+    if (!inspect(value, 0)) throw new Error("Copilot correlation input exceeds its bounded shape");
+    const payload = typeof value === "string" ? value : JSON.stringify(value);
+    if (payload === undefined || payload.length > maximumPrivateCorrelationCodeUnits ||
+        Buffer.byteLength(payload, "utf8") > maximumPrivateCorrelationCodeUnits) {
+      throw new Error("Copilot correlation input exceeds 100000 bytes");
+    }
+    return payload;
+  };
   const privateCorrelationKey = (namespace: string, value: unknown): string => {
     const digest = createHmac("sha256", correlationKey);
     digest.update(namespace, "utf8");
     digest.update("\0", "utf8");
-    digest.update(typeof value === "string" ? value : JSON.stringify(value) ?? String(value), "utf8");
+    digest.update(privateCorrelationPayload(value), "utf8");
     return digest.digest("base64url");
   };
   const samePrivateCorrelation = (left: string, right: string): boolean => {
@@ -462,15 +762,52 @@ export function createCopilotCoordinatorGuard(
     return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
   };
   const publicOpaqueCorrelation = (namespace: string, value: unknown, limit = 200): string | undefined => {
+    if (typeof value === "string" && (value.length > maximumHostCorrelationCodeUnits ||
+        Buffer.byteLength(value, "utf8") > maximumHostCorrelationCodeUnits)) return undefined;
     const publicValue = publicCopilotMetadata(value, limit);
-    if (!publicValue || typeof value !== "string" || [...value].length <= limit) return publicValue;
+    if (!publicValue || typeof value !== "string" || value.length <= limit) return publicValue;
     const suffix = privateCorrelationKey(namespace, value).slice(0, 16);
     const prefix = publicCopilotMetadata(value, Math.max(1, limit - suffix.length - 1));
     return prefix ? `${prefix}~${suffix}` : suffix;
   };
-  const opaqueEventKey = (value: unknown): string | undefined => typeof value === "string" && value
+  const opaqueEventKey = (value: unknown): string | undefined => typeof value === "string" && value &&
+    value.length <= maximumHostCorrelationCodeUnits && Buffer.byteLength(value, "utf8") <= maximumHostCorrelationCodeUnits
     ? privateCorrelationKey("event", value)
     : undefined;
+  const boundedHostCorrelation = (value: unknown): boolean => value === undefined || value === null ||
+    (typeof value === "string" && value.length <= maximumHostCorrelationCodeUnits &&
+      Buffer.byteLength(value, "utf8") <= maximumHostCorrelationCodeUnits);
+  const eventCorrelationsAreBounded = (event: CopilotCoordinatorHostEvent): boolean => [
+    event.type,
+    event.id,
+    event.parentId,
+    event.agentId,
+    event.timestamp,
+    event.data?.sessionId,
+    event.data?.parentToolCallId,
+    event.data?.initiator,
+    event.data?.toolCallId,
+    event.data?.shutdownType,
+    event.data?.turnId,
+    event.data?.interactionId,
+    event.data?.hookInvocationId,
+    event.data?.messageId,
+    event.data?.toolName,
+    event.data?.toolDescription?.name,
+    event.data?.hookType,
+    event.data?.agentName,
+    event.data?.name,
+    event.data?.pluginName,
+    event.data?.source,
+    event.data?.trigger,
+    event.data?.apiCallId,
+    event.data?.serviceRequestId,
+    event.data?.providerCallId,
+    event.data?.model,
+    event.data?.newModel,
+    event.data?.selectedModel,
+    event.data?.reasoningEffort,
+  ].every(boundedHostCorrelation);
   const processedEventIds = new Set<string>();
   const claimHostEvent = (event: CopilotCoordinatorHostEvent): boolean => {
     const key = opaqueEventKey(event.id);
@@ -540,15 +877,22 @@ export function createCopilotCoordinatorGuard(
           !samePrivateCorrelation(nativePrior.metadata, metadata)) return "unverified";
       return "replay";
     }
-    // A new terminal outside an active root may close an ordinary prompt
-    // context, but never reserves a semantic tombstone that could block a
-    // later legitimate mission. An already known semantic observation is an
-    // inert replay and cannot close a newer prompt context.
+    // A terminal outside an active root cannot produce a lifecycle terminal,
+    // but its exact semantic shape must remain a tombstone: a replay with a
+    // fresh native ID must not close a later root. A first observation remains
+    // claimed only so the normal handler can retire its ordinary prompt
+    // context; an exact semantic repeat is inert.
     if (currentRootRunId === undefined) {
-      if (claimedNativeSessionTerminalKeys.size < maximumCriticalAliases) {
+      if (prior === undefined) {
+        if (sessionTerminalSemanticOwners.size >= maximumCriticalAliases ||
+            claimedNativeSessionTerminalKeys.size >= maximumCriticalAliases) return "unverified";
+        claimedNativeSessionTerminalKeys.set(nativeKey, { scope, metadata });
+        sessionTerminalSemanticOwners.set(semanticKey, { scope, owner, metadata });
+        return "claimed";
+      } else if (claimedNativeSessionTerminalKeys.size < maximumCriticalAliases) {
         claimedNativeSessionTerminalKeys.set(nativeKey, { scope, metadata });
       }
-      return prior === undefined ? "claimed" : "replay";
+      return "replay";
     }
     // The exact semantic observation already closed (or was observed within)
     // another root. A new native ID is safely treated as an enriched replay;
@@ -567,6 +911,13 @@ export function createCopilotCoordinatorGuard(
   };
   const counts = new Map<string, number>();
   const inFlight = new Set<string>();
+  const maximumUnclaimedTaskCalls = 6;
+  /** Keyed fixed-size identities only; raw host IDs can be attacker-sized. */
+  const taskToolCallHash = (value: unknown): string | undefined =>
+    typeof value === "string" && value && value.length <= maximumHostCorrelationCodeUnits &&
+      Buffer.byteLength(value, "utf8") <= maximumHostCorrelationCodeUnits
+      ? privateCorrelationKey("task:tool-call", value)
+      : undefined;
   const unclaimedTaskCalls: string[] = [];
   const pending = new Map<string, {
     agent: string;
@@ -575,7 +926,7 @@ export function createCopilotCoordinatorGuard(
     purpose?: "contract";
     childId?: string;
     provisionalChildId?: string;
-    invocationId?: string;
+    invocationHash?: string;
     terminal?: "completed" | "failed";
     terminalObservation?: CopilotCoordinatorHostEvent;
     deferredContractOutcome?: "completed" | "failed";
@@ -592,27 +943,54 @@ export function createCopilotCoordinatorGuard(
   interface ContractInvocationState {
     sessionId: string;
     project: string;
+    promptEpoch: number;
     root?: MutableCopilotLifecycleRun;
     reservationEventHash?: string;
     admissionError?: string;
-    /** Provisional model-facing tool hook; this hook does not carry MCP identity. */
-    controlPreflightHash?: string;
-    /** Host-authenticated MCP identity and native call captured by preMcpToolCall. */
-    controlMcpHash?: string;
-    controlMcpCallHash?: string;
-    controlCallHash?: string;
-    controlCompleted: boolean;
+    /** Exact `{definition}` shape authenticated by the native pre-tool hook. */
+    contractPreToolHash?: string;
+    /** Exact native handler identity; contains only a keyed digest. */
+    contractToolInvocationHash?: string;
+    /** Native call identity observed on the lifecycle stream. */
+    contractToolCallHash?: string;
+    contractToolResult?: "succeeded" | "failed";
     descriptor?: ContractDescriptorHashes;
     contractorAgent: string;
     taskLabel: string;
     taskAttempted: boolean;
     taskAdmitted: boolean;
     taskFinalized: boolean;
-    taskCallId?: string;
+    taskCallHash?: string;
+    taskPublicCallId?: string;
     childOutcome?: "completed" | "failed" | "cancelled";
     invalidReason?: string;
   }
   const contractInvocations = new Map<string, ContractInvocationState>();
+  /**
+   * A completed/abandoned contract must not fail open when Copilot replays its
+   * parent `task` hook after lifecycle cleanup. Epochs let an authoritative
+   * later user prompt supersede an older tombstone without confusing a late
+   * terminal from the prior prompt with the new turn.
+   */
+  const terminalContractEpochs = new Map<string, number>();
+  const latestPromptEpochs = new Map<string, number>();
+  const maximumContractEpochSessions = 256;
+  let contractEpochCapacityExceeded = false;
+  const rememberPromptEpoch = (sessionId: string, epoch: number): void => {
+    if (latestPromptEpochs.has(sessionId) || latestPromptEpochs.size < maximumContractEpochSessions) {
+      latestPromptEpochs.set(sessionId, epoch);
+      return;
+    }
+    contractEpochCapacityExceeded = true;
+  };
+  const rememberTerminalContractEpoch = (sessionId: string, epoch: number): void => {
+    if (terminalContractEpochs.has(sessionId) || terminalContractEpochs.size < maximumContractEpochSessions) {
+      terminalContractEpochs.set(sessionId, epoch);
+      return;
+    }
+    // Never evict a security tombstone and accidentally authorize its replay.
+    contractEpochCapacityExceeded = true;
+  };
   const blockedContractSessions = new Set<string>();
   const maximumBlockedContractSessions = 256;
   let blockNextPromptForUnscopedContractEvent = false;
@@ -670,12 +1048,7 @@ export function createCopilotCoordinatorGuard(
     return result;
   };
 
-  const serialized = (value: unknown): string => {
-    if (typeof value === "string") return value;
-    if (value === undefined) return "";
-    try { return JSON.stringify(value); }
-    catch { return String(value); }
-  };
+  const serialized = boundedCopilotEvidenceText;
 
   const safeTerminalObservation = (event: CopilotCoordinatorHostEvent): CopilotCoordinatorHostEvent => ({
     type: event.type,
@@ -820,9 +1193,12 @@ export function createCopilotCoordinatorGuard(
   const acceptSelectionObservation = (event: CopilotCoordinatorHostEvent, deselected: boolean): boolean => {
     const observedAt = eventObservedAt(event);
     if (observedAt === undefined) {
+      const observedAgentName = event.data?.agentName;
       const eventKey = untimedObservationKey("selection", event, {
         deselected,
-        agentName: event.data?.agentName ?? null,
+        agentName: typeof observedAgentName === "string" && observedAgentName.length <= 1_024
+          ? observedAgentName
+          : observedAgentName === undefined || observedAgentName === null ? null : "[invalid]",
       });
       if (selectionUntimedEventIds.has(eventKey)) return false;
       if (selectionUntimedEventIds.size >= 256) return deselected;
@@ -989,20 +1365,14 @@ export function createCopilotCoordinatorGuard(
     try {
       if (logicalId) {
         const resolved = resolveCopilotPlayer(logicalId, snapshot.agents, project);
-        return resolved.id === runtimeAgent
+        return copilotAgentIdentityMatches(resolved, identity)
           ? { agent: logicalId, runtimeAgent, ...(resolved.model === undefined ? {} : { model: resolved.model }) }
           : undefined;
       }
       if (!listCopilotActiveProfileIds(project).includes(runtimeAgent)) return undefined;
-      // An id-only current selection is common in the SDK. Validate it against
-      // every same-id registry entry so order cannot select a foreign path and
-      // duplicate exact definitions remain fail-closed as ambiguous.
       const candidates = snapshot.agents.filter(({ id }) => id === runtimeAgent);
-      if (identity.path && !candidates.some((candidate) =>
-        candidate.path !== undefined && samePath(candidate.path, identity.path!))) return undefined;
       const resolved = resolveCopilotPlayer(runtimeAgent, candidates, project);
-      if (identity.path && (!resolved.path || !samePath(resolved.path, identity.path))) return undefined;
-      return resolved.id === runtimeAgent
+      return copilotAgentIdentityMatches(resolved, identity)
         ? { agent: runtimeAgent, runtimeAgent, ...(resolved.model === undefined ? {} : { model: resolved.model }) }
         : undefined;
     } catch {
@@ -1014,6 +1384,16 @@ export function createCopilotCoordinatorGuard(
     const selected = snapshot.current;
     if (!selected) return undefined;
     return harborPlayerForIdentity(project, selected);
+  };
+
+  const exactTeamLeadSelected = (): boolean => {
+    if (!snapshot.ready) return false;
+    try {
+      const exact = resolveCopilotPlayer("team-lead", snapshot.agents, ".");
+      return copilotAgentIdentityMatches(exact, snapshot.current);
+    } catch {
+      return false;
+    }
   };
 
   const startRootLifecycle = (
@@ -1054,11 +1434,50 @@ export function createCopilotCoordinatorGuard(
     return root;
   };
 
-  const exactContractControl = (value: unknown): { args: string; hash: string } | undefined => {
+  const exactContractToolArguments = (value: unknown): { definition: string; hash: string } | undefined => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
     const args = structuredToolArgs(value);
-    if (!args || Object.keys(args).sort().join("\0") !== "args\0command") return undefined;
-    if (args.command !== "contract" || typeof args.args !== "string") return undefined;
-    return { args: args.args, hash: privateCorrelationKey("contract:control-args", args.args) };
+    if (!args || Object.keys(args).join("\0") !== "definition" || typeof args.definition !== "string") {
+      return undefined;
+    }
+    return {
+      definition: args.definition,
+      hash: privateCorrelationKey("contract:tool-definition", args.definition),
+    };
+  };
+
+  const exactContractToolInvocation = (value: unknown): {
+    sessionId: string;
+    argumentHash: string;
+    callHash: string;
+    invocationHash: string;
+  } | undefined => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const invocation = value as Record<string, unknown>;
+    const keys = Object.keys(invocation);
+    if (keys.some((key) => !["arguments", "sessionId", "toolCallId", "toolName", "traceparent", "tracestate"].includes(key)) ||
+        typeof invocation.sessionId !== "string" || !invocation.sessionId ||
+        typeof invocation.toolCallId !== "string" || !invocation.toolCallId ||
+        !boundedHostCorrelation(invocation.sessionId) || !boundedHostCorrelation(invocation.toolCallId) ||
+        invocation.toolName !== harborCustomToolNames.contractPreflight ||
+        (invocation.traceparent !== undefined && (typeof invocation.traceparent !== "string" ||
+          !boundedHostCorrelation(invocation.traceparent))) ||
+        (invocation.tracestate !== undefined && (typeof invocation.tracestate !== "string" ||
+          !boundedHostCorrelation(invocation.tracestate)))) return undefined;
+    const args = exactContractToolArguments(invocation.arguments);
+    if (!args) return undefined;
+    const callHash = privateCorrelationKey("contract:tool-call", invocation.toolCallId);
+    return {
+      sessionId: invocation.sessionId,
+      argumentHash: args.hash,
+      callHash,
+      invocationHash: privateCorrelationKey("contract:tool-invocation", {
+        sessionId: invocation.sessionId,
+        toolName: invocation.toolName,
+        callHash,
+        argumentHash: args.hash,
+      }),
+    };
   };
 
   const contractTaskMetadata = (raw: string): { contractorAgent: string; taskLabel: string } => {
@@ -1077,37 +1496,15 @@ export function createCopilotCoordinatorGuard(
     }
   };
 
-  const exactContractDescriptor = (result: unknown): ContractDescriptorHashes | undefined => {
-    if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
-    const output = result as Record<string, unknown>;
-    let parsedContent: unknown;
-    if (typeof output.content === "string") {
-      try { parsedContent = JSON.parse(output.content); }
-      catch { /* A structured result remains authoritative when model-facing text was truncated. */ }
-    }
-    const hasStructured = Object.prototype.hasOwnProperty.call(output, "structuredContent");
-    const structured = output.structuredContent;
-    if (hasStructured && (!structured || typeof structured !== "object" || Array.isArray(structured))) {
-      return undefined;
-    }
-    const descriptor = hasStructured
-      ? structured as Record<string, unknown>
-      : parsedContent && typeof parsedContent === "object" && !Array.isArray(parsedContent)
-        ? parsedContent as Record<string, unknown>
-        : undefined;
-    if (!descriptor) return undefined;
+  const exactContractDescriptor = (value: unknown): ContractDescriptorHashes | undefined => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const descriptor = value as Record<string, unknown>;
     if (Object.keys(descriptor).sort().join("\0") !== "agent_type\0description\0prompt") return undefined;
     const agentType = descriptor.agent_type;
     const description = descriptor.description;
     const prompt = descriptor.prompt;
     if (typeof agentType !== "string" || !agentType || typeof description !== "string" ||
         typeof prompt !== "string" || !prompt) return undefined;
-    if (hasStructured && parsedContent !== undefined) {
-      if (!parsedContent || typeof parsedContent !== "object" || Array.isArray(parsedContent)) return undefined;
-      const record = parsedContent as Record<string, unknown>;
-      if (Object.keys(record).sort().join("\0") !== "agent_type\0description\0prompt" ||
-          record.agent_type !== agentType || record.description !== description || record.prompt !== prompt) return undefined;
-    }
     return {
       agentType: privateCorrelationKey("contract:agent-type", agentType),
       description: privateCorrelationKey("contract:description", description),
@@ -1115,6 +1512,94 @@ export function createCopilotCoordinatorGuard(
       runtimeAgent: publicCopilotMetadata(agentType, 120) ?? "contractor",
     };
   };
+
+  const sameContractDescriptor = (
+    left: ContractDescriptorHashes,
+    right: ContractDescriptorHashes,
+  ): boolean => samePrivateCorrelation(left.agentType, right.agentType) &&
+    samePrivateCorrelation(left.description, right.description) &&
+    samePrivateCorrelation(left.prompt, right.prompt) && left.runtimeAgent === right.runtimeAgent;
+
+  const rejectContractTool = (state: ContractInvocationState | undefined, reason: string): never => {
+    if (state) invalidateContract(state, reason);
+    throw new Error(reason);
+  };
+
+  const contractToolSucceeded = async (
+    invocation: CopilotContractToolInvocation,
+    descriptor: CopilotContractDescriptor,
+  ): Promise<void> => locked(() => {
+    const exactInvocation = exactContractToolInvocation(invocation);
+    const candidateSessionId = invocation && typeof invocation === "object" &&
+      typeof (invocation as { sessionId?: unknown }).sessionId === "string"
+      ? (invocation as { sessionId: string }).sessionId
+      : undefined;
+    const state = contractInvocations.get(exactInvocation?.sessionId ?? candidateSessionId ?? "");
+    if (!exactInvocation || !state) {
+      return rejectContractTool(state, "Agent Harbor received an unauthenticated harbor_contract success");
+    }
+    if (state.admissionError) {
+      return rejectContractTool(state, `Agent Harbor /contract admission failed: ${state.admissionError}`);
+    }
+    if (state.invalidReason) throw new Error(state.invalidReason);
+    if (!state.contractPreToolHash ||
+        !samePrivateCorrelation(exactInvocation.argumentHash, state.contractPreToolHash)) {
+      return rejectContractTool(state, "Agent Harbor harbor_contract success did not match its exact pre-tool");
+    }
+    if ((state.contractToolInvocationHash &&
+         !samePrivateCorrelation(exactInvocation.invocationHash, state.contractToolInvocationHash)) ||
+        (state.contractToolCallHash &&
+         !samePrivateCorrelation(exactInvocation.callHash, state.contractToolCallHash))) {
+      return rejectContractTool(state, "Agent Harbor /contract may authenticate exactly one harbor_contract invocation");
+    }
+    const exactDescriptor = exactContractDescriptor(descriptor);
+    if (!exactDescriptor) {
+      return rejectContractTool(state, "Agent Harbor harbor_contract did not return one exact descriptor");
+    }
+    if (state.contractToolResult === "failed") {
+      return rejectContractTool(state, "Agent Harbor harbor_contract reported conflicting outcomes");
+    }
+    if (state.contractToolResult === "succeeded") {
+      if (!state.descriptor || !sameContractDescriptor(state.descriptor, exactDescriptor)) {
+        return rejectContractTool(state, "Agent Harbor harbor_contract replay changed its descriptor");
+      }
+      return;
+    }
+    state.contractToolInvocationHash = exactInvocation.invocationHash;
+    state.contractToolCallHash = exactInvocation.callHash;
+    state.contractToolResult = "succeeded";
+    state.descriptor = exactDescriptor;
+  });
+
+  const contractToolFailed = async (invocation: CopilotContractToolInvocation): Promise<void> => locked(() => {
+    const exactInvocation = exactContractToolInvocation(invocation);
+    const candidateSessionId = invocation && typeof invocation === "object" &&
+      typeof (invocation as { sessionId?: unknown }).sessionId === "string"
+      ? (invocation as { sessionId: string }).sessionId
+      : undefined;
+    const state = contractInvocations.get(exactInvocation?.sessionId ?? candidateSessionId ?? "");
+    if (!exactInvocation || !state) {
+      return rejectContractTool(state, "Agent Harbor received an unauthenticated harbor_contract failure");
+    }
+    if (state.invalidReason && state.contractToolResult !== "failed") throw new Error(state.invalidReason);
+    if (!state.contractPreToolHash ||
+        !samePrivateCorrelation(exactInvocation.argumentHash, state.contractPreToolHash)) {
+      return rejectContractTool(state, "Agent Harbor harbor_contract failure did not match its exact pre-tool");
+    }
+    if ((state.contractToolInvocationHash &&
+         !samePrivateCorrelation(exactInvocation.invocationHash, state.contractToolInvocationHash)) ||
+        (state.contractToolCallHash &&
+         !samePrivateCorrelation(exactInvocation.callHash, state.contractToolCallHash))) {
+      return rejectContractTool(state, "Agent Harbor /contract may authenticate exactly one harbor_contract invocation");
+    }
+    if (state.contractToolResult === "succeeded") {
+      return rejectContractTool(state, "Agent Harbor harbor_contract reported conflicting outcomes");
+    }
+    state.contractToolInvocationHash = exactInvocation.invocationHash;
+    state.contractToolCallHash = exactInvocation.callHash;
+    state.contractToolResult = "failed";
+    invalidateContract(state, "Agent Harbor harbor_contract failed; no child was created");
+  });
 
   const startContractWrapper = (event: CopilotCoordinatorHostEvent): void => {
     if (!rootScopedHostEvent(event) || event.data?.agentName !== undefined) return;
@@ -1137,9 +1622,9 @@ export function createCopilotCoordinatorGuard(
     const state: ContractInvocationState = {
       sessionId,
       project: context.project,
+      promptEpoch: context.epoch,
       contractorAgent: "contractor",
       taskLabel: "(awaiting validated contract)",
-      controlCompleted: false,
       taskAttempted: false,
       taskAdmitted: false,
       taskFinalized: false,
@@ -1207,7 +1692,7 @@ export function createCopilotCoordinatorGuard(
         memberKind: "utility",
       });
     } catch (error) {
-      state.admissionError = publicCopilotMetadata(error instanceof Error ? error.message : String(error), 300)
+      state.admissionError = publicCoordinatorError(error, 300)
         ?? "Agent Harbor /contract root admission failed";
       return;
     }
@@ -1231,14 +1716,14 @@ export function createCopilotCoordinatorGuard(
 
   const lifecycleItemForEvent = (event: CopilotCoordinatorHostEvent) => {
     const childId = event.agentId;
-    const invocationId = event.data?.toolCallId ?? event.data?.parentToolCallId;
+    const invocationHash = taskToolCallHash(event.data?.toolCallId ?? event.data?.parentToolCallId);
     return [...pending.values()].find((item) => {
       const knownChildId = item.childId ?? item.provisionalChildId;
       const childMatches = childId !== undefined && knownChildId === childId;
       // Once native child identity is sealed, a shared parent tool call cannot
       // reattribute activity from another child to this lifecycle.
       if (childId !== undefined && knownChildId !== undefined) return childMatches;
-      return childMatches || (invocationId !== undefined && item.invocationId === invocationId);
+      return childMatches || (invocationHash !== undefined && item.invocationHash === invocationHash);
     });
   };
 
@@ -1328,6 +1813,21 @@ export function createCopilotCoordinatorGuard(
   const criticalStableAliases = (event: CopilotCoordinatorHostEvent): string[] => {
     const aliases: string[] = [];
     if (event.id) aliases.push(privateCorrelationKey("critical:event", event.id));
+    if (event.type === "session.start" && event.data?.sessionId) {
+      aliases.push(privateCorrelationKey("critical:session-start", event.data.sessionId));
+    }
+    if (event.type === "skill.invoked" && typeof event.timestamp === "string" &&
+        Number.isFinite(Date.parse(event.timestamp))) {
+      aliases.push(privateCorrelationKey("critical:skill-invoked", {
+        name: event.data?.name ?? null,
+        pluginName: event.data?.pluginName ?? null,
+        source: event.data?.source ?? null,
+        trigger: event.data?.trigger ?? null,
+        parentId: event.parentId ?? null,
+        timestamp: event.timestamp ?? null,
+        sessionId: event.data?.sessionId ?? null,
+      }));
+    }
     if (event.type === "assistant.usage") {
       if (event.data?.apiCallId) aliases.push(privateCorrelationKey("critical:usage:api", event.data.apiCallId));
       if (event.data?.serviceRequestId) {
@@ -1383,21 +1883,12 @@ export function createCopilotCoordinatorGuard(
       type: event.type ?? null,
       parentId: event.parentId ?? null,
       timestamp: event.timestamp ?? null,
-      // Identity-stripped, content-free projection. Every field used as a
-      // stable alias or optional scope identity is intentionally excluded so
-      // anonymous<->identified enrichment cannot look like a fresh event.
+      // Identity-stripped, content-free SDK envelope. Optional event metadata
+      // deliberately stays out of the weak shape: missing<->present
+      // enrichment or value drift must collide here and fail closed before it
+      // can authenticate a tool, skill, model, or lifecycle mutation.
       // Never fingerprint message content, prompts, tool arguments/results,
       // error bodies, filesystem paths, or skill content.
-      toolName: event.data?.toolName ?? null,
-      mcpServerName: event.data?.mcpServerName ?? null,
-      mcpToolName: event.data?.mcpToolName ?? null,
-      toolDescriptionName: event.data?.toolDescription?.name ?? null,
-      hookType: event.data?.hookType ?? null,
-      agentName: event.data?.agentName ?? null,
-      name: event.data?.name ?? null,
-      pluginName: event.data?.pluginName ?? null,
-      source: event.data?.source ?? null,
-      trigger: event.data?.trigger ?? null,
     },
   );
 
@@ -1414,6 +1905,14 @@ export function createCopilotCoordinatorGuard(
       interactionId: event.data?.interactionId ?? null,
       hookInvocationId: event.data?.hookInvocationId ?? null,
       messageId: event.data?.messageId ?? null,
+      toolName: event.data?.toolName ?? null,
+      toolDescriptionName: event.data?.toolDescription?.name ?? null,
+      hookType: event.data?.hookType ?? null,
+      agentName: event.data?.agentName ?? null,
+      name: event.data?.name ?? null,
+      pluginName: event.data?.pluginName ?? null,
+      source: event.data?.source ?? null,
+      trigger: event.data?.trigger ?? null,
       apiCallId: event.data?.apiCallId ?? null,
       serviceRequestId: event.data?.serviceRequestId ?? null,
       providerCallId: event.data?.providerCallId ?? null,
@@ -1426,6 +1925,8 @@ export function createCopilotCoordinatorGuard(
       reasoningTokens: event.data?.reasoningTokens ?? null,
       cacheReadTokens: event.data?.cacheReadTokens ?? null,
       cacheWriteTokens: event.data?.cacheWriteTokens ?? null,
+      cost: event.data?.cost ?? null,
+      totalNanoAiu: event.data?.copilotUsage?.totalNanoAiu ?? null,
       success: event.data?.success ?? null,
       aborted: event.data?.aborted ?? null,
       shutdownType: event.data?.shutdownType ?? null,
@@ -1461,17 +1962,22 @@ export function createCopilotCoordinatorGuard(
       // enriched replay or a distinct event. Do not bind aliases or attribute
       // it: the transition itself is unknowable.
       if (weakObservation?.anonymousFallback !== undefined) return "unverified";
+      const existingOwners = [...new Set(aliases.flatMap((alias) => {
+        const existing = criticalAliasOwners.get(alias);
+        return existing === undefined ? [] : [existing];
+      }))];
+      if (existingOwners.length > 1) return "unverified";
+      // Two fully stable identities with the same content-free semantic
+      // envelope but no shared alias are still indistinguishable. Never let a
+      // fresh event ID turn that ambiguity into a second lifecycle mutation.
+      if (weakObservation?.sawStableIdentity && existingOwners.length === 0 &&
+          typeof event.timestamp === "string" && Number.isFinite(Date.parse(event.timestamp))) return "unverified";
       if (weakObservation === undefined) {
         if (criticalWeakShapes.size >= maximumCriticalAliases) return "unverified";
         criticalWeakShapes.set(weakShape, { sawStableIdentity: true });
       } else {
         weakObservation.sawStableIdentity = true;
       }
-      const existingOwners = [...new Set(aliases.flatMap((alias) => {
-        const existing = criticalAliasOwners.get(alias);
-        return existing === undefined ? [] : [existing];
-      }))];
-      if (existingOwners.length > 1) return "unverified";
       const canonicalOwner = existingOwners[0] ?? owner;
       const unseen = aliases.filter((alias) => !criticalAliasOwners.has(alias));
       if (criticalAliasOwners.size + unseen.length > maximumCriticalAliases) return "unverified";
@@ -1510,7 +2016,21 @@ export function createCopilotCoordinatorGuard(
     const childScoped = Boolean(event.agentId || event.data?.parentToolCallId || event.data?.initiator === "sub-agent");
     if (event.type === "session.idle" && !childScoped) return;
     const run = lifecycleRunForEvent(event);
-    if (!run || run.finished || !lifecycleEventBelongsToRun(run, event)) return;
+    if (!run || run.finished) return;
+    const parentEventId = opaqueEventKey(event.parentId);
+    const parentObservedByRun = parentEventId !== undefined && (
+      run.observedEventIds.has(parentEventId) ||
+      (run.kind === "child" && Boolean(activeRoots.get(run.sessionId)?.observedEventIds.has(parentEventId)))
+    );
+    // High-volume/non-critical notifications have no protected replay
+    // identity. They may extend an established native chain, but must never
+    // seed an empty run or enter through an absent/unknown parent: a delayed
+    // message_delta from the prior turn would otherwise fence out the current
+    // turn's critical model, usage, and terminal events.
+    if (!event.type || !criticalLifecycleEventTypes.has(event.type)) {
+      if (!parentObservedByRun) return;
+    }
+    if (!lifecycleEventBelongsToRun(run, event)) return;
     rememberLifecycleEventId(run, event);
     const root = run.kind === "root" ? run : activeRoots.get(run.sessionId);
     if (root && root !== run && !root.finished && lifecycleEventBelongsToRun(root, event)) {
@@ -1548,6 +2068,8 @@ export function createCopilotCoordinatorGuard(
     const reasoningTokens = nativeCounter(event.data?.reasoningTokens);
     const cacheReadTokens = nativeCounter(event.data?.cacheReadTokens);
     const cacheWriteTokens = nativeCounter(event.data?.cacheWriteTokens);
+    const modelMultiplier = nativeCounter(event.data?.cost);
+    const totalNanoAiu = nativeCounter(event.data?.copilotUsage?.totalNanoAiu);
     const usage: CopilotCoordinatorNativeUsage = {
       ...(inputTokens === undefined ? {} : { inputTokens }),
       ...(outputTokens === undefined ? {} : { outputTokens }),
@@ -1555,6 +2077,10 @@ export function createCopilotCoordinatorGuard(
       ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
       ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
       ...(inputTokens === undefined || outputTokens === undefined ? {} : { totalTokens: inputTokens + outputTokens }),
+    };
+    const billing: CopilotCoordinatorNativeBilling = {
+      ...(modelMultiplier === undefined ? {} : { modelMultiplier }),
+      ...(totalNanoAiu === undefined ? {} : { totalNanoAiu }),
     };
     observeLifecycleModel(run, event.data?.model, "observed", event);
     observeLifecycleReasoning(run, event.data?.reasoningEffort, "observed", event);
@@ -1567,6 +2093,7 @@ export function createCopilotCoordinatorGuard(
       ...(run.model === undefined ? {} : { model: run.model }),
       ...(run.reasoningEffort === undefined ? {} : { reasoningEffort: run.reasoningEffort }),
       usage,
+      billing,
     });
   };
 
@@ -1578,6 +2105,7 @@ export function createCopilotCoordinatorGuard(
       type: "run.usage",
       attributionUnverified: true,
       usage: {},
+      billing: {},
     });
   };
 
@@ -1595,11 +2123,11 @@ export function createCopilotCoordinatorGuard(
           : "completed";
         if (outcome === "completed" && item.deferredContractOutcome === "completed") {
           item.deferredContractCompletionEvidence = fingerprintHarborEvidence(
-            serialized((input as PostToolHookInput).toolResult),
+            serialized(ownDataProperty(input, "toolResult")),
           );
         } else if (outcome === "failed") {
           item.deferredContractErrorFingerprint = fingerprintHarborEvidence(
-            serialized((input as PostToolFailureHookInput).error ?? "Copilot task failed"),
+            serialized(ownDataProperty(input, "error") ?? "Copilot task failed"),
           );
         }
         return;
@@ -1618,7 +2146,7 @@ export function createCopilotCoordinatorGuard(
         emitHarborEvidence(evidenceHook, { ...base, phase: "prompt.attempted", outcome: "ok", basis: "inferred" });
       }
       if (effectiveOutcome === "completed") {
-        const result = serialized((input as PostToolHookInput).toolResult);
+        const result = serialized(ownDataProperty(input, "toolResult"));
         emitHarborEvidence(evidenceHook, {
           ...base,
           phase: "evidence.returned",
@@ -1627,14 +2155,14 @@ export function createCopilotCoordinatorGuard(
         });
         emitHarborEvidence(evidenceHook, { ...base, phase: "child.completed", outcome: "ok" });
       } else {
-        const error = (input as PostToolFailureHookInput).error;
+        const error = ownDataProperty(input, "error");
         emitHarborEvidence(evidenceHook, {
           ...base,
           phase: "child.failed",
           outcome: "error",
           error: error === undefined
             ? item.deferredContractErrorFingerprint ?? item.errorFingerprint ?? fingerprintHarborEvidence("Copilot task failed")
-            : fingerprintHarborEvidence(error),
+            : fingerprintHarborEvidence(serialized(error)),
         });
       }
       emitHarborEvidence(evidenceHook, { ...base, phase: "child.cleaned", outcome: "ok", basis: "inferred" });
@@ -1706,6 +2234,7 @@ export function createCopilotCoordinatorGuard(
       ? "failed"
       : rootOutcome;
     if (sessionId) {
+      if (contract) rememberTerminalContractEpoch(sessionId, contract.promptEpoch);
       const item = pending.get(sessionId);
       if (item && !item.lifecycle.finished) {
         finishLifecycle(
@@ -1734,8 +2263,12 @@ export function createCopilotCoordinatorGuard(
     }
   };
 
-  const refreshSnapshot = async (expectedCurrentId?: string, requirePublication = false): Promise<void> => {
-    const strict = requirePublication || expectedCurrentId !== undefined;
+  const refreshSnapshot = async (
+    expectedCurrent?: string | CopilotAgentIdentity,
+    requirePublication = false,
+  ): Promise<void> => {
+    const expectedCurrentId = typeof expectedCurrent === "string" ? expectedCurrent : expectedCurrent?.id;
+    const strict = requirePublication || expectedCurrent !== undefined;
     const generation = ++refreshEpoch;
     let refreshSelectionEpoch = 0;
     const currentGeneration = await locked(() => {
@@ -1753,22 +2286,41 @@ export function createCopilotCoordinatorGuard(
     try {
       const listed = await boundedCoordinatorRpc("Copilot agent registry reload", () => getSession().rpc.agent.reload());
       const current = await boundedCoordinatorRpc("Copilot current agent read", () => getSession().rpc.agent.getCurrent());
-      if (expectedCurrentId !== undefined && current.agent?.id !== expectedCurrentId) {
-        throw new Error(`Copilot selected agent did not stabilize as ${expectedCurrentId}`);
+      const boundedAgents = boundedCopilotAgentRegistry(listed.agents);
+      const boundedCurrent = current.agent === undefined || current.agent === null
+        ? undefined
+        : boundedCopilotAgentIdentity(current.agent);
+      let expectedIdentity: CopilotAgentIdentity | undefined;
+      if (expectedCurrentId !== undefined) {
+        const declaredIdentity = typeof expectedCurrent === "object"
+          ? boundedCopilotAgentIdentity(expectedCurrent)
+          : undefined;
+        const exactRegistryMatches = declaredIdentity
+          ? boundedAgents.filter((candidate) => copilotAgentIdentityMatches(declaredIdentity, candidate))
+          : boundedAgents.filter((candidate) => candidate.id === expectedCurrentId);
+        if (exactRegistryMatches.length !== 1) {
+          throw new Error(
+            `Copilot registry did not contain exactly one copy of the selected identity ${expectedCurrentId}`,
+          );
+        }
+        expectedIdentity = declaredIdentity ?? exactRegistryMatches[0];
+        if (!copilotAgentIdentityMatches(expectedIdentity, boundedCurrent)) {
+          throw new Error(`Copilot selected agent did not stabilize as the exact identity ${expectedCurrentId}`);
+        }
       }
       const publication = await locked((): "published" | "stale" | "selection-changed" => {
         if (generation !== refreshEpoch) return "stale";
         const selected = selectionEpoch === refreshSelectionEpoch
-          ? current.agent ?? undefined
+          ? boundedCurrent
           : snapshot.current;
-        if (expectedCurrentId !== undefined && selected?.id !== expectedCurrentId) {
+        if (expectedIdentity && !copilotAgentIdentityMatches(expectedIdentity, selected)) {
           snapshot = { ready: false, current: selected, agents: [] };
           return "selection-changed";
         }
         snapshot = {
           ready: true,
           current: selected,
-          agents: [...listed.agents],
+          agents: boundedAgents,
         };
         return "published";
       });
@@ -1793,7 +2345,8 @@ export function createCopilotCoordinatorGuard(
       if (publishedFailure || strict) throw error;
     }
   };
-  const refresh = (expectedCurrentId?: string): Promise<void> => refreshSnapshot(expectedCurrentId);
+  const refresh = (expectedCurrent?: string | CopilotAgentIdentity): Promise<void> =>
+    refreshSnapshot(expectedCurrent);
   const refreshAuthoritative = (): Promise<void> => refreshSnapshot(undefined, true);
 
   const hooks: CopilotCoordinatorHooks = {
@@ -1808,10 +2361,12 @@ export function createCopilotCoordinatorGuard(
       }
       const contractBlocked = blockedContractSessions.has(invocation.sessionId) ||
         blockNextPromptForUnscopedContractEvent;
+      const epoch = ++promptEpochSequence;
+      rememberPromptEpoch(invocation.sessionId, epoch);
       promptContexts.set(invocation.sessionId, {
         project: input.workingDirectory,
         submittedAt: Date.now(),
-        epoch: ++promptEpochSequence,
+        epoch,
         referencesContract,
         ...(contractBlocked ? { contractBlocked: true } : {}),
       });
@@ -1822,11 +2377,14 @@ export function createCopilotCoordinatorGuard(
       let authoritativeCurrent: CopilotAgentIdentity | undefined;
       let authoritativeRead = false;
       try {
-        authoritativeCurrent = (await boundedCoordinatorRpc(
+        const observedCurrent = (await boundedCoordinatorRpc(
           "Copilot prompt agent observation",
           () => getSession().rpc.agent.getCurrent(),
           Math.min(coordinatorRpcTimeoutMs(), 500),
-        )).agent ?? undefined;
+        )).agent;
+        authoritativeCurrent = observedCurrent === undefined || observedCurrent === null
+          ? undefined
+          : boundedCopilotAgentIdentity(observedCurrent);
         authoritativeRead = true;
       } catch { /* Best-effort observation falls back after its short independent deadline. */ }
       await locked(() => {
@@ -1844,7 +2402,7 @@ export function createCopilotCoordinatorGuard(
         unclaimedTaskCalls.length = 0;
         let player: { agent: string; runtimeAgent: string; model?: string } | undefined;
         if (authoritativeRead && selectionEpoch === selectionEpochBeforeRead) {
-          if (snapshot.current?.id !== authoritativeCurrent?.id) selectionEpoch += 1;
+          if (!sameOptionalCopilotAgentIdentity(snapshot.current, authoritativeCurrent)) selectionEpoch += 1;
           snapshot.current = authoritativeCurrent;
           player = harborPlayerForIdentity(input.workingDirectory, authoritativeCurrent);
         } else {
@@ -1868,54 +2426,21 @@ export function createCopilotCoordinatorGuard(
         }
       });
     },
-    onPreMcpToolCall: async (input, invocation) => {
-      const contract = contractInvocations.get(invocation.sessionId);
-      if (!contract || input.sessionId !== invocation.sessionId) return;
-      await locked(() => {
-        if (contract.invalidReason) return;
-        if (!samePath(input.workingDirectory, contract.project)) {
-          invalidateContract(contract, "Agent Harbor /contract working directory changed after reservation");
-          return;
-        }
-        if (input.serverName !== "agent-harbor" || input.toolName !== "control") {
-          invalidateContract(contract, "Agent Harbor /contract observed an MCP call outside agent-harbor(control)");
-          return;
-        }
-        const control = exactContractControl(input.arguments);
-        if (!control) {
-          invalidateContract(contract, "Agent Harbor /contract MCP call did not contain its exact control arguments");
-          return;
-        }
-        const callHash = typeof input.toolCallId === "string" && input.toolCallId
-          ? privateCorrelationKey("contract:control-call", input.toolCallId)
-          : undefined;
-        if (contract.controlMcpHash) {
-          if (!samePrivateCorrelation(control.hash, contract.controlMcpHash) ||
-              (callHash && contract.controlMcpCallHash &&
-               !samePrivateCorrelation(callHash, contract.controlMcpCallHash))) {
-            invalidateContract(contract, "Agent Harbor /contract may authenticate exactly one MCP control call");
-            return;
-          }
-          // The SDK declares toolCallId optional. A replay may enrich the same
-          // authenticated call with its ID before execution_start seals it.
-          if (callHash && !contract.controlMcpCallHash) contract.controlMcpCallHash = callHash;
-          return;
-        }
-        if (contract.controlPreflightHash &&
-            !samePrivateCorrelation(control.hash, contract.controlPreflightHash)) {
-          invalidateContract(contract, "Agent Harbor /contract MCP call differs from its provisional tool preflight");
-          return;
-        }
-        contract.controlMcpHash = control.hash;
-        contract.controlMcpCallHash = callHash;
-        const metadata = contractTaskMetadata(control.args);
-        contract.contractorAgent = metadata.contractorAgent;
-        contract.taskLabel = metadata.taskLabel;
-      });
-    },
     onPreToolUse: async (input, invocation) => {
-      if (lifecycleIdentityUnverified && input.toolName === "task") {
+      if (lifecycleIdentityUnverified &&
+          (input.toolName === "task" || input.toolName === harborCustomToolNames.contractPreflight)) {
         return deny("Agent Harbor lifecycle identity is unverified; reload the Copilot session before delegation");
+      }
+      if (input.toolName === "task") {
+        const terminalEpoch = terminalContractEpochs.get(invocation.sessionId);
+        const latestEpoch = latestPromptEpochs.get(invocation.sessionId);
+        if (contractEpochCapacityExceeded ||
+            (terminalEpoch !== undefined && (latestEpoch === undefined || latestEpoch <= terminalEpoch))) {
+          return deny("Agent Harbor blocks a late /contract task replay until a new user prompt establishes the next turn");
+        }
+        if (terminalEpoch !== undefined && latestEpoch !== undefined && latestEpoch > terminalEpoch) {
+          terminalContractEpochs.delete(invocation.sessionId);
+        }
       }
       const contract = contractInvocations.get(invocation.sessionId);
       const parentContractTool = contract && input.sessionId === invocation.sessionId;
@@ -1937,21 +2462,24 @@ export function createCopilotCoordinatorGuard(
         return locked(() => {
           if (contract.admissionError) return deny(`Agent Harbor /contract admission failed: ${contract.admissionError}`);
           if (contract.invalidReason) return deny(contract.invalidReason);
-          const control = exactContractControl(input.toolArgs);
-          if (!control) return deny("Agent Harbor /contract wrapper permits only its exact control preflight and one task child");
-          if (contract.controlPreflightHash) {
-            return deny(invalidateContract(contract, "Agent Harbor /contract control preflight may run exactly once"));
+          if (input.toolName !== harborCustomToolNames.contractPreflight) {
+            return deny("Agent Harbor /contract wrapper permits only harbor_contract and one task child");
           }
-          if (contract.controlMcpHash && !samePrivateCorrelation(control.hash, contract.controlMcpHash)) {
-            return deny(invalidateContract(contract, "Agent Harbor /contract tool preflight differs from its authenticated MCP call"));
+          const tool = exactContractToolArguments(input.toolArgs);
+          if (!tool) {
+            return deny(invalidateContract(
+              contract,
+              "Agent Harbor harbor_contract arguments must be exactly {definition:string}",
+            ));
           }
-          // PreToolUse does not carry the MCP server identity. Record the
-          // provisional shape but return no permission override: the skill's
-          // allowed-tools entry auto-approves the real control, while an
-          // identically shaped third-party tool keeps the host's normal prompt.
-          // Only the exact preMcpToolCall handshake can enable a later task.
-          contract.controlPreflightHash = control.hash;
-          return;
+          if (contract.contractPreToolHash) {
+            return deny(invalidateContract(contract, "Agent Harbor harbor_contract pre-tool may run exactly once"));
+          }
+          contract.contractPreToolHash = tool.hash;
+          const metadata = contractTaskMetadata(tool.definition);
+          contract.contractorAgent = metadata.contractorAgent;
+          contract.taskLabel = metadata.taskLabel;
+          return { permissionDecision: "allow" as const };
         });
       }
       if (parentContractTool && input.toolName === "task") {
@@ -1962,8 +2490,11 @@ export function createCopilotCoordinatorGuard(
             return deny(invalidateContract(contract, "Agent Harbor /contract permits exactly one task child"));
           }
           contract.taskAttempted = true;
-          if (!contract.controlCompleted || !contract.descriptor) {
-            return deny(invalidateContract(contract, "Agent Harbor /contract task is blocked until its exact MCP preflight succeeds"));
+          if (!contract.contractPreToolHash || contract.contractToolResult !== "succeeded" || !contract.descriptor) {
+            return deny(invalidateContract(
+              contract,
+              "Agent Harbor /contract task is blocked until harbor_contract authenticates one exact descriptor",
+            ));
           }
           const args = structuredToolArgs(input.toolArgs);
           if (!args || Object.keys(args).sort().join("\0") !== "agent_type\0description\0prompt" ||
@@ -1985,7 +2516,7 @@ export function createCopilotCoordinatorGuard(
             return deny(invalidateContract(contract, "Agent Harbor /contract wrapper is no longer active"));
           }
           const childRunId = `copilot-child-${++lifecycleSequence}`;
-          const publicInvocationId = publicOpaqueCorrelation("tool", contract.taskCallId);
+          const publicInvocationId = contract.taskPublicCallId;
           const lifecycle: MutableCopilotLifecycleRun = {
             sessionId: invocation.sessionId,
             project: contract.project,
@@ -2026,7 +2557,7 @@ export function createCopilotCoordinatorGuard(
             });
           } catch (error) {
             return deny(invalidateContract(contract, `Agent Harbor /contract child admission failed: ${
-              publicCopilotMetadata(error instanceof Error ? error.message : String(error), 300) ?? "unavailable"
+              publicCoordinatorError(error, 300)
             }`));
           }
           contract.taskAdmitted = true;
@@ -2036,45 +2567,60 @@ export function createCopilotCoordinatorGuard(
             runtimeAgent: lifecycle.runtimeAgent,
             lifecycle,
             purpose: "contract",
-            ...(contract.taskCallId === undefined ? {} : { invocationId: contract.taskCallId }),
+            ...(contract.taskCallHash === undefined ? {} : { invocationHash: contract.taskCallHash }),
           });
           setLifecycleState(root, "waiting", "observed");
           return { permissionDecision: "allow" as const };
         });
       }
       if (input.toolName !== "task") return;
+      // The plugin must not intercept task calls from unrelated third-party
+      // agents. ID is used only for that negative routing decision; a same-ID
+      // candidate proceeds to the full registry/path proof below.
       const teamLeadId = copilotFixedAgentIds.get("team-lead")!;
       let authoritativeCurrent: CopilotAgentIdentity | undefined;
       try {
-        authoritativeCurrent = (await boundedCoordinatorRpc(
+        const observedCurrent = (await boundedCoordinatorRpc(
           "Copilot current agent verification",
           () => getSession().rpc.agent.getCurrent(),
-        )).agent ?? undefined;
+        )).agent;
+        authoritativeCurrent = observedCurrent === undefined || observedCurrent === null
+          ? undefined
+          : boundedCopilotAgentIdentity(observedCurrent);
       } catch (error) {
-        return deny(`Agent Harbor cannot verify the current agent and fails closed for task delegation: ${error instanceof Error ? error.message : String(error)}`);
+        return deny(`Agent Harbor cannot verify the current agent and fails closed for task delegation: ${publicCoordinatorError(error)}`);
       }
       if (authoritativeCurrent?.id !== teamLeadId) {
         await locked(() => {
-          if (snapshot.current?.id !== authoritativeCurrent?.id) selectionEpoch += 1;
+          if (!sameOptionalCopilotAgentIdentity(snapshot.current, authoritativeCurrent)) selectionEpoch += 1;
           snapshot.current = authoritativeCurrent;
         });
         return;
       }
-      const activeRoot = activeRoots.get(invocation.sessionId);
-      if (activeRoot && !activeRoot.finished) markLifecycleActivity(activeRoot);
       try {
-        await refresh(teamLeadId);
+        await refreshAuthoritative();
       } catch (error) {
-        return deny(`Agent Harbor coordinator snapshot is unavailable; reload the session: ${error instanceof Error ? error.message : String(error)}`);
+        return deny(`Agent Harbor coordinator snapshot is unavailable; reload the session: ${publicCoordinatorError(error)}`);
       }
       return locked(async () => {
         try {
           if (!snapshot.ready) return deny("Agent Harbor coordinator snapshot is unavailable; reload the session");
-          if (snapshot.current?.id !== teamLeadId) return deny("Agent Harbor team-lead selection changed during delegation preflight");
-          try { resolveCopilotPlayer("team-lead", snapshot.agents, input.workingDirectory); }
-          catch (error) { return deny(error instanceof Error ? error.message : String(error)); }
-          const invocationId = unclaimedTaskCalls.shift();
-          const publicInvocationId = publicOpaqueCorrelation("tool", invocationId);
+          let exactTeamLead: CopilotAgentIdentity;
+          try { exactTeamLead = resolveCopilotPlayer("team-lead", snapshot.agents, input.workingDirectory); }
+          catch (error) { return deny(publicCoordinatorError(error)); }
+          // A task emitted by any other exact native identity remains Copilot's
+          // concern. A same-id foreign/path-mismatched identity cannot enter
+          // this branch because complete identity equality is required.
+          if (!copilotAgentIdentityMatches(exactTeamLead, snapshot.current)) {
+            if (snapshot.current?.id === exactTeamLead.id) {
+              return deny("Agent Harbor team-lead ID resolved to a different native identity");
+            }
+            return;
+          }
+          const activeRoot = activeRoots.get(invocation.sessionId);
+          if (activeRoot && !activeRoot.finished) markLifecycleActivity(activeRoot);
+          const invocationHash = unclaimedTaskCalls.shift();
+          const publicInvocationId = publicOpaqueCorrelation("tool-hash", invocationHash);
           if (input.sessionId !== invocation.sessionId) {
             return deny("Agent Harbor blocks nested coordinator delegation");
           }
@@ -2089,7 +2635,9 @@ export function createCopilotCoordinatorGuard(
             return deny("Agent Harbor delegation requires a canonical agent_type");
           }
           if (!prompt) return deny("Agent Harbor delegation requires a non-empty prompt");
-          if (Buffer.byteLength(prompt, "utf8") > 30_000) return deny("Agent Harbor delegation prompt exceeds 30000 bytes");
+          if (prompt.length > 30_000 || Buffer.byteLength(prompt, "utf8") > 30_000) {
+            return deny("Agent Harbor delegation prompt exceeds 30000 bytes");
+          }
           if (agentType === "team-lead" || agentType === copilotFixedAgentIds.get("team-lead")) {
             return deny("Agent Harbor cannot recursively invoke team-lead");
           }
@@ -2103,7 +2651,7 @@ export function createCopilotCoordinatorGuard(
           const logicalId = fixed?.[0] ?? agentType;
           let target: CopilotAgentIdentity;
           try { target = resolveCopilotPlayer(logicalId, snapshot.agents, input.workingDirectory); }
-          catch (error) { return deny(error instanceof Error ? error.message : String(error)); }
+          catch (error) { return deny(publicCoordinatorError(error)); }
           if (target.id !== agentType) return deny(`Agent Harbor requires exact agent_type ${target.id}`);
           if (target.userInvocable === false) return deny(`Agent Harbor player is not invocable: ${logicalId}`);
 
@@ -2152,7 +2700,7 @@ export function createCopilotCoordinatorGuard(
           });
           counts.set(invocation.sessionId, count + 1);
           inFlight.add(invocation.sessionId);
-          pending.set(invocation.sessionId, { agent: logicalId, runtimeAgent: target.id, invocationId, lifecycle });
+          pending.set(invocation.sessionId, { agent: logicalId, runtimeAgent: target.id, invocationHash, lifecycle });
           setLifecycleState(root, "waiting", "observed");
           emitHarborEvidence(evidenceHook, {
             harness: "copilot",
@@ -2166,7 +2714,7 @@ export function createCopilotCoordinatorGuard(
           });
           return { permissionDecision: "allow" as const };
         } catch (error) {
-          return deny(`Agent Harbor delegation preflight failed: ${error instanceof Error ? error.message : String(error)}`);
+          return deny(`Agent Harbor delegation preflight failed: ${publicCoordinatorError(error)}`);
         }
       });
     },
@@ -2175,6 +2723,8 @@ export function createCopilotCoordinatorGuard(
   };
   return {
     hooks,
+    contractToolSucceeded,
+    contractToolFailed,
     refresh,
     refreshAuthoritative,
     lifecycleIdentityUnverified: () => lifecycleIdentityUnverified,
@@ -2183,6 +2733,16 @@ export function createCopilotCoordinatorGuard(
     hostEventDisposition: (event) => hostEventDispositions.get(event),
     terminalEventDisposition: (event) => terminalEventDispositions.get(event),
     observeEvent: (event) => {
+      if (!eventCorrelationsAreBounded(event)) {
+        lifecycleIdentityUnverified = true;
+        hostEventClaims.set(event, false);
+        hostEventDispositions.set(event, "unverified");
+        if (event.type === "session.idle" || event.type === "session.error" ||
+            event.type === "session.shutdown") {
+          terminalEventDispositions.set(event, "unverified");
+        }
+        return;
+      }
       // Critical alias enrichment must run before the bounded generic replay
       // cache. A replay with the same event ID may reveal a provider/service ID
       // that must be learned before a later replay presents only that alias.
@@ -2237,10 +2797,10 @@ export function createCopilotCoordinatorGuard(
           }
         }
       }
-      const earlyInvocationId = event.data?.toolCallId ?? event.data?.parentToolCallId;
-      if (event.agentId && earlyInvocationId) {
+      const earlyInvocationHash = taskToolCallHash(event.data?.toolCallId ?? event.data?.parentToolCallId);
+      if (event.agentId && earlyInvocationHash) {
         const contractEntry = [...pending.entries()].find(([, candidate]) =>
-          candidate.purpose === "contract" && candidate.invocationId === earlyInvocationId);
+          candidate.purpose === "contract" && candidate.invocationHash === earlyInvocationHash);
         if (contractEntry) {
           const [contractSessionId, contractPending] = contractEntry;
           const knownChildId = contractPending.childId ?? contractPending.provisionalChildId;
@@ -2292,62 +2852,60 @@ export function createCopilotCoordinatorGuard(
       const contractEventCurrent = Boolean(contract?.root && lifecycleEventBelongsToRun(contract.root, event));
       if (contract && contractEventCurrent && !contract.invalidReason &&
           event.type === "tool.execution_start" && rootScopedHostEvent(event) &&
-          event.data?.mcpServerName === "agent-harbor" && event.data?.mcpToolName === "control") {
-        const control = exactContractControl(event.data.arguments);
-        const eventCallHash = typeof event.data.toolCallId === "string" && event.data.toolCallId
-          ? privateCorrelationKey("contract:control-call", event.data.toolCallId)
+          event.data?.toolName === harborCustomToolNames.contractPreflight) {
+        const nativeInvocation = typeof event.data.toolCallId === "string" && event.data.toolCallId
+          ? exactContractToolInvocation({
+              sessionId: contract.sessionId,
+              toolCallId: event.data.toolCallId,
+              toolName: event.data.toolName,
+              arguments: event.data.arguments,
+            })
           : undefined;
-        if (!control || !contract.controlPreflightHash || !contract.controlMcpHash || !eventCallHash ||
-            !samePrivateCorrelation(control.hash, contract.controlPreflightHash) ||
-            !samePrivateCorrelation(control.hash, contract.controlMcpHash) ||
-            (contract.controlMcpCallHash &&
-             !samePrivateCorrelation(eventCallHash, contract.controlMcpCallHash))) {
-          invalidateContract(contract, "Agent Harbor /contract MCP execution did not match its exact authenticated handshake");
-        } else if (typeof event.data.toolCallId !== "string" || !event.data.toolCallId) {
-          invalidateContract(contract, "Agent Harbor /contract MCP execution has no native call identity");
+        if (!nativeInvocation) {
+          invalidateContract(contract, "Agent Harbor harbor_contract execution has no exact native identity");
+        } else if (contract.contractPreToolHash &&
+                   !samePrivateCorrelation(nativeInvocation.argumentHash, contract.contractPreToolHash)) {
+          invalidateContract(contract, "Agent Harbor harbor_contract execution changed its pre-tool arguments");
+        } else if ((contract.contractToolCallHash &&
+                    !samePrivateCorrelation(nativeInvocation.callHash, contract.contractToolCallHash)) ||
+                   (contract.contractToolInvocationHash &&
+                    !samePrivateCorrelation(nativeInvocation.invocationHash, contract.contractToolInvocationHash))) {
+          invalidateContract(contract, "Agent Harbor /contract observed more than one harbor_contract invocation");
         } else {
-          const callHash = eventCallHash;
-          if (!contract.controlMcpCallHash) contract.controlMcpCallHash = callHash;
-          if (contract.controlCallHash) {
-            if (!samePrivateCorrelation(callHash, contract.controlCallHash)) {
-              invalidateContract(contract, "Agent Harbor /contract control may execute exactly once");
-            }
-          } else {
-            contract.controlCallHash = callHash;
-            const metadata = contractTaskMetadata(control.args);
-            contract.contractorAgent = metadata.contractorAgent;
-            contract.taskLabel = metadata.taskLabel;
-          }
+          contract.contractToolCallHash = nativeInvocation.callHash;
+          contract.contractToolInvocationHash = nativeInvocation.invocationHash;
         }
       } else if (contract && contractEventCurrent && !contract.invalidReason &&
                  event.type === "tool.execution_start" && rootScopedHostEvent(event) &&
-                 (contract.controlPreflightHash || contract.controlMcpHash) &&
-                 !contract.controlCallHash && event.data?.toolName !== "task") {
-        invalidateContract(contract, "Agent Harbor /contract preflight did not execute through agent-harbor(control)");
+                 event.data?.toolName !== "task" &&
+                 event.data?.toolName !== harborCustomToolNames.contractPreflight) {
+        invalidateContract(contract, "Agent Harbor /contract observed a tool outside harbor_contract and task");
       }
-      if (contract && contractEventCurrent && !contract.invalidReason &&
+      if (contract && contractEventCurrent &&
           event.type === "tool.execution_complete" && rootScopedHostEvent(event) &&
-          contract.controlCallHash && typeof event.data?.toolCallId === "string" &&
+          contract.contractToolCallHash && typeof event.data?.toolCallId === "string" &&
           samePrivateCorrelation(
-            privateCorrelationKey("contract:control-call", event.data.toolCallId), contract.controlCallHash,
+            privateCorrelationKey("contract:tool-call", event.data.toolCallId), contract.contractToolCallHash,
           )) {
-        if (!contract.controlCompleted) {
-          contract.controlCompleted = true;
-          if (event.data.success === false) {
-            invalidateContract(contract, "Agent Harbor /contract deterministic preflight failed; no child was created");
+        if (event.data.success === false) {
+          if (contract.contractToolResult === "succeeded") {
+            invalidateContract(contract, "Agent Harbor harbor_contract reported conflicting outcomes");
           } else {
-            const descriptor = exactContractDescriptor(event.data.result);
-            if (descriptor) contract.descriptor = descriptor;
-            else invalidateContract(contract, "Agent Harbor /contract MCP result did not contain one exact structured descriptor");
+            contract.contractToolResult = "failed";
+            invalidateContract(contract, "Agent Harbor harbor_contract failed; no child was created");
           }
+        } else if (contract.contractToolResult === "failed") {
+          invalidateContract(contract, "Agent Harbor harbor_contract reported conflicting outcomes");
         }
       }
       if (contract && contractEventCurrent && event.type === "tool.execution_start" && rootScopedHostEvent(event) &&
           event.data?.toolName === "task" && typeof event.data.toolCallId === "string") {
-        if (contract.taskCallId && contract.taskCallId !== event.data.toolCallId) {
+        const taskHash = taskToolCallHash(event.data.toolCallId)!;
+        if (contract.taskCallHash && !samePrivateCorrelation(contract.taskCallHash, taskHash)) {
           invalidateContract(contract, "Agent Harbor /contract observed more than one parent task invocation");
         } else {
-          contract.taskCallId = event.data.toolCallId;
+          contract.taskCallHash = taskHash;
+          contract.taskPublicCallId = publicOpaqueCorrelation("tool", event.data.toolCallId);
         }
       }
       if (
@@ -2397,10 +2955,17 @@ export function createCopilotCoordinatorGuard(
       if (event.type === "subagent.selected" && rootScopedHostEvent(event) && event.data?.agentName &&
           acceptSelectionObservation(event, false)) {
         selectionEpoch += 1;
-        snapshot.current = {
-          id: copilotFixedAgentIds.get(event.data.agentName) ?? event.data.agentName,
-          userInvocable: true,
-        };
+        const observedId = event.data.agentName;
+        const selectedId = observedId.length > 1_024
+          ? observedId
+          : copilotFixedAgentIds.get(observedId) ?? observedId;
+        const boundedSelectedId = selectedId.length > 1_024 ? undefined : publicCopilotMetadata(selectedId, 256);
+        if (!boundedSelectedId || boundedSelectedId !== selectedId || Buffer.byteLength(selectedId, "utf8") > 1_024) {
+          lifecycleIdentityUnverified = true;
+          snapshot = { ready: false, agents: [] };
+        } else {
+          snapshot.current = { id: boundedSelectedId, userInvocable: true };
+        }
       } else if (event.type === "subagent.deselected" && rootScopedHostEvent(event) &&
                  acceptSelectionObservation(event, true)) {
         selectionEpoch += 1;
@@ -2471,6 +3036,7 @@ export function createCopilotCoordinatorGuard(
           setLifecycleState(run, "idle", "observed", event);
         }
       } else if (event.type === "abort") {
+        if (rootScopedHostEvent(event)) unclaimedTaskCalls.length = 0;
         const run = lifecycleRunForEvent(event);
         if (run && lifecycleEventBelongsToRun(run, event)) {
           if (!run.started) startLifecycle(run, "inferred", event, event.data?.model);
@@ -2482,6 +3048,8 @@ export function createCopilotCoordinatorGuard(
           finishSessionLifecycle(event.data?.aborted === true ? "cancelled" : "completed", event);
         } else if (rootScopedHostEvent(event) && !root && latestPromptSessionId) {
           const sessionId = latestPromptSessionId;
+          const abandonedContract = contractInvocations.get(sessionId);
+          if (abandonedContract) rememberTerminalContractEpoch(sessionId, abandonedContract.promptEpoch);
           contractInvocations.delete(sessionId);
           promptContexts.delete(sessionId);
           latestPromptSessionId = undefined;
@@ -2500,10 +3068,11 @@ export function createCopilotCoordinatorGuard(
 
       const entries = [...pending.entries()];
       const toolCallId = event.data?.toolCallId;
-      const childInvocationId = toolCallId ?? event.data?.parentToolCallId;
-      if (event.agentId && childInvocationId) {
+      const toolCallHash = taskToolCallHash(toolCallId);
+      const childInvocationHash = taskToolCallHash(toolCallId ?? event.data?.parentToolCallId);
+      if (event.agentId && childInvocationHash) {
         const conflictingContract = entries.find(([, candidate]) =>
-          candidate.purpose === "contract" && candidate.invocationId === childInvocationId &&
+          candidate.purpose === "contract" && candidate.invocationHash === childInvocationHash &&
           (candidate.childId ?? candidate.provisionalChildId) !== undefined &&
           (candidate.childId ?? candidate.provisionalChildId) !== event.agentId);
         if (conflictingContract) {
@@ -2521,12 +3090,19 @@ export function createCopilotCoordinatorGuard(
         }
       }
       if (event.type === "tool.execution_start" && rootScopedHostEvent(event) && event.data?.toolName === "task" && toolCallId) {
-        const uncorrelated = entries.filter(([, state]) => !state.invocationId);
+        const uncorrelated = entries.filter(([, state]) => !state.invocationHash);
         if (uncorrelated.length === 1) {
-          uncorrelated[0][1].invocationId = toolCallId;
+          uncorrelated[0][1].invocationHash = toolCallHash;
           uncorrelated[0][1].lifecycle.invocationId = publicOpaqueCorrelation("tool", toolCallId);
         }
-        else if (snapshot.current?.id === copilotFixedAgentIds.get("team-lead")) unclaimedTaskCalls.push(toolCallId);
+        else if (exactTeamLeadSelected() && toolCallHash) {
+          if (unclaimedTaskCalls.length >= maximumUnclaimedTaskCalls) {
+            unclaimedTaskCalls.length = 0;
+            lifecycleIdentityUnverified = true;
+          } else {
+            unclaimedTaskCalls.push(toolCallHash);
+          }
+        }
         return;
       }
 
@@ -2535,10 +3111,10 @@ export function createCopilotCoordinatorGuard(
         const contractEntries = entries.filter(([, candidate]) => candidate.purpose === "contract");
         if (contractEntries.length === 1) {
           const [contractSessionId, contractPending] = contractEntries[0];
-          const correlated = toolCallId === contractPending.invocationId ||
+          const correlated = toolCallHash === contractPending.invocationHash ||
             Boolean(event.agentId && event.agentId === (contractPending.childId ?? contractPending.provisionalChildId));
           if (!correlated) return;
-          const sameTool = Boolean(contractPending.invocationId && toolCallId === contractPending.invocationId);
+          const sameTool = Boolean(contractPending.invocationHash && toolCallHash === contractPending.invocationHash);
           const sameAgent = event.data?.agentName === contractPending.runtimeAgent;
           const knownChildId = contractPending.childId ?? contractPending.provisionalChildId;
           const sameChild = Boolean(event.agentId && (!knownChildId || knownChildId === event.agentId));
@@ -2561,14 +3137,14 @@ export function createCopilotCoordinatorGuard(
         }
       }
 
-      const item = toolCallId
-        ? entries.find(([, state]) => state.invocationId === toolCallId)
+      const item = toolCallHash
+        ? entries.find(([, state]) => state.invocationHash === toolCallHash)
         : event.type === "tool.execution_complete" && event.data?.toolDescription?.name === "task" && entries.length === 1
           ? entries[0]
           : undefined;
       if (!item) return;
       const [sessionId, state] = item;
-      if (event.type === "subagent.started" && event.data?.agentName === state.runtimeAgent && toolCallId === state.invocationId) {
+      if (event.type === "subagent.started" && event.data?.agentName === state.runtimeAgent && toolCallHash === state.invocationHash) {
         state.childId = event.agentId;
         state.lifecycle.childId = publicOpaqueCorrelation("child", event.agentId);
         state.lifecycle.invocationId = publicOpaqueCorrelation("tool", toolCallId) ?? state.lifecycle.invocationId;
@@ -2585,7 +3161,7 @@ export function createCopilotCoordinatorGuard(
         };
         emitHarborEvidence(evidenceHook, { ...base, phase: "child.started", outcome: "ok" });
         emitHarborEvidence(evidenceHook, { ...base, phase: "prompt.attempted", outcome: "ok" });
-      } else if (event.type === "subagent.completed" && event.data?.agentName === state.runtimeAgent && toolCallId === state.invocationId) {
+      } else if (event.type === "subagent.completed" && event.data?.agentName === state.runtimeAgent && toolCallHash === state.invocationHash) {
         if (!state.childId && event.agentId) {
           state.childId = event.agentId;
           state.lifecycle.childId = publicOpaqueCorrelation("child", event.agentId);
@@ -2618,7 +3194,7 @@ export function createCopilotCoordinatorGuard(
         const root = activeRoots.get(sessionId);
         if (root) setLifecycleState(root, "working", "observed", event);
         finishDeferredContractTask(sessionId, state);
-      } else if (event.type === "subagent.failed" && event.data?.agentName === state.runtimeAgent && toolCallId === state.invocationId) {
+      } else if (event.type === "subagent.failed" && event.data?.agentName === state.runtimeAgent && toolCallHash === state.invocationHash) {
         if (!state.childId && event.agentId) {
           state.childId = event.agentId;
           state.lifecycle.childId = publicOpaqueCorrelation("child", event.agentId);
@@ -2636,7 +3212,7 @@ export function createCopilotCoordinatorGuard(
           }
           state.terminalObservation = safeTerminalObservation(event);
         }
-        state.errorFingerprint = fingerprintHarborEvidence(serialized(event.data.error));
+        state.errorFingerprint = fingerprintHarborEvidence(serialized(ownDataProperty(event.data, "error")));
         observeLifecycleModel(state.lifecycle, event.data?.model, "observed", event);
         if (state.purpose !== "contract") {
           finishLifecycle(state.lifecycle, "failed", "observed", event, event.data);
@@ -2646,10 +3222,10 @@ export function createCopilotCoordinatorGuard(
         finishDeferredContractTask(sessionId, state);
       } else if (event.type === "tool.execution_complete" && !event.agentId && (
         event.data?.toolDescription?.name === "task" ||
-        Boolean(state.invocationId && event.data?.toolCallId === state.invocationId)
+        Boolean(state.invocationHash && toolCallHash === state.invocationHash)
       )) {
         const data = event.data!;
-        const result = serialized(data.result);
+        const result = serialized(ownDataProperty(data, "result"));
         const input: PostToolHookInput = {
           sessionId,
           workingDirectory: "",

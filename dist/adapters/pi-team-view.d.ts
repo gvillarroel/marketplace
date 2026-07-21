@@ -8,6 +8,10 @@ export interface PiTeamMember {
     readonly configuredModel?: string;
     readonly repairKind?: "bundled-profile" | "personal-active" | "personal-registration";
 }
+export declare const maximumVisiblePiRosterMembers = 32;
+export declare const maximumVisiblePiOverviewRosterMembers = 12;
+export declare const maximumVisiblePiOverviewRuns = 4;
+export declare const maximumPiTeamOverviewLines = 30;
 /** Resolves every Pi-visible roster class without creating an SDK session or model turn. */
 export declare function collectPiTeamMembers(project: string): Promise<PiTeamMember[]>;
 export interface PiTeamViewOptions {
@@ -18,6 +22,12 @@ export interface PiTeamViewOptions {
         readonly id: string;
         readonly maxTokens?: number;
     };
+    /** Pi's current model plus registry authoritatively report that no model is available. */
+    readonly nextModelUnavailable?: boolean;
+    /** Pi reports usable models, but none is selected for the next inherited child. */
+    readonly nextModelAvailableCount?: number;
+    /** Pi has no active model and its availability could not be observed safely. */
+    readonly nextModelAvailabilityUnobserved?: boolean;
     readonly nextThinking?: string;
 }
 /** Formats roster plus live runtime data. This function performs no inference. */

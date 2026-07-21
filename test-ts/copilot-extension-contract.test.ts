@@ -31,12 +31,36 @@ test("Copilot extension exposes zero-model team controls and one explicit native
   assert.match(runner, /AggregateError\([\s\S]*primaryFailure[\s\S]*restoreError/u);
 });
 
-test("Copilot contract skill auto-approves only deterministic control and cannot be model-invoked", async () => {
+test("Copilot extension fixes a minimal native custom-tool union at startup", async () => {
+  const source = await readFile(extensionPath, "utf8");
+  assert.match(source, /const startupSkillPlayers = new Map\(rolePlayers\)/u);
+  assert.match(source, /for \(const id of startupActiveIds\)[\s\S]*requireInvocablePlayer\("copilot", process\.cwd\(\), id\)/u);
+  assert.match(source, /const copilotNativeTools = \[[\s\S]*harborCustomToolNames\.contractPreflight[\s\S]*harborCustomToolNames\.teamRoster[\s\S]*harborCustomToolNames\.filterSkills[\s\S]*harborCustomToolNames\.joinPlayer/u);
+  assert.match(source, /startupSkillPlayers\.values\(\)[\s\S]*filter\(\(player\) => player\.skills\?\.length\)[\s\S]*harborPlayerSkillToolSpec\(player\)/u);
+  assert.match(source, /joinSession\(\{\s*tools: copilotNativeTools,/u);
+  assert.doesNotMatch(source, /harborCustomToolNames\.delegate/u);
+});
+
+test("Copilot contract skill exposes only its native preflight tool and cannot be model-invoked", async () => {
   const source = await readFile(contractSkillPath, "utf8");
-  assert.match(source, /^allowed-tools: \["agent-harbor\(control\)"\]$/mu);
+  assert.match(source, /^allowed-tools: \["harbor_contract"\]$/mu);
   assert.match(source, /^user-invocable: true$/mu);
   assert.match(source, /^disable-model-invocation: true$/mu);
   assert.doesNotMatch(source, /^allowed-tools:.*\btask\b/mu);
+});
+
+test("Copilot contract authenticates its native handler before permitting one task", async () => {
+  const source = await readFile(extensionPath, "utf8");
+  const start = source.indexOf("async function contractNativeTool");
+  const end = source.indexOf("\nasync function playerSkillsNativeTool", start);
+  assert.ok(start >= 0 && end > start);
+  const handler = source.slice(start, end);
+  assert.match(handler, /authenticatedNativeToolContext\(name, args, invocation\)/u);
+  assert.match(handler, /assertHarborCustomToolAccess\(name, \{ skill: "contract" \}\)/u);
+  assert.match(handler, /validateHarborCustomToolArguments\(name, args\)/u);
+  assert.match(handler, /runCopilotControl\("contract", call\.definition, context\.project, signal\)/u);
+  assert.match(handler, /coordinator\.contractToolSucceeded\(exactInvocation, descriptor\)/u);
+  assert.match(handler, /coordinator\.contractToolFailed\(failedInvocation\)/u);
 });
 
 test("Copilot extension scopes native lifecycle and child admission to the event project", async () => {

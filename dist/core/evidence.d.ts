@@ -3,6 +3,29 @@
  * Hooks receive hashes and byte counts instead of task, result, or error bodies.
  */
 import type { HarnessName } from "./types.js";
+export declare const maximumHarborEvidenceBytes = 30000;
+/** Bounded child evidence with an explicit, machine-visible truncation marker. */
+export interface BoundedHarborEvidence {
+    readonly text: string;
+    /** Exact unless `utf8BytesLowerBound` is true. */
+    readonly utf8Bytes: number;
+    readonly utf8BytesLowerBound?: boolean;
+    readonly truncated: boolean;
+}
+/** Bounds a settled child response without cutting a UTF-8 code point. */
+export declare function boundHarborEvidence(value: string, maximumBytes?: number): BoundedHarborEvidence;
+/** Streaming variant that never retains more than the configured evidence cap. */
+export declare class HarborEvidenceAccumulator {
+    private readonly maximumBytes;
+    private retained;
+    private totalBytes;
+    private omittedSegments;
+    constructor(maximumBytes?: number);
+    append(value: string): void;
+    /** Records input deliberately not inspected so the result cannot look complete. */
+    markIncomplete(omittedSegments?: number): void;
+    result(): BoundedHarborEvidence;
+}
 /** Versioned schema identifier attached to every adapter evidence event. */
 export declare const HARBOR_EVIDENCE_SCHEMA: "agent-harbor/evidence@1";
 /** Ordered lifecycle observations an adapter may report for a disposable child. */

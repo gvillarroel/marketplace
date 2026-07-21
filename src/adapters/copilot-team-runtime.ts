@@ -1,6 +1,7 @@
 /** Process-local, zero-model observability for Agent Harbor runs hosted by Copilot. */
 import { createHmac, randomBytes } from "node:crypto";
 import { basename, resolve } from "node:path";
+import { publicMetadataText, publicTaskLabel } from "../core/public-metadata.js";
 import { wrapPlainLines } from "../core/text-layout.js";
 
 export const maximumConcurrentCopilotRoots = 32;
@@ -29,6 +30,15 @@ export interface CopilotNativeTokenUsage {
 
 export type CopilotNativeUsageField = keyof CopilotNativeTokenUsage;
 
+export interface CopilotNativeBillingUsage {
+  /** Sum of Copilot's per-request model-multiplier cost values; not USD. */
+  readonly modelMultiplier?: number;
+  /** Sum of Copilot's native nano-AI-unit values. */
+  readonly totalNanoAiu?: number;
+}
+
+export type CopilotNativeBillingField = keyof CopilotNativeBillingUsage;
+
 export interface CopilotTeamRunSnapshot {
   readonly id: string;
   readonly sequence: number;
@@ -51,6 +61,10 @@ export interface CopilotTeamRunSnapshot {
   readonly observedReasoningEffortsTruncated: boolean;
   readonly usage: CopilotNativeTokenUsage;
   readonly usageLowerBounds: readonly CopilotNativeUsageField[];
+  readonly billing: CopilotNativeBillingUsage;
+  readonly billingLowerBounds: readonly CopilotNativeBillingField[];
+  /** The authoritative terminal total contradicted the per-call token sum. */
+  readonly usageAggregateConflict: boolean;
   readonly usageIdentityTruncated: boolean;
   readonly usageIdentityAmbiguous: boolean;
   readonly usageAttributionUnverified: boolean;
@@ -86,6 +100,9 @@ export interface CopilotUsageEvent {
     readonly reasoningTokens?: number;
     readonly cacheReadTokens?: number;
     readonly cacheWriteTokens?: number;
+    /** Copilot's model-multiplier cost for this request; not USD. */
+    readonly cost?: number;
+    readonly copilotUsage?: { readonly totalNanoAiu?: number };
   };
 }
 
@@ -116,6 +133,9 @@ interface MutableRun {
   observedReasoningEffortsTruncated: boolean;
   usage: Partial<Record<CopilotNativeUsageField, number>>;
   usageLowerBounds: Set<CopilotNativeUsageField>;
+  billing: Partial<Record<CopilotNativeBillingField, number>>;
+  billingLowerBounds: Set<CopilotNativeBillingField>;
+  usageAggregateConflict: boolean;
   usageIdentityTruncated: boolean;
   usageIdentityAmbiguous: boolean;
   usageAttributionUnverified: boolean;
@@ -127,12 +147,55 @@ interface MutableRun {
 }
 
 const usageFields: readonly CopilotNativeUsageField[] = ["input", "output", "reasoning", "cacheRead", "cacheWrite", "total"];
+const billingFields: readonly CopilotNativeBillingField[] = ["modelMultiplier", "totalNanoAiu"];
 const activeStates = new Set<CopilotTeamRunState>(["starting", "working", "waiting", "cleaning"]);
 const childAdmissionStates = new Set<CopilotTeamRunState>(["starting", "working", "waiting"]);
 const terminalStates = new Set<CopilotTeamRunState>(["completed", "failed", "cancelled", "cleanup-error"]);
 
-function nativeNumber(value: unknown): number | undefined {
+function nativeFiniteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function nativeInteger(value: unknown): number | undefined {
+  return nativeFiniteNumber(value) !== undefined && Number.isSafeInteger(value) ? value as number : undefined;
+}
+
+function addSafeInteger(left: number, right: number): { value: number; overflow: boolean } {
+  if (left > Number.MAX_SAFE_INTEGER - right) {
+    return { value: Number.MAX_SAFE_INTEGER, overflow: true };
+  }
+  return { value: left + right, overflow: false };
+}
+
+function addFiniteNumber(left: number, right: number): { value: number; overflow: boolean } {
+  const value = left + right;
+  return Number.isFinite(value)
+    ? { value, overflow: false }
+    : { value: Number.MAX_VALUE, overflow: true };
+}
+
+function sumSafeIntegers(values: readonly number[]): { value: number | undefined; overflow: boolean } {
+  if (!values.length) return { value: undefined, overflow: false };
+  let value = 0;
+  let overflow = false;
+  for (const amount of values) {
+    const next = addSafeInteger(value, amount);
+    value = next.value;
+    overflow ||= next.overflow;
+  }
+  return { value, overflow };
+}
+
+function sumFiniteNumbers(values: readonly number[]): { value: number | undefined; overflow: boolean } {
+  if (!values.length) return { value: undefined, overflow: false };
+  let value = 0;
+  let overflow = false;
+  for (const amount of values) {
+    const next = addFiniteNumber(value, amount);
+    value = next.value;
+    overflow ||= next.overflow;
+  }
+  return { value, overflow };
 }
 
 function projectKey(project: string): string {
@@ -142,37 +205,64 @@ function projectKey(project: string): string {
 
 /** Strips terminal controls and bounds host-provided public identifiers. */
 export function copilotPublicIdentifier(value: unknown, limit = 120): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const normalized = value
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, " ")
-    .replace(/[\p{Cc}\p{Cf}\s]+/gu, " ")
-    .trim();
-  return normalized ? [...normalized].slice(0, limit).join("") : undefined;
+  return typeof value === "string" ? publicMetadataText(value, limit) : undefined;
 }
 
 /** Produces a deliberately lossy label without retaining paths, URLs, or likely secrets. */
 export function copilotTaskLabel(task: string): string {
-  const normalized = task
-    .replace(/https?:\/\/\S+/giu, "[url]")
-    .replace(/\\\\[^\\\s"'`]+(?:\\[^\\\s"'`]+)+/gu, "[path]")
-    .replace(/\b[A-Za-z]:\\(?:[^\s"']+\\)*[^\s"']*/gu, "[path]")
-    .replace(/(^|[\s"'`(])\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+(?=$|[\s"'`,.;:!?)}\]])/gu, "$1[path]")
-    .replace(/(^|[\s"'`(])\.{1,2}[\\/](?:[^\s"'`\\/()]+[\\/])*[^\s"'`()]+/gu, "$1[path]")
-    .replace(/(^|[\s"'`(])(?:[A-Za-z0-9_.-]+[\\/])+(?:[A-Za-z0-9_.-]*\.[A-Za-z0-9_.-]+)(?=$|[\s"'`,.;:!?)}\]])/gu, "$1[path]")
-    .replace(/\b(?:authorization\s*:\s*)?bearer\s+[A-Za-z0-9._~+/=-]{12,}/giu, "[redacted]")
-    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, "[redacted]")
-    .replace(/\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu, "$1=[redacted]")
-    .replace(/\b(?:sk|pk|api|token|secret|key)[-_][A-Za-z0-9_-]{12,}\b/giu, "[redacted]")
-    .replace(/[\p{Cc}\p{Cf}\s]+/gu, " ")
-    .trim();
-  if (!normalized) return "(task not disclosed)";
-  const points = [...normalized];
-  return points.length <= 72 ? normalized : `${points.slice(0, 69).join("")}…`;
+  return publicTaskLabel(task);
+}
+
+const maximumPrivateIdentityCodeUnits = 4_096;
+const maximumPrivateEncodingDepth = 8;
+const maximumPrivateEncodingEntries = 32;
+
+function boundedOpaqueIdentity(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value || value.length > maximumPrivateIdentityCodeUnits) return undefined;
+  return Buffer.byteLength(value, "utf8") <= maximumPrivateIdentityCodeUnits * 4 ? value : undefined;
+}
+
+function privateEncoding(value: unknown, depth = 0, seen = new Map<object, number>()): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") {
+    const bounded = value.slice(0, maximumPrivateIdentityCodeUnits);
+    return `s${value.length}:${JSON.stringify(bounded)}`;
+  }
+  if (typeof value === "number") return `n:${Object.is(value, -0) ? "-0" : String(value)}`;
+  if (typeof value === "bigint") return `i:${value.toString().slice(0, maximumPrivateIdentityCodeUnits)}`;
+  if (typeof value === "boolean") return value ? "b:1" : "b:0";
+  if (typeof value === "symbol") return "symbol";
+  if (typeof value === "function") return "function";
+  if (depth >= maximumPrivateEncodingDepth) return "bounded-depth";
+  const reference = seen.get(value);
+  if (reference !== undefined) return `ref:${reference}`;
+  seen.set(value, seen.size);
+  if (Array.isArray(value)) {
+    const entries = value.slice(0, maximumPrivateEncodingEntries)
+      .map((entry) => privateEncoding(entry, depth + 1, seen));
+    return `a${value.length}:[${entries.join(",")}]`;
+  }
+  const entries: string[] = [];
+  try {
+    for (const name in value) {
+      if (!Object.hasOwn(value, name)) continue;
+      if (entries.length === maximumPrivateEncodingEntries) break;
+      let field: unknown;
+      try { field = (value as Record<string, unknown>)[name]; }
+      catch { field = "unreadable"; }
+      entries.push(`${JSON.stringify(name.slice(0, 256))}:${privateEncoding(field, depth + 1, seen)}`);
+    }
+  } catch {
+    return "unreadable-object";
+  }
+  entries.sort();
+  return `o:{${entries.join(",")}}`;
 }
 
 function privateKey(value: unknown, key: Uint8Array): string {
   const digest = createHmac("sha256", key);
-  digest.update(typeof value === "string" ? value : JSON.stringify(value), "utf8");
+  digest.update(privateEncoding(value), "utf8");
   return digest.digest("base64url");
 }
 
@@ -181,6 +271,13 @@ function cloneUsage(run: MutableRun): CopilotNativeTokenUsage {
     const value = run.usage[field];
     return value === undefined ? [] : [[field, value]];
   })) as CopilotNativeTokenUsage;
+}
+
+function cloneBilling(run: MutableRun): CopilotNativeBillingUsage {
+  return Object.fromEntries(billingFields.flatMap((key) => {
+    const value = run.billing[key];
+    return value === undefined ? [] : [[key, value]];
+  })) as CopilotNativeBillingUsage;
 }
 
 /** In-memory registry; it never persists model content or asks a model to summarize activity. */
@@ -257,6 +354,9 @@ export class CopilotTeamRuntime {
       observedReasoningEffortsTruncated: false,
       usage: {},
       usageLowerBounds: new Set(),
+      billing: {},
+      billingLowerBounds: new Set(),
+      usageAggregateConflict: false,
       usageIdentityTruncated: false,
       usageIdentityAmbiguous: false,
       usageAttributionUnverified: false,
@@ -280,9 +380,24 @@ export class CopilotTeamRuntime {
   attachChild(runId: string, input: { agentId?: string; model?: string }): void {
     const run = this.require(runId);
     if (input.agentId) {
-      const key = privateKey(input.agentId, this.fingerprintKey);
-      this.agentRuns.set(key, runId);
-      run.agentKeys.add(key);
+      const agentId = boundedOpaqueIdentity(input.agentId);
+      if (!agentId) {
+        run.usageAttributionUnverified = true;
+      } else {
+        const key = privateKey(agentId, this.fingerprintKey);
+        const existingId = this.agentRuns.get(key);
+        const existing = existingId === undefined ? undefined : this.runs.get(existingId);
+        if (existing && existing.id !== runId && !terminalStates.has(existing.state)) {
+          this.agentRuns.delete(key);
+          existing.agentKeys.delete(key);
+          existing.usageAttributionUnverified = true;
+          run.usageAttributionUnverified = true;
+          this.emit(existing.id);
+        } else {
+          this.agentRuns.set(key, runId);
+          run.agentKeys.add(key);
+        }
+      }
     }
     this.observeModel(run, input.model);
     this.setState(runId, "working");
@@ -317,40 +432,56 @@ export class CopilotTeamRuntime {
   }
 
   observeUsageEvent(event: CopilotUsageEvent, rootRunId?: string): boolean {
-    const runId = event.agentId
-      ? this.agentRuns.get(privateKey(event.agentId, this.fingerprintKey))
+    let runId = rootRunId;
+    try {
+    if (!event || typeof event !== "object") return false;
+    if ((event as CopilotUsageEvent).type !== "assistant.usage") return false;
+    const data = (event as CopilotUsageEvent).data;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+    const rawAgentId = (event as CopilotUsageEvent).agentId;
+    const agentId = rawAgentId === undefined ? undefined : boundedOpaqueIdentity(rawAgentId);
+    if (rawAgentId !== undefined && !agentId) {
+      if (rootRunId) this.markUsageAttributionUnverified(rootRunId);
+      return false;
+    }
+    runId = agentId
+      ? this.agentRuns.get(privateKey(agentId, this.fingerprintKey))
       : rootRunId;
     if (!runId) return false;
     const run = this.runs.get(runId);
     if (!run) return false;
     if (terminalStates.has(run.state)) return false;
+    if (run.usageAggregateConflict) return false;
     // A replay may arrive under a new event ID and with richer request IDs
     // than its first observation. Treat every available namespaced identity
     // as an alias, reject when any alias is known, then remember all aliases.
     // Only HMACs enter runtime state; opaque host identifiers are never kept.
     const identities: unknown[] = [
-      event.data.apiCallId === undefined ? undefined : ["api", event.data.apiCallId],
-      event.data.serviceRequestId === undefined ? undefined : ["service", event.data.serviceRequestId],
-      event.data.providerCallId === undefined ? undefined : ["provider", event.data.providerCallId],
-      event.id === undefined ? undefined : ["event", event.id],
+      boundedOpaqueIdentity(data.apiCallId) === undefined ? undefined : ["api", boundedOpaqueIdentity(data.apiCallId)],
+      boundedOpaqueIdentity(data.serviceRequestId) === undefined ? undefined : ["service", boundedOpaqueIdentity(data.serviceRequestId)],
+      boundedOpaqueIdentity(data.providerCallId) === undefined ? undefined : ["provider", boundedOpaqueIdentity(data.providerCallId)],
+      boundedOpaqueIdentity(event.id) === undefined ? undefined : ["event", boundedOpaqueIdentity(event.id)],
     ].filter((value) => value !== undefined);
     const usesFallbackIdentity = identities.length === 0;
     if (usesFallbackIdentity) {
       identities.push(["fallback", {
         timestamp: event.timestamp,
-        agent: event.agentId ? privateKey(event.agentId, this.fingerprintKey) : "root",
-        model: event.data.model,
-        input: event.data.inputTokens,
-        output: event.data.outputTokens,
-        reasoning: event.data.reasoningTokens,
-        cacheRead: event.data.cacheReadTokens,
-        cacheWrite: event.data.cacheWriteTokens,
+        agent: agentId ? privateKey(agentId, this.fingerprintKey) : "root",
+        model: data.model,
+        input: data.inputTokens,
+        output: data.outputTokens,
+        reasoning: data.reasoningTokens,
+        cacheRead: data.cacheReadTokens,
+        cacheWrite: data.cacheWriteTokens,
+        modelMultiplier: data.cost,
+        totalNanoAiu: data.copilotUsage?.totalNanoAiu,
       }]);
       // Without any host/provider call identity, equal payloads cannot be
       // distinguished from replays. Keep deduplication deterministic but make
       // both the call count and every token counter an explicit lower bound.
       run.usageIdentityAmbiguous = true;
       for (const field of usageFields) run.usageLowerBounds.add(field);
+      for (const field of billingFields) run.billingLowerBounds.add(field);
     }
     const keys = identities.map((identity) => privateKey(identity, this.fingerprintKey));
     const replay = keys.some((key) => run.seenUsageKeys.has(key));
@@ -360,6 +491,7 @@ export class CopilotTeamRuntime {
       if (!run.usageIdentityTruncated) {
         run.usageIdentityTruncated = true;
         for (const field of usageFields) run.usageLowerBounds.add(field);
+        for (const field of billingFields) run.billingLowerBounds.add(field);
         this.emit(runId);
       }
       return false;
@@ -369,28 +501,54 @@ export class CopilotTeamRuntime {
       if (usesFallbackIdentity) this.emit(runId);
       return false;
     }
-    this.observeModel(run, event.data.model);
-    this.observeEffort(run, event.data.reasoningEffort);
-    const input = nativeNumber(event.data.inputTokens);
-    const output = nativeNumber(event.data.outputTokens);
+    this.observeModel(run, data.model);
+    this.observeEffort(run, data.reasoningEffort);
+    const input = nativeInteger(data.inputTokens);
+    const output = nativeInteger(data.outputTokens);
+    const incomingTotal = input === undefined && output === undefined
+      ? { value: undefined, overflow: false }
+      : sumSafeIntegers([input ?? 0, output ?? 0]);
     const incoming: Record<CopilotNativeUsageField, number | undefined> = {
       input,
       output,
-      reasoning: nativeNumber(event.data.reasoningTokens),
-      cacheRead: nativeNumber(event.data.cacheReadTokens),
-      cacheWrite: nativeNumber(event.data.cacheWriteTokens),
-      total: input === undefined && output === undefined ? undefined : (input ?? 0) + (output ?? 0),
+      reasoning: nativeInteger(data.reasoningTokens),
+      cacheRead: nativeInteger(data.cacheReadTokens),
+      cacheWrite: nativeInteger(data.cacheWriteTokens),
+      total: incomingTotal.value,
     };
     for (const field of usageFields) {
       const amount = incoming[field];
       if (amount === undefined) run.usageLowerBounds.add(field);
-      else run.usage[field] = (run.usage[field] ?? 0) + amount;
+      else {
+        const next = addSafeInteger(run.usage[field] ?? 0, amount);
+        run.usage[field] = next.value;
+        if (next.overflow) run.usageLowerBounds.add(field);
+      }
     }
-    if (input === undefined || output === undefined) run.usageLowerBounds.add("total");
+    const incomingBilling: Record<CopilotNativeBillingField, number | undefined> = {
+      modelMultiplier: nativeFiniteNumber(data.cost),
+      totalNanoAiu: nativeInteger(data.copilotUsage?.totalNanoAiu),
+    };
+    for (const field of billingFields) {
+      const amount = incomingBilling[field];
+      if (amount === undefined) run.billingLowerBounds.add(field);
+      else {
+        const next = field === "modelMultiplier"
+          ? addFiniteNumber(run.billing[field] ?? 0, amount)
+          : addSafeInteger(run.billing[field] ?? 0, amount);
+        run.billing[field] = next.value;
+        if (next.overflow) run.billingLowerBounds.add(field);
+      }
+    }
+    if (input === undefined || output === undefined || incomingTotal.overflow) run.usageLowerBounds.add("total");
     run.nativeCalls += 1;
     if (run.state === "starting") run.state = "working";
     this.emit(runId);
     return true;
+    } catch {
+      if (runId) this.markUsageAttributionUnverified(runId);
+      return false;
+    }
   }
 
   markUsageAttributionUnverified(runId: string): void {
@@ -409,11 +567,12 @@ export class CopilotTeamRuntime {
   ): void {
     const run = this.require(runId);
     this.observeModel(run, summary.model);
-    const duration = nativeNumber(summary.durationMs);
-    const tools = nativeNumber(summary.totalToolCalls);
-    const total = nativeNumber(summary.totalTokens);
+    const duration = nativeFiniteNumber(summary.durationMs);
+    const tools = nativeInteger(summary.totalToolCalls);
+    const total = nativeInteger(summary.totalTokens);
     if (duration !== undefined) run.durationMs = duration;
     if (tools !== undefined) run.totalToolCalls = tools;
+    if (summary.totalTokens !== undefined && total === undefined) run.usageLowerBounds.add("total");
     if (total !== undefined) {
       const observed = run.usage.total;
       if (observed === undefined || total >= observed) {
@@ -429,7 +588,17 @@ export class CopilotTeamRuntime {
         run.usage.total = total;
         run.usageLowerBounds.delete("total");
       } else {
-        run.usageLowerBounds.add("total");
+        // The terminal aggregate is authoritative. A smaller value proves the
+        // per-call breakdown cannot be combined under one token definition, so
+        // retain the exact total and omit the incompatible component values.
+        run.usage.total = total;
+        run.usageLowerBounds.delete("total");
+        run.usageAggregateConflict = true;
+        for (const field of usageFields) {
+          if (field === "total") continue;
+          delete run.usage[field];
+          run.usageLowerBounds.delete(field);
+        }
       }
     }
     run.state = "cleaning";
@@ -511,15 +680,45 @@ export class CopilotTeamRuntime {
     const runs = this.mission(rootRunId);
     return Object.fromEntries(usageFields.flatMap((field) => {
       const known = runs.flatMap((run) => run.usage[field] === undefined ? [] : [run.usage[field]!]);
-      return known.length ? [[field, known.reduce((sum, value) => sum + value, 0)]] : [];
+      const aggregate = sumSafeIntegers(known);
+      return aggregate.value === undefined ? [] : [[field, aggregate.value]];
     })) as CopilotNativeTokenUsage;
   }
 
   missionUsageLowerBounds(rootRunId: string): CopilotNativeUsageField[] {
     const runs = this.mission(rootRunId);
     const usage = this.missionUsage(rootRunId);
-    return usageFields.filter((field) => usage[field] !== undefined && runs.some((run) =>
-      run.usage[field] === undefined || run.usageLowerBounds.includes(field)));
+    return usageFields.filter((field) => {
+      if (usage[field] === undefined) return false;
+      const known = runs.flatMap((run) => run.usage[field] === undefined ? [] : [run.usage[field]!]);
+      return sumSafeIntegers(known).overflow || runs.some((run) =>
+        run.usage[field] === undefined || run.usageLowerBounds.includes(field));
+    });
+  }
+
+  missionBilling(rootRunId: string): CopilotNativeBillingUsage {
+    const runs = this.mission(rootRunId);
+    return Object.fromEntries(billingFields.flatMap((field) => {
+      const known = runs.flatMap((run) => run.billing[field] === undefined ? [] : [run.billing[field]!]);
+      const aggregate = field === "modelMultiplier" ? sumFiniteNumbers(known) : sumSafeIntegers(known);
+      return aggregate.value === undefined ? [] : [[field, aggregate.value]];
+    })) as CopilotNativeBillingUsage;
+  }
+
+  missionBillingLowerBounds(rootRunId: string): CopilotNativeBillingField[] {
+    const runs = this.mission(rootRunId);
+    const billing = this.missionBilling(rootRunId);
+    return billingFields.filter((field) => {
+      if (billing[field] === undefined) return false;
+      const known = runs.flatMap((run) => run.billing[field] === undefined ? [] : [run.billing[field]!]);
+      const overflow = (field === "modelMultiplier" ? sumFiniteNumbers(known) : sumSafeIntegers(known)).overflow;
+      return overflow || runs.some((run) =>
+        run.billing[field] === undefined || run.billingLowerBounds.includes(field));
+    });
+  }
+
+  missionUsageAggregateConflict(rootRunId: string): boolean {
+    return this.mission(rootRunId).some((run) => run.usageAggregateConflict);
   }
 
   missionUsageAttributionUnverified(rootRunId: string): boolean {
@@ -586,6 +785,9 @@ export class CopilotTeamRuntime {
       observedReasoningEffortsTruncated: run.observedReasoningEffortsTruncated,
       usage: cloneUsage(run),
       usageLowerBounds: [...run.usageLowerBounds],
+      billing: cloneBilling(run),
+      billingLowerBounds: [...run.billingLowerBounds],
+      usageAggregateConflict: run.usageAggregateConflict,
       usageIdentityTruncated: run.usageIdentityTruncated,
       usageIdentityAmbiguous: run.usageIdentityAmbiguous,
       usageAttributionUnverified: run.usageAttributionUnverified,
@@ -619,7 +821,18 @@ export class CopilotTeamRuntime {
     const roots = values.filter((run) => run.parentRunId === undefined && terminalStates.has(run.state) &&
       values.every((candidate) => candidate.rootRunId !== run.id || terminalStates.has(candidate.state)))
       .sort((left, right) => right.sequence - left.sequence);
-    for (const root of roots.slice(this.maxRootRuns)) {
+    const keep = new Set<string>();
+    const newestByProject = new Map<string, MutableRun>();
+    for (const root of roots) if (!newestByProject.has(root.project)) newestByProject.set(root.project, root);
+    for (const root of [...newestByProject.values()]
+      .sort((left, right) => right.sequence - left.sequence)
+      .slice(0, this.maxRootRuns)) keep.add(root.id);
+    for (const root of roots) {
+      if (keep.size >= this.maxRootRuns) break;
+      keep.add(root.id);
+    }
+    for (const root of roots) {
+      if (keep.has(root.id)) continue;
       for (const run of this.runs.values()) {
         if (run.rootRunId !== root.id) continue;
         this.releaseAgentKeys(run);
@@ -645,6 +858,25 @@ function formatCopilotNativeDuration(milliseconds: number): string {
 
 export function formatCopilotTokenCount(value: number | undefined, lowerBound = false): string {
   return value === undefined ? "—" : `${lowerBound ? "≥" : ""}${new Intl.NumberFormat("en-US").format(value)}`;
+}
+
+function formatCopilotBillingCount(value: number | undefined, lowerBound = false): string {
+  if (value === undefined) return "—";
+  const formatted = value > Number.MAX_SAFE_INTEGER
+    ? value.toExponential(6)
+    : new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 }).format(value);
+  return `${lowerBound ? "≥" : ""}${formatted}`;
+}
+
+export function formatCopilotBilling(
+  billing: CopilotNativeBillingUsage,
+  lowerBounds: readonly CopilotNativeBillingField[] = [],
+): string {
+  const lower = new Set(lowerBounds);
+  return [
+    `model-multiplier cost ${formatCopilotBillingCount(billing.modelMultiplier, lower.has("modelMultiplier"))}`,
+    `nano AIU ${formatCopilotBillingCount(billing.totalNanoAiu, lower.has("totalNanoAiu"))}`,
+  ].join(" · ");
 }
 
 export function formatCopilotModel(run: CopilotTeamRunSnapshot): string {
@@ -693,6 +925,7 @@ export function formatCopilotNativeTelemetry(
   detailed = true,
 ): string {
   const hasCounters = Object.values(run.usage).some((value) => value !== undefined);
+  const hasBilling = Object.values(run.billing).some((value) => value !== undefined);
   const identityNotes = [
     ...(run.usageIdentityAmbiguous
       ? ["native usage identity unavailable; indistinguishable events deduplicated"]
@@ -702,6 +935,9 @@ export function formatCopilotNativeTelemetry(
       : []),
     ...(run.usageAttributionUnverified
       ? ["native usage attribution unverified; ambiguous counters omitted"]
+      : []),
+    ...(run.usageAggregateConflict
+      ? ["terminal total conflicted with per-call counters; token breakdown omitted"]
       : []),
   ];
   if (run.usageAttributionUnverified && (run.nativeCalls ?? 0) === 0 && !hasCounters) {
@@ -721,12 +957,21 @@ export function formatCopilotNativeTelemetry(
       ? `${formatCopilotTokenCount(run.nativeCalls, true)} native usage ${run.nativeCalls === 1 ? "event" : "events"}`
       : `${formatCopilotTokenCount(run.nativeCalls)} native usage ${run.nativeCalls === 1 ? "event" : "events"}`;
   if (!hasCounters) {
-    return [eventLabel, "token counters unavailable", ...identityNotes].join(" · ");
+    return [
+      eventLabel,
+      run.usageAggregateConflict ? `total ${formatCopilotTokenCount(run.usage.total)}` : "token counters unavailable",
+      ...(hasBilling ? [formatCopilotBilling(run.billing, run.billingLowerBounds)] : []),
+      ...identityNotes,
+    ].join(" · ");
   }
   const summary = detailed
     ? `${eventLabel} · ${formatCopilotUsage(run.usage, run.usageLowerBounds)}`
     : `${eventLabel} · ${formatCopilotTokenCount(run.usage.total, run.usageLowerBounds.includes("total"))} native tokens`;
-  return [summary, ...identityNotes].join(" · ");
+  return [
+    summary,
+    ...(hasBilling ? [formatCopilotBilling(run.billing, run.billingLowerBounds)] : []),
+    ...identityNotes,
+  ].join(" · ");
 }
 
 export function formatCopilotRunDetails(runs: readonly CopilotTeamRunSnapshot[]): string[] {
@@ -752,7 +997,14 @@ export function formatCopilotMissionDetails(runtime: CopilotTeamRuntime, rootRun
   const attributionNote = runtime.missionUsageAttributionUnverified(rootRunId)
     ? " · native usage attribution unverified; mission counters incomplete"
     : "";
-  lines.push(`Mission total · ${formatCopilotElapsed(root.elapsedMs)} · ${formatCopilotUsage(runtime.missionUsage(rootRunId), runtime.missionUsageLowerBounds(rootRunId))}${attributionNote}`);
+  const aggregateConflictNote = runtime.missionUsageAggregateConflict(rootRunId)
+    ? " · terminal/per-call token conflict; incompatible breakdown omitted"
+    : "";
+  const missionBilling = runtime.missionBilling(rootRunId);
+  const billingNote = Object.values(missionBilling).some((value) => value !== undefined)
+    ? ` · ${formatCopilotBilling(missionBilling, runtime.missionBillingLowerBounds(rootRunId))}`
+    : "";
+  lines.push(`Mission total · ${formatCopilotElapsed(root.elapsedMs)} · ${formatCopilotUsage(runtime.missionUsage(rootRunId), runtime.missionUsageLowerBounds(rootRunId))}${billingNote}${attributionNote}${aggregateConflictNote}`);
   return wrapPlainLines(lines);
 }
 

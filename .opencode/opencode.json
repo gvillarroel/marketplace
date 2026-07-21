@@ -1,0 +1,6 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "file:/mnt/c/Users/villa/dev/marketplace"
+  ]
+}

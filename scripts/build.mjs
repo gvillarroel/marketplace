@@ -13,7 +13,6 @@ const runtimeTargets = [
     adapters: [
       "shared.js",
       "copilot.js",
-      "copilot-mcp.js",
       "direct.js",
       "copilot-coordinator.js",
       "copilot-team-runtime.js",
@@ -68,27 +67,18 @@ const existing = await readdir(generatedAgentRoot);
 await Promise.all(existing.filter((name) => name.endsWith(generatedSuffix))
   .map((name) => rm(new URL(name, generatedAgentRoot), { force: true })));
 const { rolePlayers } = await import(new URL("core/defaults.js", dist));
+const { harborPlayerSkillToolName } = await import(new URL("core/custom-tools.js", dist));
 const { composePlayerInstructions, nativeTools } = await import(new URL("core/profiles.js", dist));
 const specialized = new Set(["team-lead", "crafter"]);
 for (const [id, player] of rolePlayers) {
   if (specialized.has(id)) continue;
-  const server = `agent-harbor-skills-${id}`;
-  const tools = [...nativeTools("copilot", player.tools), ...(player.skills?.length ? [`${server}/skills`] : [])];
+  const tools = [...nativeTools("copilot", player.tools), ...(player.skills?.length ? [harborPlayerSkillToolName(player)] : [])];
   const frontmatter = [
     "---",
     `name: ${JSON.stringify(id)}`,
     `description: ${JSON.stringify(player.description)}`,
     `tools: ${JSON.stringify(tools)}`,
     ...(player.model ? [`model: ${JSON.stringify(player.model)}`] : []),
-    ...(player.skills?.length ? [
-      "mcp-servers:",
-      `  ${JSON.stringify(server)}:`,
-      "    type: local",
-      '    command: "node"',
-      `    args: ${JSON.stringify(["${PLUGIN_ROOT}/runtime/dist/adapters/copilot-mcp.js", "--skills-player", id])}`,
-      '    tools: ["skills"]',
-      "    timeout: 45000",
-    ] : []),
     "disable-model-invocation: false",
     "user-invocable: true",
     "---",

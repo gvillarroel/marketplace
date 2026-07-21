@@ -1,4 +1,4 @@
-/** Copilot MCP-facing command adapter and native `/contract` preflight. */
+/** Copilot command adapter and native extension-tool `/contract` preflight. */
 import { harborContext } from "./shared.js";
 import { executeCommand, parseContractDefinition } from "../core/commands.js";
 import { trustedSkills } from "../core/defaults.js";

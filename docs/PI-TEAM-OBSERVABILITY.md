@@ -22,20 +22,38 @@ Harbor activo del proyecto. En RPC, un segundo prompt concurrente puede usar
 `/team stop <run-id|all>`. Cada root muestra su `pi-run-N` para permitir una
 parada selectiva.
 
+En esta vista, `ready`/`enabled` describe a un miembro válido que forma parte
+del roster disponible; `active` se reserva para un run vivo en estado
+`starting`, `working` o `cleaning`. Un miembro puede estar enabled sin estar
+trabajando, y `busy` significa que un miembro enabled ya tiene un run activo.
+
 `/team` y `/bench list` muestran:
 
 - `team-lead`, `crafter`, los seis especialistas SDLC y `talent-scout`;
-- agentes personales y contractors activos;
+- agentes personales en sus estados de disponibilidad y contractors que
+  aparecen sólo en la actividad de su misión;
 - descripción, tools/skills, modelo configurado, disponibilidad y reparación;
 - actividad root/child, parent y run ID, tarea reducida, tiempo y estado;
-- modelo heredado u observado, thinking setting, turnos assistant y usage nativo;
+- modelo configurado, heredado u observado, thinking setting, turnos assistant
+  y usage nativo;
 - modelo/thinking del próximo child y máximo de salida por respuesta publicado
   por el modelo host.
 
-`LEAD ACCESS` separa especialistas delegables de ocupados. Agent Harbor bloquea
-double-booking tanto en invocaciones directas como en delegaciones de miembros
-persistentes. También resume cobertura SDLC y da comandos de activación. El lead
-admite como máximo 32 especialistas activos: `/team` avisa si se supera y
+La vista general de `/team` se recompone con un presupuesto dinámico de hasta
+30 líneas envueltas y 96 celdas por línea. Conserva siempre los nueve IDs de
+fábrica —manager, rol fijo, seis bundled y utility— con clase y estado efectivo;
+después usa el espacio restante para personales y actividad. Si no caben, da el
+conteo exacto de miembros personales o runs omitidos y dirige a
+`/team kind:personal`, `/team member:<id>` o `/team run:<id>`. Este presupuesto
+corresponde al overview sin filtro: una vista filtrada puede conservar más
+detalle de las coincidencias, aunque cada una de sus líneas sigue limitada a 96
+celdas.
+
+`LEAD ACCESS` separa especialistas enabled delegables de los que están busy.
+Agent Harbor bloquea double-booking tanto en invocaciones directas como en
+delegaciones de miembros persistentes. También resume cobertura SDLC y da
+comandos de activación. El lead admite como máximo 32 especialistas enabled:
+`/team` avisa si se supera y
 `/team-lead` detiene el preflight con cero gasto. Su schema lleva metadata
 pública acotada de rol/tools/skills y ofrece una consulta determinista opcional.
 
@@ -58,6 +76,11 @@ Un bundled stale se repara con `/bench on <id>` y `/reload`. Un personal con
 registro válido pero copia activa stale usa el mismo flujo; sólo un registro
 personal stale requiere repetir `/join` con la definición completa y
 `"replace":true`.
+
+Un `/join` exitoso informa ID, rol, capacidad efectiva —tools y nombres de
+skills—, modelo configurado o herencia del host y el comando `/<id> <task>`.
+No muestra paths de registro. El resultado del `join` scoped del scout usa el
+mismo resumen, y el alias queda registrado en la sesión Pi actual.
 
 La vista con descripciones limita a 64 las consultas remotas de metadata. En un
 catálogo mayor aplica primero el filtro por nombre, repositorio o ruta; un filtro
@@ -85,7 +108,11 @@ Esto permite que `Alt+H` cancele un slash iniciado idle, donde Pi entrega
 `ctx.signal === undefined`. En `session_shutdown` se abortan todos los roots y
 se espera cleanup durante un máximo de cinco segundos; el cierre es best-effort
 y un provider colgado no puede bloquear Pi indefinidamente. Status y widget se
-limpian siempre en `finally`.
+limpian siempre en `finally`. La espera visible compite contra la señal de
+abort: aunque un provider ignore esa señal, el run deja de aparecer como
+working, se asienta localmente como `cancelled` y libera capacidad/UI. Esto no
+afirma que el proveedor haya detenido cómputo remoto; la sesión subyacente
+conserva la señal y hace cleanup best-effort cuando finalmente retorna.
 
 Pi admite como máximo 32 roots concurrentes por proyecto. El root 33 y un
 segundo root del mismo miembro persistente fallan en preflight con cero gasto.
@@ -95,20 +122,49 @@ misiones ya asentadas, y una misión sólo es podable cuando root y children son
 terminales. El registro es por proyecto, case-insensitive en Windows, y
 desaparece al cerrar o recargar Pi.
 
-`team-lead` captura y valida un snapshot completo de sus targets antes de crear
-el root. Un fallo durante esa preparación no deja un run `starting` fantasma.
+`team-lead` captura y valida un snapshot completo de sus targets enabled antes
+de crear el root. Un fallo durante esa preparación no deja un run `starting`
+fantasma.
 
 ## Modelo, thinking y tokens
 
-Antes de la primera respuesta, el modelo se marca `inherited`: es la selección
-efectiva de la sesión Pi, todavía no evidencia del provider. El SDK puede
-ajustar el nivel de thinking solicitado según el modelo; Agent Harbor lee `session.model` y
-`session.thinkingLevel`. En `message_end`, `provider` y
-`responseModel ?? model` pasan a `observed`.
+Antes de la primera respuesta, el modelo se marca `configured` cuando la
+definición del player o contract declara `model`; si no lo declara, se marca
+`inherited` porque usa la selección efectiva de la sesión Pi. Ninguna de las
+dos etiquetas es todavía evidencia del provider. El SDK puede ajustar el nivel
+de thinking solicitado según el modelo; Agent Harbor lee `session.model` y
+`session.thinkingLevel`. En `message_end`, `provider` y `responseModel ?? model`
+pasan a `observed`.
+
+Pi 0.80.10 usa el placeholder `provider: "unknown"`, `id: "unknown"`,
+`api: "unknown"` y `maxTokens: 0` cuando no hay modelo activo; el contexto
+público también puede omitir `model`. Agent Harbor captura una sola instantánea
+del modelo y la combina con `modelRegistry.getAvailable()` y `getError()`. Un
+catálogo sano y vacío se muestra como `unavailable (Pi reports no usable
+models; use /login)`. Si el catálogo sano tiene modelos pero ninguno está
+seleccionado, la vista dice `not selected (N available; use /model)`. Si el
+catálogo no puede observarse, muestra `no active model; availability unobserved
+(use /model or /login)`. Ningún caso publica el placeholder como modelo
+heredado ni el cero como límite real; `LEAD ACCESS` tampoco anuncia targets
+delegables hasta que exista una selección utilizable.
 
 Un player o contract directo con `model` debe usar `provider/model`; Pi valida
-existencia y auth antes de crear el child. En una misión de `/team-lead`, todos
-los delegados heredan el modelo raíz, coherente con los otros runtimes.
+existencia y auth antes de crear el child. Los aliases, `/contract` sin modelo y
+`/scout` validan de la misma forma la selección heredada. Una selección ausente,
+placeholder, sin auth o ya no disponible falla antes de crear el root o la
+sesión y dirige a `/model` o `/login`. La sesión child recibe el mismo
+`agentDir` que el host para que `auth.json` y `models.json` sean utilizables. Los
+providers registrados en memoria no se recargan como extensiones dentro del
+child: Harbor captura sólo los requeridos por el modelo elegido y por los
+modelos explícitos del snapshot del lead, crea un `ModelRuntime` aislado mediante
+las APIs públicas de Pi y reproduce allí su configuración. Una API key cuyo
+origen host es estrictamente `runtime` se transfiere sólo en memoria; nunca se
+persiste ni se convierte una credencial OAuth. En una misión de `/team-lead`,
+todos los especialistas sin `model` heredan el modelo efectivo del lead. Cada
+especialista que sí declara `model` usa esa configuración tras volver a validar
+existencia y auth justo antes de consumir la delegación. La actividad distingue
+ambos casos y después sustituye la etiqueta por evidencia `observed` si llega
+una respuesta nativa.
 
 Se acumulan una sola vez los campos nativos:
 
@@ -120,8 +176,11 @@ input · output · reasoning · cache read/write · totalTokens
 ningún dato muestra `—`. Si ya existe una contribución conocida y otro turno o
 miembro carece de usage, se conserva como cota `≥N` en miembro, misión, status y
 widget. El objeto all-zero que Pi usa como sentinel cuando no llega usage se
-considera desconocido. Si varios `responseModel` contestan en un child, se
-muestra `mixed observed` con una lista acotada.
+interpreta por presencia: si Pi entrega explícitamente los campos nativos en
+cero, la vista muestra cero; si omite `usage`, el campo queda desconocido. Una
+combinación contradictoria (por ejemplo, componentes positivos con total cero)
+deja desconocido sólo el campo contradictorio. Si varios `responseModel`
+contestan en un child, se muestra `mixed observed` con una lista acotada.
 
 El transcript se observa también en error/cancelación antes del dispose. La
 deduplicación evita contar otra vez mensajes ya recibidos por evento, pero no
@@ -150,8 +209,19 @@ se normaliza defensivamente antes de renderizarse. El prompt puede ser
 multilínea porque nunca forma parte de estas vistas.
 
 El lead recibe sólo evidencia del especialista. El desglose de agente/modelo/
-tokens/tiempo se compone fuera de esa evidencia, después del root. El tool del
-scout también devuelve un resultado de join conciso, sin rutas locales.
+tokens/tiempo se compone fuera de esa evidencia, después del root. El scout
+debe consultar primero y exactamente una vez su snapshot acotado del roster;
+cada fila declara disponibilidad, rol, tools y skills con patrones comunes de
+rutas sustituidos. La policy del recruiter exige que, si un miembro `ready` ya
+cubre la necesidad, termine sin filtrar ni hacer `join`; el guard determinista
+no recibe las filas ni decide esa suficiencia, sólo completitud, orden,
+presupuestos, serialización y terminalidad. Si falta capacidad, el tool de alta
+devuelve un resultado conciso, también sin rutas locales. El snapshot muestra
+todos los especialistas habilitados hasta 32 miembros/16 KiB; si no cabe, no
+revela una muestra parcial y bloquea filtro y alta para evitar reclutar una
+capacidad omitida. El preview de hasta 1.500 caracteres que Pi incluye en la
+descripción de delegación es sólo orientativo, puede declarar omisiones y nunca
+sustituye esta consulta completa.
 Si ese join ya hizo commit y el recruiter falla o es cancelado después, el
 handler reconcilia el alias en `finally` y avisa que el roster sí cambió.
 
@@ -165,6 +235,11 @@ el comando fue manejado. Agent Harbor no duplica ese error con notify.
 `/team stop all` es idempotente cuando no hay trabajo; un run ID desconocido sí
 es un error accionable.
 
+Las completions de `/team` y `/bench` comparten por proyecto una lectura en
+vuelo, cachean el roster durante 750 ms y devuelven como máximo 50 opciones. Así
+teclear no vuelve a recorrer un roster grande por cada pulsación; una mutación
+de roster invalida la cache.
+
 En print/JSON la UI de extensiones es no-op y el handler es `Promise<void>`.
 Para automatización se usa RPC o `agent-harbor pi <comando>`; escribir texto ad
 hoc en stdout rompería el protocolo.
@@ -176,7 +251,7 @@ extensión ni reporta colisiones falsas entre sus tools.
 ## Coste de comandos con modelo
 
 ```text
-/scout <need>       1 recruiter child; hasta 3 filtros y como máximo 1 join
+/scout <need>       1 recruiter child; 1 roster snapshot; 0..3 filtros; 0..1 join
 /contract <json>    exactamente 1 contractor child
 /<player> <task>    1 player child
 /team-lead <task>   1 lead + hasta 6 specialists secuenciales

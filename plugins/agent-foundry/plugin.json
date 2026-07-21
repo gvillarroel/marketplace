@@ -8,6 +8,5 @@
   "keywords": ["agents", "roster", "orchestration", "sdlc", "bench", "profiles", "skills", "markdown"],
   "agents": "agents/",
   "skills": "skills/",
-  "extensions": { "paths": ["extensions/agent-harbor"], "exclusive": false },
-  "mcpServers": ".mcp.json"
+  "extensions": { "paths": ["extensions/agent-harbor"], "exclusive": false }
 }

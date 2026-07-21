@@ -11,6 +11,13 @@ export interface CopilotNativeTokenUsage {
     readonly total?: number;
 }
 export type CopilotNativeUsageField = keyof CopilotNativeTokenUsage;
+export interface CopilotNativeBillingUsage {
+    /** Sum of Copilot's per-request model-multiplier cost values; not USD. */
+    readonly modelMultiplier?: number;
+    /** Sum of Copilot's native nano-AI-unit values. */
+    readonly totalNanoAiu?: number;
+}
+export type CopilotNativeBillingField = keyof CopilotNativeBillingUsage;
 export interface CopilotTeamRunSnapshot {
     readonly id: string;
     readonly sequence: number;
@@ -33,6 +40,10 @@ export interface CopilotTeamRunSnapshot {
     readonly observedReasoningEffortsTruncated: boolean;
     readonly usage: CopilotNativeTokenUsage;
     readonly usageLowerBounds: readonly CopilotNativeUsageField[];
+    readonly billing: CopilotNativeBillingUsage;
+    readonly billingLowerBounds: readonly CopilotNativeBillingField[];
+    /** The authoritative terminal total contradicted the per-call token sum. */
+    readonly usageAggregateConflict: boolean;
     readonly usageIdentityTruncated: boolean;
     readonly usageIdentityAmbiguous: boolean;
     readonly usageAttributionUnverified: boolean;
@@ -66,6 +77,11 @@ export interface CopilotUsageEvent {
         readonly reasoningTokens?: number;
         readonly cacheReadTokens?: number;
         readonly cacheWriteTokens?: number;
+        /** Copilot's model-multiplier cost for this request; not USD. */
+        readonly cost?: number;
+        readonly copilotUsage?: {
+            readonly totalNanoAiu?: number;
+        };
     };
 }
 export interface CopilotRunObserver {
@@ -124,6 +140,9 @@ export declare class CopilotTeamRuntime {
     latestRoot(project: string): CopilotTeamRunSnapshot | undefined;
     missionUsage(rootRunId: string): CopilotNativeTokenUsage;
     missionUsageLowerBounds(rootRunId: string): CopilotNativeUsageField[];
+    missionBilling(rootRunId: string): CopilotNativeBillingUsage;
+    missionBillingLowerBounds(rootRunId: string): CopilotNativeBillingField[];
+    missionUsageAggregateConflict(rootRunId: string): boolean;
     missionUsageAttributionUnverified(rootRunId: string): boolean;
     projectName(project: string): string;
     private observeModel;
@@ -138,6 +157,7 @@ export declare class CopilotTeamRuntime {
 }
 export declare function formatCopilotElapsed(milliseconds: number): string;
 export declare function formatCopilotTokenCount(value: number | undefined, lowerBound?: boolean): string;
+export declare function formatCopilotBilling(billing: CopilotNativeBillingUsage, lowerBounds?: readonly CopilotNativeBillingField[]): string;
 export declare function formatCopilotModel(run: CopilotTeamRunSnapshot): string;
 export declare function formatCopilotReasoning(run: CopilotTeamRunSnapshot): string;
 export declare function formatCopilotUsage(usage: CopilotNativeTokenUsage, lowerBounds?: readonly CopilotNativeUsageField[]): string;

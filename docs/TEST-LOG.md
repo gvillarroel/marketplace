@@ -110,8 +110,9 @@ review.
 | `git diff --check` | Passed |
 
 The suite proves that the scout tools are unavailable to ordinary OpenCode
-agents, invocation-scoped in Pi, and isolated in a Copilot `--scout` MCP
-process that rejects the general lifecycle control. Its join still passes
+agents, invocation-scoped in Pi, and isolated to the Copilot scout principal.
+That historical transport was replaced by extension-owned native custom tools
+in the no-server gate recorded below. Its join still passes
 through the shared validation and ownership transaction. Catalog description
 tests verify opt-in rendering and filtering without exposing instruction
 bodies, commits, or blobs.
@@ -131,7 +132,7 @@ Recorded at `2026-07-20T23:49:48-04:00`.
 
 The retired plugin directory, manifest, duplicated runtime, agents, and
 repository-mapping skill are absent. `crafter` remains functional as
-`agent-foundry:crafter` with its player-scoped skill MCP, and the startup roster
+`agent-foundry:crafter` with a player-bound skill loader, and the startup roster
 now contains exactly `team-lead` and `crafter` plus the six opt-in SDLC peers.
 
 ## Current-profile-only roster gate

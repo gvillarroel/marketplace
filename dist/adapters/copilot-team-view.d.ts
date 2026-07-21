@@ -6,6 +6,8 @@ export interface CopilotTeamMember {
     readonly availability: "ready" | "bench" | "stale" | "conflict" | "unavailable";
     readonly description: string;
     readonly capacity: string;
+    readonly tools?: readonly string[];
+    readonly skills?: readonly string[];
     readonly configuredModel?: string;
     readonly repairKind?: "bundled-profile" | "personal-active" | "personal-registration" | "native-discovery";
 }
@@ -16,12 +18,17 @@ export interface CopilotNativeRosterStatus {
     readonly selectionRestoreUnverified?: boolean;
 }
 export declare const maximumVisibleCopilotRosterMembers = 32;
+export declare const maximumVisibleCopilotOverviewRosterMembers = 12;
+export declare const maximumVisibleCopilotOverviewRuns = 4;
+export declare const maximumCopilotTeamOverviewLines = 30;
 /** Resolves the complete Copilot-visible roster without creating a model request. */
 export declare function collectCopilotTeamMembers(project: string, native?: CopilotNativeRosterStatus): Promise<CopilotTeamMember[]>;
 export interface CopilotTeamViewOptions {
     readonly filter?: string;
     readonly title?: "team" | "bench";
     readonly nextModel?: string;
+    /** The host returned no usable current-model identity or its offline sentinel. */
+    readonly nextModelUnreported?: boolean;
     readonly nextReasoning?: string;
     readonly nextMaxOutputTokens?: number;
     readonly native?: CopilotNativeRosterStatus;

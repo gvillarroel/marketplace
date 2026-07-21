@@ -26,6 +26,15 @@ const offlineGithub = {
   load: async () => ({ commit: "a".repeat(40), body: "Use the bounded offline fixture only." }),
 };
 const openCodeModel = { providerID: "openai", modelID: "gpt-5.3-codex-spark", variant: "low" } as const;
+const openCodePendingTitle = "Agent Harbor child · provenance pending";
+const signedOpenCodeAgentTitle = /^Harbor agent: ([a-z0-9][a-z0-9-]{0,47}) · ah1:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22}$/u;
+
+function agentFromSignedOpenCodeTitle(value: unknown): string {
+  assert.equal(typeof value, "string");
+  const match = signedOpenCodeAgentTitle.exec(value);
+  assert.ok(match?.[1], "OpenCode child update must carry signed agent provenance");
+  return match[1];
+}
 
 test("live handoff comparison removes Markdown quote and fence wrappers", () => {
   const response = "Evidence from the completed gate.\nHARBOR_HANDOFF:portfolio-management:AH-hidden";
@@ -155,14 +164,23 @@ async function runOpenCodeCycle(cycle: HarborCycle): Promise<void> {
   const { project, roster } = await prepareCycle(harness, cycle);
   const collector = new HarborEvidenceCollector(harness, cycle.id);
   const childAgents = new Map<string, string>();
+  const createdChildren = new Set<string>();
+  let childSequence = 0;
   const client = { session: {
     create: async ({ body }: any) => {
-      const agent = /^Harbor agent: (.+)$/.exec(body.title)?.[1];
-      assert.ok(agent);
-      const childId = `opencode-${childAgents.size + 1}`;
-      childAgents.set(childId, agent);
-      collector.witness({ phase: "child.started", agent, runtimeAgent: agent, childId });
+      assert.equal(body.title, openCodePendingTitle);
+      const childId = `opencode-${++childSequence}`;
+      createdChildren.add(childId);
       return { data: { id: childId } };
+    },
+    update: async ({ path, body }: any) => {
+      assert.ok(createdChildren.has(path.id), `unknown OpenCode child update: ${path.id}`);
+      assert.equal(childAgents.has(path.id), false, `duplicate OpenCode child update: ${path.id}`);
+      const agent = agentFromSignedOpenCodeTitle(body.title);
+      childAgents.set(path.id, agent);
+      const childId = path.id as string;
+      collector.witness({ phase: "child.started", agent, runtimeAgent: agent, childId });
+      return { data: { id: childId, title: body.title } };
     },
     prompt: async ({ path, body }: any) => {
       const agent = childAgents.get(path.id);
@@ -183,7 +201,9 @@ async function runOpenCodeCycle(cycle: HarborCycle): Promise<void> {
       return { data: true };
     },
   } };
-  const orchestrator = new OpenCodeOrchestrator(client as any, project, offlineGithub, collector.hook);
+  const orchestrator = new OpenCodeOrchestrator(
+    client as any, project, offlineGithub, collector.hook, undefined, join(dirname(project), "claim-home"),
+  );
 
   const executions = [];
   let priorEvidence: string | undefined;
@@ -292,19 +312,43 @@ test("evidence hooks retain only hashes and byte lengths", () => {
 test("a failing async evidence collector cannot alter child execution or cleanup", async () => {
   const calls: string[] = [];
   const client = { session: {
-    create: async () => { calls.push("create"); return { data: { id: "child" } }; },
-    prompt: async () => { calls.push("prompt"); return { data: { parts: [{ type: "text", text: "evidence" }] } }; },
-    delete: async () => { calls.push("delete"); return { data: true }; },
+    create: async ({ body }: any) => {
+      assert.equal(body.title, openCodePendingTitle);
+      calls.push("create");
+      return { data: { id: "child" } };
+    },
+    update: async ({ path, body }: any) => {
+      assert.equal(path.id, "child");
+      assert.equal(agentFromSignedOpenCodeTitle(body.title), "portfolio-management");
+      calls.push("update");
+      return { data: { id: path.id, title: body.title } };
+    },
+    prompt: async ({ path, body }: any) => {
+      assert.equal(path.id, "child");
+      assert.equal(body.agent, "portfolio-management");
+      assert.deepEqual(body.model, { providerID: openCodeModel.providerID, modelID: openCodeModel.modelID });
+      assert.equal(body.variant, openCodeModel.variant);
+      calls.push("prompt");
+      return { data: { parts: [{ type: "text", text: "evidence" }] } };
+    },
+    delete: async ({ path }: any) => {
+      assert.equal(path.id, "child");
+      calls.push("delete");
+      return { data: true };
+    },
   } };
+  const claimHome = await mkdtemp(join(tmpdir(), "harbor-opencode-collector-claims-"));
   const orchestrator = new OpenCodeOrchestrator(client as any, process.cwd(), offlineGithub, async () => {
     throw new Error("collector unavailable");
-  });
+  }, undefined, claimHome);
   assert.equal(await orchestrator.runAgent("portfolio-management", "bounded task", "parent", openCodeModel), "evidence");
-  assert.deepEqual(calls, ["create", "prompt", "delete"]);
+  assert.deepEqual(calls, ["create", "update", "prompt", "delete"]);
 });
 
 test("creation, prompt, and cleanup failures produce bounded truthful evidence traces", async () => {
   const definition = { ...bundledPlayers.get("portfolio-management")!, task: "private bounded task" };
+  const openCodeFailureRoot = await mkdtemp(join(tmpdir(), "harbor-opencode-evidence-failures-"));
+  const openCodeClaimHome = join(openCodeFailureRoot, "claim-home");
 
   const copilotFactoryEvents: HarborEvidenceEvent[] = [];
   const copilotFactory = new CopilotOrchestrator(
@@ -326,8 +370,11 @@ test("creation, prompt, and cleanup failures produce bounded truthful evidence t
 
   const openCodeCreateEvents: HarborEvidenceEvent[] = [];
   const openCodeCreate = new OpenCodeOrchestrator({ session: {
-    create: async () => { throw new Error("private opencode create failure"); },
-  } } as any, process.cwd(), offlineGithub, (event) => openCodeCreateEvents.push(event));
+    create: async ({ body }: any) => {
+      assert.equal(body.title, openCodePendingTitle);
+      throw new Error("private opencode create failure");
+    },
+  } } as any, join(openCodeFailureRoot, "create"), offlineGithub, (event) => openCodeCreateEvents.push(event), undefined, openCodeClaimHome);
   await assert.rejects(() => openCodeCreate.runAgent("portfolio-management", definition.task, "parent", openCodeModel), /private opencode create failure/);
   assert.deepEqual(openCodeCreateEvents.map((event) => event.phase), ["target.resolved", "child.failed"]);
 
@@ -340,12 +387,31 @@ test("creation, prompt, and cleanup failures produce bounded truthful evidence t
   assert.deepEqual(piCreateEvents.map((event) => event.phase), ["target.resolved", "child.failed"]);
 
   const combinedFailureEvents: HarborEvidenceEvent[] = [];
+  let failedCleanupAttempts = 0;
   const combinedFailure = new OpenCodeOrchestrator({ session: {
-    create: async () => ({ data: { id: "failed-child" } }),
-    prompt: async () => { throw new Error("private prompt failure"); },
-    delete: async () => { throw new Error("private cleanup failure"); },
-  } } as any, process.cwd(), offlineGithub, (event) => combinedFailureEvents.push(event));
+    create: async ({ body }: any) => {
+      assert.equal(body.title, openCodePendingTitle);
+      return { data: { id: "failed-child" } };
+    },
+    update: async ({ path, body }: any) => {
+      assert.equal(path.id, "failed-child");
+      assert.equal(agentFromSignedOpenCodeTitle(body.title), "portfolio-management");
+      return { data: { id: path.id, title: body.title } };
+    },
+    prompt: async ({ path, body }: any) => {
+      assert.equal(path.id, "failed-child");
+      assert.equal(body.agent, "portfolio-management");
+      assert.deepEqual(body.model, { providerID: openCodeModel.providerID, modelID: openCodeModel.modelID });
+      throw new Error("private prompt failure");
+    },
+    delete: async ({ path }: any) => {
+      assert.equal(path.id, "failed-child");
+      failedCleanupAttempts += 1;
+      throw new Error("private cleanup failure");
+    },
+  } } as any, join(openCodeFailureRoot, "combined"), offlineGithub, (event) => combinedFailureEvents.push(event), undefined, openCodeClaimHome);
   await assert.rejects(() => combinedFailure.runAgent("portfolio-management", definition.task, "parent", openCodeModel), AggregateError);
+  assert.equal(failedCleanupAttempts, 2);
   assert.deepEqual(
     combinedFailureEvents.map((event) => `${event.phase}:${event.outcome}`),
     [
@@ -356,11 +422,30 @@ test("creation, prompt, and cleanup failures produce bounded truthful evidence t
 
   const emptyEvidenceEvents: HarborEvidenceEvent[] = [];
   const emptyEvidence = new OpenCodeOrchestrator({ session: {
-    create: async () => ({ data: { id: "empty-child" } }),
-    prompt: async () => ({ data: { parts: [] } }),
-    delete: async () => ({ data: true }),
-  } } as any, process.cwd(), offlineGithub, (event) => emptyEvidenceEvents.push(event));
-  await assert.rejects(() => emptyEvidence.runAgent("portfolio-management", definition.task, "parent", openCodeModel), /empty evidence/);
+    create: async ({ body }: any) => {
+      assert.equal(body.title, openCodePendingTitle);
+      return { data: { id: "empty-child" } };
+    },
+    update: async ({ path, body }: any) => {
+      assert.equal(path.id, "empty-child");
+      assert.equal(agentFromSignedOpenCodeTitle(body.title), "portfolio-management");
+      return { data: { id: path.id, title: body.title } };
+    },
+    prompt: async ({ path, body }: any) => {
+      assert.equal(path.id, "empty-child");
+      assert.equal(body.agent, "portfolio-management");
+      assert.deepEqual(body.model, { providerID: openCodeModel.providerID, modelID: openCodeModel.modelID });
+      return { data: { parts: [] } };
+    },
+    delete: async ({ path }: any) => {
+      assert.equal(path.id, "empty-child");
+      return { data: true };
+    },
+  } } as any, join(openCodeFailureRoot, "empty"), offlineGithub, (event) => emptyEvidenceEvents.push(event), undefined, openCodeClaimHome);
+  await assert.rejects(
+    () => emptyEvidence.runAgent("portfolio-management", definition.task, "parent", openCodeModel),
+    /no bounded text evidence/,
+  );
   assert.deepEqual(
     emptyEvidenceEvents.map((event) => `${event.phase}:${event.outcome}`),
     [

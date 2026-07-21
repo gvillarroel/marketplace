@@ -22,6 +22,13 @@ const fullCycle = cycleDataset.cycles.find((cycle) => cycle.id === "full-sdlc")!
 const fixedIds = cycleDataset.roster.fixed.map((player) => player.id);
 const sdlcIds = cycleDataset.roster.bundled.map((player) => player.id);
 const openCodeModel = { providerID: "openai", modelID: "gpt-5.3-codex-spark", variant: "low" } as const;
+
+function emptyOpenCodeActivitySession() {
+  return {
+    status: async () => ({ data: {} }),
+    messages: async () => { throw new Error("empty activity inventory must not request messages"); },
+  };
+}
 const expectedProfileLayouts = {
   copilot: { activeDir: ".github/agents", extension: ".agent.md" },
   opencode: { activeDir: ".opencode/agents", extension: ".md" },
@@ -105,7 +112,7 @@ test("each harness keeps its literal active-profile layout and join writes exact
     assert.deepEqual({ activeDir: spec.activeDir, extension: spec.extension }, expected);
     await new Roster(spec).join({ name: "layout-worker", description: "Layout worker", prompt: "Verify layout", tools: ["read"] });
     const profile = await readFile(join(project, expected.activeDir, `layout-worker${expected.extension}`), "utf8");
-    assert.match(profile, /agent-foundry:profile id=layout-worker revision=4/);
+    assert.match(profile, /agent-foundry:profile id=layout-worker revision=5/);
   }
 });
 
@@ -183,15 +190,21 @@ test("Copilot reuses one orchestrator to dispatch every SDLC agent in order", as
   }
 });
 
-test("OpenCode contract runner processes every staged SDLC definition with cleanup", async () => {
+test("OpenCode contract runner processes every staged SDLC definition with cleanup", async (t) => {
   const creates: Array<{ id: string; title: string }> = [];
+  const updates: Array<{ id: string; title: string }> = [];
   const prompts: Array<{ id: string; name: string; task: string; agent: string; tools: Record<string, boolean> }> = [];
   const deletes: string[] = [];
   const client = { session: {
+    ...emptyOpenCodeActivitySession(),
     create: async ({ body }: any) => {
       const id = `opencode-child-${creates.length + 1}`;
       creates.push({ id, title: body.title });
       return { data: { id } };
+    },
+    update: async ({ path, body }: any) => {
+      updates.push({ id: path.id, title: body.title });
+      return { data: { id: path.id, title: body.title } };
     },
     prompt: async ({ path, body }: any) => {
       const text = body.parts[0].text as string;
@@ -202,17 +215,51 @@ test("OpenCode contract runner processes every staged SDLC definition with clean
     },
     delete: async ({ path }: any) => { deletes.push(path.id); return { data: true }; },
   } };
-  const orchestrator = new OpenCodeOrchestrator(client as any, process.cwd());
+  const claimHome = await mkdtemp(join(tmpdir(), "harbor-opencode-claims-matrix-"));
+  t.after(() => rm(claimHome, { recursive: true, force: true }));
+  const orchestrator = new OpenCodeOrchestrator(
+    client as any, process.cwd(), undefined, undefined, undefined, claimHome,
+  );
 
   assert.equal(await runMission(orchestrator), "evidence:dispose");
   assert.deepEqual(prompts.map((entry) => entry.name), sdlcIds);
   assert.deepEqual(deletes, creates.map((entry) => entry.id));
   for (const [index, player] of [...bundledPlayers.values()].entries()) {
-    assert.equal(creates[index].title, `Harbor contract: ${player.name}`);
+    assert.equal(creates[index].title, "Agent Harbor child · provenance pending");
+    assert.equal(updates[index].id, creates[index].id);
+    assert.match(updates[index].title, new RegExp(`^Harbor contract: ${player.name} · ah1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$`, "u"));
     assert.equal(prompts[index].agent, player.tools.some((tool) => tool === "edit" || tool === "execute") ? "general" : "explore");
     assert.deepEqual(prompts[index].tools, openCodeToolPolicy(player.tools));
     if (index) assert.match(prompts[index].task, new RegExp(`evidence:${sdlcIds[index - 1]}`));
   }
+});
+
+test("OpenCode contract runner applies configured models and rejects invalid routes before create", async () => {
+  const project = await mkdtemp(join(tmpdir(), "harbor-opencode-contract-model-"));
+  let creates = 0;
+  const promptBodies: any[] = [];
+  const orchestrator = new OpenCodeOrchestrator({ session: {
+    create: async () => ({ data: { id: `model-contract-${++creates}` } }),
+    update: async ({ path, body }: any) => ({ data: { id: path.id, title: body.title } }),
+    prompt: async ({ body }: any) => {
+      promptBodies.push(body);
+      return { data: { parts: [{ type: "text", text: "model evidence" }] } };
+    },
+    delete: async () => ({ data: true }),
+  } } as any, project, undefined, undefined, undefined, join(project, ".claims"));
+  const definition = {
+    name: "model-contract",
+    description: "Verify an explicit model",
+    prompt: "Return evidence only.",
+    task: "Verify",
+    tools: ["read"],
+    model: "openai/gpt-contract",
+  } as any;
+  assert.equal(await orchestrator.run(definition), "model evidence");
+  assert.deepEqual(promptBodies[0].model, { providerID: "openai", modelID: "gpt-contract" });
+  await assert.rejects(() => orchestrator.run({ ...definition, model: "missing-separator" }), /bounded provider\/model syntax/u);
+  await assert.rejects(() => orchestrator.run({ ...definition, model: "x".repeat(2_000_000) }), /bounded provider\/model syntax/u);
+  assert.equal(creates, 1, "invalid configured models reached child creation");
 });
 
 test("OpenCode named runner dispatches every fixed and activated ID exactly", async () => {
@@ -222,12 +269,16 @@ test("OpenCode named runner dispatches every fixed and activated ID exactly", as
   await roster.bench("on all", bundledPlayers);
   const ids = [...rolePlayers.keys(), ...bundledPlayers.keys()];
   assert.deepEqual(new Set(listInvocablePlayerIds("opencode", project)), new Set(ids));
-  const creates: any[] = []; const prompts: any[] = []; const deletes: string[] = [];
+  const creates: any[] = []; const updates: any[] = []; const prompts: any[] = []; const deletes: string[] = [];
   const client = { session: {
     create: async ({ body }: any) => {
       const id = `named-${creates.length + 1}`;
       creates.push({ id, body });
       return { data: { id } };
+    },
+    update: async ({ path, body }: any) => {
+      updates.push({ path, body });
+      return { data: { id: path.id, title: body.title } };
     },
     prompt: async ({ path, body }: any) => {
       prompts.push({ path, body });
@@ -235,7 +286,9 @@ test("OpenCode named runner dispatches every fixed and activated ID exactly", as
     },
     delete: async ({ path }: any) => { deletes.push(path.id); return { data: true }; },
   } };
-  const orchestrator = new OpenCodeOrchestrator(client as any, project);
+  const orchestrator = new OpenCodeOrchestrator(
+    client as any, project, undefined, undefined, undefined, join(root, "claim-home"),
+  );
   for (const id of ids) {
     requireInvocablePlayer("opencode", project, id);
     assert.equal(await orchestrator.runAgent(id, `task:${id}`, "parent", openCodeModel), `evidence:${id}`);
@@ -245,6 +298,9 @@ test("OpenCode named runner dispatches every fixed and activated ID exactly", as
   assert.deepEqual(prompts.map((entry) => entry.body.variant), ids.map(() => openCodeModel.variant));
   assert.deepEqual(prompts.map((entry) => entry.body.parts[0].text), ids.map((id) => `task:${id}`));
   assert.ok(creates.every((entry) => entry.body.parentID === undefined));
+  assert.ok(creates.every((entry) => entry.body.title === "Agent Harbor child · provenance pending"));
+  assert.deepEqual(updates.map((entry) => entry.path.id), creates.map((entry) => entry.id));
+  assert.ok(updates.every((entry) => /^Harbor agent: [a-z0-9-]+ · ah1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/u.test(entry.body.title)));
   assert.deepEqual(deletes, creates.map((entry) => entry.id));
 });
 
@@ -257,7 +313,9 @@ test("OpenCode team lead propagates the originating user model to its child prom
     modelID: openCodeModel.modelID,
   };
   const client = { session: {
+    ...emptyOpenCodeActivitySession(),
     create: async () => ({ data: { id: `child-${++creates}` } }),
+    update: async ({ path, body }: any) => ({ data: { id: path.id, title: body.title } }),
     message: async ({ path }: any) => path.messageID.startsWith("user-")
       ? { data: { info: { id: path.messageID, role: "user", model: originatingModel }, parts: [] } }
       : { data: {

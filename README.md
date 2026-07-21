@@ -8,7 +8,7 @@ It includes:
 - `team-lead` and `crafter`, available from startup;
 - six opt-in SDLC specialists: `portfolio-management`, `design`, `build`,
   `manage`, `consume`, and `dispose`;
-- deterministic `/bench`, `/join`, `/retire`, and `/list-skills` controls that
+- deterministic `/team`, `/bench`, `/join`, `/retire`, and `/list-skills` controls that
   use no inference through each runtime's direct surface;
 - `/contract` for exactly one disposable agent;
 - safe ownership: unmanaged profiles are never overwritten or deleted.
@@ -50,13 +50,14 @@ pi install --local git:github.com/gvillarroel/marketplace
 
 ## Getting started
 
-1. List the available agents:
+1. See the team and any active work:
 
    ```text
-   /bench
+   /team
    ```
 
-   In OpenCode, the equivalent direct control is `/bench-list`.
+   In OpenCode, select `/team` and press Enter in its prompt. Use `/bench-list`
+   there when you only need lifecycle state.
 
 2. Activate only the specialists you need:
 
@@ -64,12 +65,14 @@ pi install --local git:github.com/gvillarroel/marketplace
    /bench on design build consume
    ```
 
-   In OpenCode, use `/bench-on`, which prompts for the names.
+   In OpenCode, use `/bench-on`, which prompts for the names, then start a new
+   OpenCode session. Until that reload, `/team` reports newly enabled members as
+   `enabled · reload required`, not `ready · invocable`.
 
 3. Run a task:
 
-   - In Copilot and OpenCode, select `team-lead`, `crafter`, or an active
-     specialist through the native agent selector.
+   - In Copilot and OpenCode, select `team-lead`, `crafter`, or a specialist
+     that `/team` reports as ready through the native agent selector.
    - In Pi, invoke it directly, for example:
 
      ```text
@@ -82,7 +85,7 @@ To send work to one exact agent in any runtime, use `/<id> <task>`, for example:
 /design Design the smallest change that supports this feature.
 ```
 
-To watch every command without spending model tokens, replay the
+To watch every command inside the real GitHub Copilot CLI TUI, replay the
 [Asciinema demo](docs/ASCIINEMA-DEMO.md).
 
 You can also manage the roster without depending on the host interface:

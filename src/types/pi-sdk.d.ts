@@ -10,12 +10,25 @@ declare module "@earendil-works/pi-coding-agent" {
     readonly maxTokens?: number;
     readonly [key: string]: unknown;
   }
+  export interface ProviderConfig {
+    readonly [key: string]: unknown;
+  }
+  export interface ProviderAuthStatus {
+    readonly configured: boolean;
+    readonly source?: "stored" | "runtime" | "environment" | "fallback" | "models_json_key" | "models_json_command";
+    readonly label?: string;
+  }
   export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   export interface ExtensionContext {
     cwd: string;
     model: Model | undefined;
     modelRegistry: {
       find(provider: string, modelId: string): Model | undefined;
+      getAvailable(): Model[];
+      getError(): string | undefined;
+      getRegisteredProviderConfig(providerId: string): ProviderConfig | undefined;
+      getProviderAuthStatus(providerId: string): ProviderAuthStatus;
+      getApiKeyForProvider(providerId: string): Promise<string | undefined>;
       hasConfiguredAuth?(model: Model): boolean;
     };
     mode: "tui" | "rpc" | "json" | "print";
@@ -108,6 +121,16 @@ declare module "@earendil-works/pi-coding-agent" {
     reload(): Promise<void>;
   }
   export function getAgentDir(): string;
+  export class ModelRuntime {
+    static create(options?: {
+      authPath?: string;
+      modelsPath?: string | null;
+      allowModelNetwork?: boolean;
+    }): Promise<ModelRuntime>;
+    registerProvider(providerId: string, config: ProviderConfig): void;
+    setRuntimeApiKey(providerId: string, apiKey: string): Promise<void>;
+    refresh(options?: { allowNetwork?: boolean }): Promise<unknown>;
+  }
   export interface AgentSession {
     readonly model?: Model;
     readonly thinkingLevel?: ThinkingLevel;
@@ -134,10 +157,12 @@ declare module "@earendil-works/pi-coding-agent" {
   }
   export function createAgentSession(options?: {
     cwd?: string;
+    agentDir?: string;
     sessionManager?: SessionManager;
     tools?: string[];
     customTools?: ToolDefinition[];
     resourceLoader?: DefaultResourceLoader;
+    modelRuntime?: ModelRuntime;
     model?: Model;
     thinkingLevel?: ThinkingLevel;
   }): Promise<{ session: AgentSession }>;

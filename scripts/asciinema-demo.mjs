@@ -242,7 +242,7 @@ async function main() {
     await invoke("bench", "on all", 7, "/bench on all");
     await invoke("bench", "list design", 5, "/bench list design");
 
-    section("Compañero personal", "Copilot registra el jugador en el roster y lo vuelve invocable inmediatamente con /player.");
+    section("Compañero personal", "Copilot registra el jugador; /team confirma si el loader y el modelo lo dejan listo para /player.");
     const definition = JSON.stringify({
       name: "demo-reviewer",
       description: "Review a change for correctness and risk.",

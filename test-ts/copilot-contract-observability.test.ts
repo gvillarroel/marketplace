@@ -2,28 +2,36 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   copilotFixedAgentIds,
+  copilotFixedAgentPath,
   createCopilotCoordinatorGuard,
   type CopilotCoordinatorLifecycleEvent,
 } from "../src/adapters/copilot-coordinator.js";
 
 const project = process.cwd();
 
+function fixedCopilotIdentity(logicalId: string, extras: Record<string, unknown> = {}) {
+  return {
+    id: copilotFixedAgentIds.get(logicalId)!,
+    path: copilotFixedAgentPath(logicalId),
+    userInvocable: true,
+    ...extras,
+  };
+}
+
 function contractInput(sessionId: string, toolArgs: unknown, toolName = "task") {
   return { sessionId, workingDirectory: project, toolName, toolArgs };
 }
 
-function contractMcpInput(
+function contractToolInvocation(
   sessionId: string,
   raw: string,
-  options: { serverName?: string; toolName?: string; toolCallId?: string; omitToolCallId?: boolean } = {},
+  options: { toolName?: string; toolCallId?: string; arguments?: unknown } = {},
 ) {
   return {
     sessionId,
-    workingDirectory: project,
-    serverName: options.serverName ?? "agent-harbor",
-    toolName: options.toolName ?? "control",
-    arguments: { command: "contract", args: raw },
-    ...(options.omitToolCallId ? {} : { toolCallId: options.toolCallId ?? `${sessionId}-control-call` }),
+    toolCallId: options.toolCallId ?? `${sessionId}-contract-call`,
+    toolName: options.toolName ?? "harbor_contract",
+    arguments: options.arguments ?? { definition: raw },
   };
 }
 
@@ -46,7 +54,7 @@ async function beginContract(
   sessionId: string,
   raw: string,
   descriptor: { agent_type: string; description: string; prompt: string },
-  handshake: { order?: "pretool-first" | "premcp-first"; omitToolCallId?: boolean } = {},
+  handshake: { order?: "start-first" | "handler-first" } = {},
 ): Promise<void> {
   const invocation = { sessionId };
   await coordinator.hooks.onUserPromptSubmitted({
@@ -70,45 +78,39 @@ async function beginContract(
   } as const;
   coordinator.observeEvent(skillEvent);
   coordinator.observeEvent(skillEvent);
-  const control = contractInput(sessionId, { command: "contract", args: raw }, "flattening-is-not-an-api");
-  const mcp = contractMcpInput(sessionId, raw, { omitToolCallId: handshake.omitToolCallId });
-  if (handshake.order === "premcp-first") await coordinator.hooks.onPreMcpToolCall(mcp, invocation);
-  assert.equal(await coordinator.hooks.onPreToolUse(control, invocation), undefined,
-    "the identity-free tool hook bypassed the host permission policy");
-  if (handshake.order !== "premcp-first") await coordinator.hooks.onPreMcpToolCall(mcp, invocation);
-  await coordinator.hooks.onPreMcpToolCall(mcp, invocation);
-  const controlStart = {
+  const tool = contractInput(sessionId, { definition: raw }, "harbor_contract");
+  assert.equal((await coordinator.hooks.onPreToolUse(tool, invocation))?.permissionDecision, "allow");
+  const nativeInvocation = contractToolInvocation(sessionId, raw);
+  const toolStart = {
     type: "tool.execution_start",
-    id: `${sessionId}-control-start`,
+    id: `${sessionId}-contract-start`,
     parentId: `${sessionId}-skill`,
     timestamp: new Date(Date.now() + 20).toISOString(),
     data: {
-      toolName: "arbitrary-flattened-name",
-      mcpServerName: "agent-harbor",
-      mcpToolName: "control",
-      toolCallId: `${sessionId}-control-call`,
-      arguments: { command: "contract", args: raw },
+      toolName: nativeInvocation.toolName,
+      toolCallId: nativeInvocation.toolCallId,
+      arguments: nativeInvocation.arguments,
     },
   } as const;
-  coordinator.observeEvent(controlStart);
-  coordinator.observeEvent(controlStart);
+  if (handshake.order === "start-first") coordinator.observeEvent(toolStart);
+  await coordinator.contractToolSucceeded(nativeInvocation, descriptor);
+  await coordinator.contractToolSucceeded(nativeInvocation, descriptor);
+  if (handshake.order !== "start-first") coordinator.observeEvent(toolStart);
+  coordinator.observeEvent(toolStart);
   coordinator.observeEvent({
     type: "tool.execution_complete",
-    id: `${sessionId}-control-complete`,
-    parentId: `${sessionId}-control-start`,
+    id: `${sessionId}-contract-complete`,
+    parentId: `${sessionId}-contract-start`,
     timestamp: new Date(Date.now() + 30).toISOString(),
     data: {
-      toolCallId: `${sessionId}-control-call`,
+      toolCallId: nativeInvocation.toolCallId,
       success: true,
-      result: {
-        content: "{truncated by host",
-        structuredContent: { description: descriptor.description, prompt: descriptor.prompt, agent_type: descriptor.agent_type },
-      },
+      result: "PRIVATE NATIVE TOOL RESULT MUST NOT AUTHENTICATE A DESCRIPTOR",
     },
   });
 }
 
-async function authenticateContractControl(
+async function authenticateContractTool(
   coordinator: ReturnType<typeof createCopilotCoordinatorGuard>,
   sessionId: string,
   raw: string,
@@ -121,15 +123,16 @@ async function authenticateContractControl(
     type: "skill.invoked", id: `${sessionId}-skill`,
     data: { name: "contract", pluginName: "agent-foundry", source: "plugin", trigger: "user-invoked" },
   });
-  assert.equal(await coordinator.hooks.onPreToolUse(
-    contractInput(sessionId, { command: "contract", args: raw }, "opaque-control"), invocation,
-  ), undefined);
-  await coordinator.hooks.onPreMcpToolCall(contractMcpInput(sessionId, raw), invocation);
+  assert.equal((await coordinator.hooks.onPreToolUse(
+    contractInput(sessionId, { definition: raw }, "harbor_contract"), invocation,
+  ))?.permissionDecision, "allow");
+  const nativeInvocation = contractToolInvocation(sessionId, raw);
   coordinator.observeEvent({
-    type: "tool.execution_start", id: `${sessionId}-control-start`, parentId: `${sessionId}-skill`,
+    type: "tool.execution_start", id: `${sessionId}-contract-start`, parentId: `${sessionId}-skill`,
     data: {
-      toolName: "opaque-control", mcpServerName: "agent-harbor", mcpToolName: "control",
-      toolCallId: `${sessionId}-control-call`, arguments: { command: "contract", args: raw },
+      toolName: nativeInvocation.toolName,
+      toolCallId: nativeInvocation.toolCallId,
+      arguments: nativeInvocation.arguments,
     },
   });
 }
@@ -157,8 +160,7 @@ async function runValidContract(order: "start-first" | "pretool-first") {
     data: { selectedModel: "root-model", reasoningEffort: "low" },
   });
   await beginContract(coordinator, sessionId, raw, descriptor, {
-    order: order === "start-first" ? "pretool-first" : "premcp-first",
-    omitToolCallId: order === "pretool-first",
+    order,
   });
   const invocation = { sessionId };
   const task = contractInput(sessionId, descriptor);
@@ -166,7 +168,7 @@ async function runValidContract(order: "start-first" | "pretool-first") {
     coordinator.observeEvent({
       type: "tool.execution_start",
       id: `${sessionId}-task-start`,
-      parentId: `${sessionId}-control-complete`,
+      parentId: `${sessionId}-contract-complete`,
       data: { toolName: "task", toolCallId: `${sessionId}-task-call` },
     });
     assert.equal((await coordinator.hooks.onPreToolUse(task, invocation))?.permissionDecision, "allow");
@@ -175,7 +177,7 @@ async function runValidContract(order: "start-first" | "pretool-first") {
     coordinator.observeEvent({
       type: "tool.execution_start",
       id: `${sessionId}-task-start`,
-      parentId: `${sessionId}-control-complete`,
+      parentId: `${sessionId}-contract-complete`,
       data: { toolName: "task", toolCallId: `${sessionId}-task-call` },
     });
   }
@@ -253,7 +255,7 @@ async function runValidContract(order: "start-first" | "pretool-first") {
     parentId: `${sessionId}-root-usage`,
     data: { aborted: false },
   });
-  return { lifecycle, admissions, rawSecret, descriptorSecret, raw };
+  return { coordinator, lifecycle, admissions, rawSecret, descriptorSecret, raw, descriptor, sessionId };
 }
 
 test("Copilot /contract correlates exactly one observable contractor in both native task event orders", async () => {
@@ -292,7 +294,7 @@ test("Copilot /contract correlates exactly one observable contractor in both nat
   }
 });
 
-test("Copilot /contract isolates a later invocation from rotated control and task replays", async () => {
+test("Copilot /contract isolates a later invocation from rotated native-tool and task replays", async () => {
   const { coordinator, lifecycle } = contractHarness();
   const sessionId = "rotated-contract-invocation";
   const raw = JSON.stringify({ name: "reviewer", task: "Review safely" });
@@ -309,30 +311,31 @@ test("Copilot /contract isolates a later invocation from rotated control and tas
       data: { name: "contract", pluginName: "agent-foundry", source: "plugin", trigger: "user-invoked" },
     } as const;
     coordinator.observeEvent(skill);
-    assert.equal(await coordinator.hooks.onPreToolUse(
-      contractInput(sessionId, { command: "contract", args: raw }, "opaque-control"), invocation,
-    ), undefined);
-    await coordinator.hooks.onPreMcpToolCall(contractMcpInput(sessionId, raw, {
-      toolCallId: `${prefix}-control-call`,
-    }), invocation);
-    const controlStart = {
-      type: "tool.execution_start", id: `${prefix}-control-start`, parentId: `${prefix}-skill`,
+    assert.equal((await coordinator.hooks.onPreToolUse(
+      contractInput(sessionId, { definition: raw }, "harbor_contract"), invocation,
+    ))?.permissionDecision, "allow");
+    const nativeInvocation = contractToolInvocation(sessionId, raw, {
+      toolCallId: `${prefix}-contract-call`,
+    });
+    const toolStart = {
+      type: "tool.execution_start", id: `${prefix}-contract-start`, parentId: `${prefix}-skill`,
       timestamp: new Date(base + offset + 1).toISOString(),
       data: {
-        toolName: "opaque-control", mcpServerName: "agent-harbor", mcpToolName: "control",
-        toolCallId: `${prefix}-control-call`, arguments: { command: "contract", args: raw },
+        toolName: nativeInvocation.toolName,
+        toolCallId: nativeInvocation.toolCallId,
+        arguments: nativeInvocation.arguments,
       },
     } as const;
-    coordinator.observeEvent(controlStart);
+    coordinator.observeEvent(toolStart);
+    await coordinator.contractToolSucceeded(nativeInvocation, descriptor);
     coordinator.observeEvent({
-      type: "tool.execution_complete", id: `${prefix}-control-complete`, parentId: `${prefix}-control-start`,
+      type: "tool.execution_complete", id: `${prefix}-contract-complete`, parentId: `${prefix}-contract-start`,
       timestamp: new Date(base + offset + 2).toISOString(),
       data: {
-        toolCallId: `${prefix}-control-call`, success: true,
-        result: { structuredContent: descriptor },
+        toolCallId: `${prefix}-contract-call`, success: true,
       },
     });
-    return { skill, controlStart };
+    return { skill, toolStart };
   };
 
   const first = await begin("A", 0);
@@ -340,7 +343,7 @@ test("Copilot /contract isolates a later invocation from rotated control and tas
     contractInput(sessionId, descriptor), invocation,
   ))?.permissionDecision, "allow");
   const oldTaskStart = {
-    type: "tool.execution_start", id: "A-task-start", parentId: "A-control-complete",
+    type: "tool.execution_start", id: "A-task-start", parentId: "A-contract-complete",
     timestamp: new Date(base + 3).toISOString(),
     data: { toolName: "task", toolCallId: "A-task-call" },
   } as const;
@@ -354,28 +357,18 @@ test("Copilot /contract isolates a later invocation from rotated control and tas
   }
 
   await begin("B", 100);
-  coordinator.observeEvent(first.controlStart);
-  assert.equal(coordinator.hostEventDisposition(first.controlStart), "replay");
-  coordinator.observeEvent({
-    ...first.controlStart,
-    id: "A-control-mutated-native-id",
-    data: { ...first.controlStart.data, toolCallId: "A-control-mutated-call" },
-  });
-  // B's authenticated control already completed. Replayed A task starts must
+  coordinator.observeEvent(first.toolStart);
+  assert.equal(coordinator.hostEventDisposition(first.toolStart), "replay");
+  // B's authenticated native tool already completed. Replayed A task starts must
   // neither reserve nor conflict with B's one exact task call.
   coordinator.observeEvent(oldTaskStart);
   assert.equal(coordinator.hostEventDisposition(oldTaskStart), "replay");
-  coordinator.observeEvent({
-    ...oldTaskStart,
-    id: "A-task-mutated-native-id",
-    data: { ...oldTaskStart.data, toolCallId: "A-task-mutated-call" },
-  });
 
   assert.equal((await coordinator.hooks.onPreToolUse(
     contractInput(sessionId, descriptor), invocation,
   ))?.permissionDecision, "allow");
   coordinator.observeEvent({
-    type: "tool.execution_start", id: "B-task-start", parentId: "B-control-complete",
+    type: "tool.execution_start", id: "B-task-start", parentId: "B-contract-complete",
     timestamp: new Date(base + 103).toISOString(),
     data: { toolName: "task", toolCallId: "B-task-call" },
   });
@@ -405,14 +398,114 @@ test("Copilot /contract isolates a later invocation from rotated control and tas
   assert.equal(JSON.stringify(lifecycle).includes(raw), false);
 });
 
-test("Copilot /contract requires the exact pre-MCP identity without auto-authorizing lookalike tools", async () => {
+test("Copilot /contract skill semantic identity cannot relabel a later ordinary prompt", async () => {
+  const { coordinator, lifecycle } = contractHarness();
+  const sessionId = "contract-skill-semantic-replay";
+  const invocation = { sessionId };
+  const timestamp = new Date(Date.now() + 60_000).toISOString();
+  await coordinator.hooks.onUserPromptSubmitted({
+    sessionId, workingDirectory: project, prompt: "/contract bounded descriptor",
+  }, invocation);
+  const skill = {
+    type: "skill.invoked", id: "semantic-contract-skill-A", parentId: null, timestamp,
+    data: {
+      sessionId,
+      name: "contract", pluginName: "agent-foundry", source: "plugin", trigger: "user-invoked",
+      model: "root-model", content: "PRIVATE SKILL A", path: "C:\\private\\skill-A.md",
+    },
+  } as const;
+  coordinator.observeEvent(skill);
+  coordinator.observeEvent({
+    type: "session.idle", id: "semantic-contract-idle-A", parentId: "semantic-contract-skill-A",
+    timestamp: new Date(Date.now() + 60_001).toISOString(), data: { aborted: false },
+  });
+  assert.equal(lifecycle.filter((event) => event.type === "root.started").length, 1);
+  assert.equal(lifecycle.find((event) => event.type === "run.finished" && event.kind === "root")?.outcome, "failed");
+
+  await coordinator.hooks.onUserPromptSubmitted({
+    sessionId, workingDirectory: project, prompt: "ordinary prompt that must stay ordinary",
+  }, invocation);
+  const replay = {
+    ...skill,
+    id: "semantic-contract-skill-B",
+    data: {
+      ...skill.data,
+      model: "drifted-model",
+      content: "PRIVATE SKILL B",
+      path: "C:\\private\\skill-B.md",
+    },
+  } as const;
+  coordinator.observeEvent(replay);
+  assert.equal(coordinator.hostEventDisposition(replay), "replay");
+  assert.equal(lifecycle.filter((event) => event.type === "root.started").length, 1,
+    "a late skill replay relabeled an ordinary prompt as /contract");
+  assert.equal(JSON.stringify(lifecycle).includes("PRIVATE SKILL"), false);
+});
+
+test("Copilot /contract provenance enrichment and drift cannot authenticate a later prompt", async (t) => {
+  const exact = {
+    name: "contract",
+    pluginName: "agent-foundry",
+    source: "plugin",
+    trigger: "user-invoked",
+  } as const;
+  const cases = [
+    { label: "missing-to-present", before: { name: "contract" }, after: exact },
+    { label: "present-to-missing", before: exact, after: { name: "contract" } },
+    { label: "plugin-drift", before: { ...exact, pluginName: "other-plugin" }, after: exact },
+    { label: "source-drift", before: { ...exact, source: "personal-copilot" }, after: exact },
+    { label: "trigger-drift", before: { ...exact, trigger: "agent-invoked" }, after: exact },
+    { label: "name-drift", before: { ...exact, name: "other-skill" }, after: exact },
+  ] as const;
+
+  for (const scenario of cases) await t.test(scenario.label, async () => {
+    const { coordinator, lifecycle } = contractHarness();
+    const sessionId = `contract-provenance-${scenario.label}`;
+    const invocation = { sessionId };
+    const timestampMs = Date.now() + 60_000;
+    const timestamp = new Date(timestampMs).toISOString();
+    const parentId = `${scenario.label}-shared-parent`;
+    await coordinator.hooks.onUserPromptSubmitted({
+      sessionId, workingDirectory: project, prompt: "ordinary prompt A",
+    }, invocation);
+    const first = {
+      type: "skill.invoked", id: `${scenario.label}-skill-A`, parentId, timestamp,
+      data: scenario.before,
+    } as const;
+    coordinator.observeEvent(first);
+    assert.equal(coordinator.hostEventDisposition(first), "claimed");
+    coordinator.observeEvent({
+      type: "session.idle", id: `${scenario.label}-idle-A`, parentId: first.id,
+      timestamp: new Date(timestampMs + 1).toISOString(), data: { aborted: false },
+    });
+    const rootsBeforeReplay = lifecycle.filter((event) => event.type === "root.started").length;
+
+    await coordinator.hooks.onUserPromptSubmitted({
+      sessionId, workingDirectory: project, prompt: "ordinary prompt B",
+    }, invocation);
+    const enrichedOrDrifted = {
+      type: "skill.invoked", id: `${scenario.label}-skill-B`, parentId, timestamp,
+      data: scenario.after,
+    } as const;
+    coordinator.observeEvent(enrichedOrDrifted);
+    assert.equal(coordinator.hostEventDisposition(enrichedOrDrifted), "unverified");
+    assert.equal(coordinator.lifecycleIdentityUnverified(), true);
+    assert.equal(lifecycle.filter((event) => event.type === "root.started").length, rootsBeforeReplay,
+      "optional provenance drift authenticated a fresh /contract root");
+  });
+});
+
+test("Copilot /contract exposes only its exact native custom tool and rejects lookalikes", async () => {
   const raw = JSON.stringify({
     name: "worker", description: "Bounded worker", prompt: "PRIVATE", tools: ["read"], task: "Review",
   });
   const descriptor = { agent_type: "explore", description: "Bounded worker", prompt: "PRIVATE CHILD" };
 
   const thirdParty = contractHarness();
-  const thirdPartySession = "contract-third-party-mcp";
+  const legacyHookName = ["onPre", "M", "cpToolCall"].join("");
+  assert.equal(legacyHookName in thirdParty.coordinator.hooks, false,
+    "the coordinator still exposed the removed transport hook");
+  const thirdPartySession = "contract-third-party-tool";
   await thirdParty.coordinator.hooks.onUserPromptSubmitted({
     sessionId: thirdPartySession, workingDirectory: project, prompt: "/contract lookalike",
   }, { sessionId: thirdPartySession });
@@ -421,18 +514,15 @@ test("Copilot /contract requires the exact pre-MCP identity without auto-authori
     data: { name: "contract", pluginName: "agent-foundry", source: "plugin", trigger: "user-invoked" },
   });
   const provisional = await thirdParty.coordinator.hooks.onPreToolUse(
-    contractInput(thirdPartySession, { command: "contract", args: raw }, "third-party-dangerous"),
+    contractInput(thirdPartySession, { definition: raw }, "third-party-dangerous"),
     { sessionId: thirdPartySession },
   );
-  assert.equal(provisional, undefined, "an identity-free hook auto-authorized a third-party tool");
-  await thirdParty.coordinator.hooks.onPreMcpToolCall(contractMcpInput(thirdPartySession, raw, {
-    serverName: "third-party", toolName: "dangerous", toolCallId: "third-party-call",
-  }), { sessionId: thirdPartySession });
+  assert.equal(provisional?.permissionDecision, "deny", "a lookalike tool was authorized");
   thirdParty.coordinator.observeEvent({
     type: "tool.execution_start", id: "third-party-start", parentId: "third-party-skill",
     data: {
-      toolName: "third-party-dangerous", mcpServerName: "third-party", mcpToolName: "dangerous",
-      toolCallId: "third-party-call", arguments: { command: "contract", args: raw },
+      toolName: "third-party-dangerous",
+      toolCallId: "third-party-call", arguments: { definition: raw },
     },
   });
   const thirdPartyTask = await thirdParty.coordinator.hooks.onPreToolUse(
@@ -446,7 +536,7 @@ test("Copilot /contract requires the exact pre-MCP identity without auto-authori
   assert.equal(thirdParty.lifecycle.find((event) => event.type === "run.finished" && event.kind === "root")?.outcome, "failed");
 
   const mismatch = contractHarness();
-  const mismatchSession = "contract-pre-mcp-id-mismatch";
+  const mismatchSession = "contract-native-id-mismatch";
   await mismatch.coordinator.hooks.onUserPromptSubmitted({
     sessionId: mismatchSession, workingDirectory: project, prompt: "/contract mismatch",
   }, { sessionId: mismatchSession });
@@ -454,18 +544,17 @@ test("Copilot /contract requires the exact pre-MCP identity without auto-authori
     type: "skill.invoked", id: "mismatch-skill",
     data: { name: "contract", pluginName: "agent-foundry", source: "plugin", trigger: "user-invoked" },
   });
-  assert.equal(await mismatch.coordinator.hooks.onPreToolUse(
-    contractInput(mismatchSession, { command: "contract", args: raw }, "opaque-control-alias"),
+  assert.equal((await mismatch.coordinator.hooks.onPreToolUse(
+    contractInput(mismatchSession, { definition: raw }, "harbor_contract"),
     { sessionId: mismatchSession },
-  ), undefined);
-  const authenticated = contractMcpInput(mismatchSession, raw, { toolCallId: "authenticated-call" });
-  await mismatch.coordinator.hooks.onPreMcpToolCall(authenticated, { sessionId: mismatchSession });
-  await mismatch.coordinator.hooks.onPreMcpToolCall(authenticated, { sessionId: mismatchSession });
+  ))?.permissionDecision, "allow");
+  const authenticated = contractToolInvocation(mismatchSession, raw, { toolCallId: "authenticated-call" });
+  await mismatch.coordinator.contractToolSucceeded(authenticated, descriptor);
   mismatch.coordinator.observeEvent({
-    type: "tool.execution_start", id: "mismatch-control-start", parentId: "mismatch-skill",
+    type: "tool.execution_start", id: "mismatch-contract-start", parentId: "mismatch-skill",
     data: {
-      toolName: "opaque-control-alias", mcpServerName: "agent-harbor", mcpToolName: "control",
-      toolCallId: "different-execution-call", arguments: { command: "contract", args: raw },
+      toolName: "harbor_contract",
+      toolCallId: "different-execution-call", arguments: { definition: raw },
     },
   });
   const mismatchTask = await mismatch.coordinator.hooks.onPreToolUse(
@@ -475,10 +564,135 @@ test("Copilot /contract requires the exact pre-MCP identity without auto-authori
   assert.equal(mismatch.admissions.filter(({ type }) => type === "child").length, 0);
 });
 
+test("Copilot /contract closes native arguments and trusts only the authenticated handler descriptor", async (t) => {
+  const raw = JSON.stringify({ name: "worker", tools: ["read"], task: "Review safely" });
+  const descriptor = { agent_type: "explore", description: "Bounded worker", prompt: "PRIVATE CHILD" };
+  const reserve = async (coordinator: ReturnType<typeof createCopilotCoordinatorGuard>, sessionId: string) => {
+    await coordinator.hooks.onUserPromptSubmitted({
+      sessionId, workingDirectory: project, prompt: `/contract ${raw}`,
+    }, { sessionId });
+    coordinator.observeEvent({
+      type: "skill.invoked", id: `${sessionId}-skill`,
+      data: { name: "contract", pluginName: "agent-foundry", source: "plugin", trigger: "user-invoked" },
+    });
+  };
+
+  for (const [label, toolArgs] of [
+    ["extra", { definition: raw, extra: true }],
+    ["wrong-type", { definition: 42 }],
+    ["serialized", JSON.stringify({ definition: raw })],
+  ] as const) await t.test(`closed-pretool-${label}`, async () => {
+    const harness = contractHarness();
+    const sessionId = `closed-pretool-${label}`;
+    await reserve(harness.coordinator, sessionId);
+    const denied = await harness.coordinator.hooks.onPreToolUse(
+      contractInput(sessionId, toolArgs, "harbor_contract"), { sessionId },
+    );
+    assert.equal(denied?.permissionDecision, "deny");
+    assert.match(denied?.permissionDecisionReason ?? "", /exactly \{definition:string\}/u);
+    assert.equal(harness.admissions.filter(({ type }) => type === "child").length, 0);
+  });
+
+  await t.test("closed-handler-invocation", async () => {
+    const harness = contractHarness();
+    const sessionId = "closed-handler-invocation";
+    await reserve(harness.coordinator, sessionId);
+    assert.equal((await harness.coordinator.hooks.onPreToolUse(
+      contractInput(sessionId, { definition: raw }, "harbor_contract"), { sessionId },
+    ))?.permissionDecision, "allow");
+    await assert.rejects(harness.coordinator.contractToolSucceeded({
+      ...contractToolInvocation(sessionId, raw),
+      unexpected: "must fail closed",
+    } as any, descriptor), /unauthenticated/u);
+    const denied = await harness.coordinator.hooks.onPreToolUse(
+      contractInput(sessionId, descriptor), { sessionId },
+    );
+    assert.equal(denied?.permissionDecision, "deny");
+    assert.equal(harness.admissions.filter(({ type }) => type === "child").length, 0);
+  });
+
+  await t.test("sdk-trace-context", async () => {
+    const harness = contractHarness();
+    const sessionId = "contract-sdk-trace-context";
+    await reserve(harness.coordinator, sessionId);
+    assert.equal((await harness.coordinator.hooks.onPreToolUse(
+      contractInput(sessionId, { definition: raw }, "harbor_contract"), { sessionId },
+    ))?.permissionDecision, "allow");
+    await harness.coordinator.contractToolSucceeded({
+      ...contractToolInvocation(sessionId, raw),
+      traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      tracestate: "vendor=value",
+    }, descriptor);
+    assert.equal((await harness.coordinator.hooks.onPreToolUse(
+      contractInput(sessionId, descriptor), { sessionId },
+    ))?.permissionDecision, "allow");
+    assert.equal(harness.admissions.filter(({ type }) => type === "child").length, 1);
+  });
+
+  await t.test("native-completion-cannot-authenticate", async () => {
+    const harness = contractHarness();
+    const sessionId = "native-completion-cannot-authenticate";
+    await authenticateContractTool(harness.coordinator, sessionId, raw);
+    harness.coordinator.observeEvent({
+      type: "tool.execution_complete", id: `${sessionId}-contract-complete`,
+      parentId: `${sessionId}-contract-start`,
+      data: {
+        toolCallId: `${sessionId}-contract-call`, success: true,
+        result: { descriptor, privateResult: "MUST NOT BE TRUSTED" },
+      },
+    });
+    const denied = await harness.coordinator.hooks.onPreToolUse(
+      contractInput(sessionId, descriptor), { sessionId },
+    );
+    assert.equal(denied?.permissionDecision, "deny");
+    assert.match(denied?.permissionDecisionReason ?? "", /authenticates one exact descriptor/u);
+    assert.equal(harness.admissions.filter(({ type }) => type === "child").length, 0);
+  });
+
+  await t.test("native-start-before-pretool-cannot-drift", async () => {
+    const harness = contractHarness();
+    const sessionId = "native-start-before-pretool-drift";
+    await reserve(harness.coordinator, sessionId);
+    const drifted = contractToolInvocation(sessionId, `${raw} `);
+    harness.coordinator.observeEvent({
+      type: "tool.execution_start", id: `${sessionId}-contract-start`, parentId: `${sessionId}-skill`,
+      data: {
+        toolName: drifted.toolName,
+        toolCallId: drifted.toolCallId,
+        arguments: drifted.arguments,
+      },
+    });
+    assert.equal((await harness.coordinator.hooks.onPreToolUse(
+      contractInput(sessionId, { definition: raw }, "harbor_contract"), { sessionId },
+    ))?.permissionDecision, "allow");
+    await assert.rejects(harness.coordinator.contractToolSucceeded(
+      contractToolInvocation(sessionId, raw), descriptor,
+    ), /exactly one/u);
+    const denied = await harness.coordinator.hooks.onPreToolUse(
+      contractInput(sessionId, descriptor), { sessionId },
+    );
+    assert.equal(denied?.permissionDecision, "deny");
+    assert.equal(harness.admissions.filter(({ type }) => type === "child").length, 0);
+  });
+
+  await t.test("handler-before-pretool", async () => {
+    const harness = contractHarness();
+    const sessionId = "handler-before-pretool";
+    await reserve(harness.coordinator, sessionId);
+    await assert.rejects(harness.coordinator.contractToolSucceeded(
+      contractToolInvocation(sessionId, raw), descriptor,
+    ), /pre-tool/u);
+    const denied = await harness.coordinator.hooks.onPreToolUse(
+      contractInput(sessionId, { definition: raw }, "harbor_contract"), { sessionId },
+    );
+    assert.equal(denied?.permissionDecision, "deny");
+  });
+});
+
 test("Copilot /contract relabels the same-prompt selected root without losing its prior telemetry", async () => {
   const sessionId = "selected-root-contract";
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [{ id: crafter, userInvocable: true, model: "profile-model" }];
+  const agents = [fixedCopilotIdentity("crafter", { model: "profile-model" })];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const admissions: any[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
@@ -527,25 +741,27 @@ test("Copilot /contract relabels the same-prompt selected root without losing it
   assert.equal(lifecycle.filter((event) => event.type === "root.started").length, 1);
   assert.equal(admissions.filter(({ type }) => type === "root").length, 0,
     "relabeling the selected root reserved a duplicate runtime root");
-  const control = contractInput(sessionId, { command: "contract", args: raw }, "any-mcp-flattening");
-  await coordinator.hooks.onPreMcpToolCall(contractMcpInput(sessionId, raw, {
-    toolCallId: "selected-control-call",
-  }), { sessionId });
-  assert.equal(await coordinator.hooks.onPreToolUse(control, { sessionId }), undefined);
-  coordinator.observeEvent({
-    type: "tool.execution_start", id: "selected-control-start", parentId: "selected-contract-skill",
-    data: {
-      toolName: "flattened-control", mcpServerName: "agent-harbor", mcpToolName: "control",
-      toolCallId: "selected-control-call", arguments: { command: "contract", args: raw },
-    },
+  const tool = contractInput(sessionId, { definition: raw }, "harbor_contract");
+  assert.equal((await coordinator.hooks.onPreToolUse(tool, { sessionId }))?.permissionDecision, "allow");
+  const nativeInvocation = contractToolInvocation(sessionId, raw, {
+    toolCallId: "selected-contract-call",
   });
   coordinator.observeEvent({
-    type: "tool.execution_complete", id: "selected-control-complete", parentId: "selected-control-start",
-    data: { toolCallId: "selected-control-call", success: true, result: { content: JSON.stringify(descriptor), structuredContent: descriptor } },
+    type: "tool.execution_start", id: "selected-contract-start", parentId: "selected-contract-skill",
+    data: {
+      toolName: nativeInvocation.toolName,
+      toolCallId: nativeInvocation.toolCallId,
+      arguments: nativeInvocation.arguments,
+    },
+  });
+  await coordinator.contractToolSucceeded(nativeInvocation, descriptor);
+  coordinator.observeEvent({
+    type: "tool.execution_complete", id: "selected-contract-complete", parentId: "selected-contract-start",
+    data: { toolCallId: "selected-contract-call", success: true },
   });
   assert.equal((await coordinator.hooks.onPreToolUse(contractInput(sessionId, descriptor), { sessionId }))?.permissionDecision, "allow");
   coordinator.observeEvent({
-    type: "tool.execution_start", id: "selected-task-start", parentId: "selected-control-complete",
+    type: "tool.execution_start", id: "selected-task-start", parentId: "selected-contract-complete",
     data: { toolName: "task", toolCallId: "selected-task-call" },
   });
   coordinator.observeEvent({
@@ -578,7 +794,7 @@ test("Copilot /contract relabels the same-prompt selected root without losing it
 
 test("Copilot hides ambiguous inline /contract details without reserving a wrapper before exact skill provenance", async () => {
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [{ id: crafter, userInvocable: true }];
+  const agents = [fixedCopilotIdentity("crafter")];
   const lifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const admissions: any[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
@@ -606,7 +822,7 @@ test("Copilot hides ambiguous inline /contract details without reserving a wrapp
 
 test("Copilot selected /contract skill activity closes abandoned wrappers and child admission still fails before model start", async () => {
   const crafter = copilotFixedAgentIds.get("crafter")!;
-  const agents = [{ id: crafter, userInvocable: true, model: "profile-model" }];
+  const agents = [fixedCopilotIdentity("crafter", { model: "profile-model" })];
   const abandonedLifecycle: CopilotCoordinatorLifecycleEvent[] = [];
   const abandoned = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
     getCurrent: async () => ({ agent: agents[0] }),
@@ -658,45 +874,37 @@ test("Copilot selected /contract skill activity closes abandoned wrappers and ch
     "selected-root relabel attempted a duplicate root admission");
   admission.observeEvent({
     type: "session.idle", id: "selected-child-admission-idle",
-    parentId: `${admissionSession}-control-complete`, data: { aborted: false },
+    parentId: `${admissionSession}-contract-complete`, data: { aborted: false },
   });
   assert.equal(admissionLifecycle.find((event) =>
     event.type === "run.finished" && event.kind === "root")?.outcome, "failed");
 });
 
-test("Copilot /contract rejects malformed or conflicting authoritative structured descriptors", async () => {
+test("Copilot /contract rejects malformed native-handler descriptors", async () => {
   const raw = JSON.stringify({ name: "worker", description: "x", prompt: "PRIVATE", tools: ["read"], task: "review" });
   const descriptor = { agent_type: "explore", description: "Validated", prompt: "PRIVATE CHILD" };
-  const cases: Array<{ label: string; result: unknown }> = [
-    { label: "structured-string", result: { content: JSON.stringify(descriptor), structuredContent: "corrupt" } },
-    { label: "structured-array", result: { content: JSON.stringify(descriptor), structuredContent: [descriptor] } },
-    { label: "structured-null", result: { content: JSON.stringify(descriptor), structuredContent: null } },
-    {
-      label: "structured-text-conflict",
-      result: {
-        content: JSON.stringify({ ...descriptor, prompt: "ALTERED PRIVATE CHILD" }),
-        structuredContent: descriptor,
-      },
-    },
+  const cases: Array<{ label: string; descriptor: unknown }> = [
+    { label: "string", descriptor: "corrupt" },
+    { label: "array", descriptor: [descriptor] },
+    { label: "null", descriptor: null },
+    { label: "extra-field", descriptor: { ...descriptor, private_extra: "must fail closed" } },
+    { label: "missing-prompt", descriptor: { agent_type: "explore", description: "missing" } },
   ];
   for (const candidate of cases) {
     const harness = contractHarness();
     const sessionId = `descriptor-${candidate.label}`;
-    await authenticateContractControl(harness.coordinator, sessionId, raw);
-    harness.coordinator.observeEvent({
-      type: "tool.execution_complete", id: `${sessionId}-control-complete`,
-      parentId: `${sessionId}-control-start`,
-      data: {
-        toolCallId: `${sessionId}-control-call`, success: true, result: candidate.result,
-      },
-    });
+    await authenticateContractTool(harness.coordinator, sessionId, raw);
+    await assert.rejects(harness.coordinator.contractToolSucceeded(
+      contractToolInvocation(sessionId, raw),
+      candidate.descriptor as typeof descriptor,
+    ), /exact descriptor/u, candidate.label);
     const denied = await harness.coordinator.hooks.onPreToolUse(
       contractInput(sessionId, descriptor), { sessionId },
     );
     assert.equal(denied?.permissionDecision, "deny", candidate.label);
     assert.equal(harness.admissions.filter(({ type }) => type === "child").length, 0, candidate.label);
     harness.coordinator.observeEvent({
-      type: "session.idle", id: `${sessionId}-idle`, parentId: `${sessionId}-control-complete`,
+      type: "session.idle", id: `${sessionId}-idle`, parentId: `${sessionId}-contract-start`,
       data: { aborted: false },
     });
     assert.equal(harness.lifecycle.find((event) =>
@@ -704,49 +912,49 @@ test("Copilot /contract rejects malformed or conflicting authoritative structure
   }
 });
 
-test("Copilot /contract binds control and task hooks to the prompt project", async () => {
+test("Copilot /contract binds its native tool, handler, and task to the prompt session and project", async () => {
   const otherProject = `${project}-other`;
   const raw = JSON.stringify({ name: "worker", description: "x", prompt: "PRIVATE", tools: ["read"], task: "review" });
   const descriptor = { agent_type: "explore", description: "Validated", prompt: "PRIVATE CHILD" };
 
-  const control = contractHarness();
-  const controlSession = "contract-cross-project-control";
-  await control.coordinator.hooks.onUserPromptSubmitted({
-    sessionId: controlSession, workingDirectory: project, prompt: `/contract ${raw}`,
-  }, { sessionId: controlSession });
-  control.coordinator.observeEvent({
-    type: "skill.invoked", id: "cross-project-control-skill",
+  const tool = contractHarness();
+  const toolSession = "contract-cross-project-tool";
+  await tool.coordinator.hooks.onUserPromptSubmitted({
+    sessionId: toolSession, workingDirectory: project, prompt: `/contract ${raw}`,
+  }, { sessionId: toolSession });
+  tool.coordinator.observeEvent({
+    type: "skill.invoked", id: "cross-project-tool-skill",
     data: { name: "contract", pluginName: "agent-foundry", source: "plugin", trigger: "user-invoked" },
   });
-  const crossControl = await control.coordinator.hooks.onPreToolUse({
-    ...contractInput(controlSession, { command: "contract", args: raw }, "opaque-control"),
+  const crossTool = await tool.coordinator.hooks.onPreToolUse({
+    ...contractInput(toolSession, { definition: raw }, "harbor_contract"),
     workingDirectory: otherProject,
-  }, { sessionId: controlSession });
-  assert.equal(crossControl?.permissionDecision, "deny");
-  assert.match(crossControl?.permissionDecisionReason ?? "", /working directory changed/u);
-  assert.equal(control.admissions.filter(({ type }) => type === "child").length, 0);
+  }, { sessionId: toolSession });
+  assert.equal(crossTool?.permissionDecision, "deny");
+  assert.match(crossTool?.permissionDecisionReason ?? "", /working directory changed/u);
+  assert.equal(tool.admissions.filter(({ type }) => type === "child").length, 0);
 
-  const mcp = contractHarness();
-  const mcpSession = "contract-cross-project-mcp";
-  await mcp.coordinator.hooks.onUserPromptSubmitted({
-    sessionId: mcpSession, workingDirectory: project, prompt: `/contract ${raw}`,
-  }, { sessionId: mcpSession });
-  mcp.coordinator.observeEvent({
-    type: "skill.invoked", id: "cross-project-mcp-skill",
+  const handler = contractHarness();
+  const handlerSession = "contract-cross-session-handler";
+  await handler.coordinator.hooks.onUserPromptSubmitted({
+    sessionId: handlerSession, workingDirectory: project, prompt: `/contract ${raw}`,
+  }, { sessionId: handlerSession });
+  handler.coordinator.observeEvent({
+    type: "skill.invoked", id: "cross-session-handler-skill",
     data: { name: "contract", pluginName: "agent-foundry", source: "plugin", trigger: "user-invoked" },
   });
-  assert.equal(await mcp.coordinator.hooks.onPreToolUse(
-    contractInput(mcpSession, { command: "contract", args: raw }, "opaque-control"), { sessionId: mcpSession },
-  ), undefined);
-  await mcp.coordinator.hooks.onPreMcpToolCall({
-    ...contractMcpInput(mcpSession, raw), workingDirectory: otherProject,
-  }, { sessionId: mcpSession });
-  const afterCrossMcp = await mcp.coordinator.hooks.onPreToolUse(
-    contractInput(mcpSession, descriptor), { sessionId: mcpSession },
+  assert.equal((await handler.coordinator.hooks.onPreToolUse(
+    contractInput(handlerSession, { definition: raw }, "harbor_contract"), { sessionId: handlerSession },
+  ))?.permissionDecision, "allow");
+  await assert.rejects(handler.coordinator.contractToolSucceeded(
+    contractToolInvocation("different-session", raw), descriptor,
+  ), /unauthenticated/u);
+  const afterCrossSession = await handler.coordinator.hooks.onPreToolUse(
+    contractInput(handlerSession, descriptor), { sessionId: handlerSession },
   );
-  assert.equal(afterCrossMcp?.permissionDecision, "deny");
-  assert.match(afterCrossMcp?.permissionDecisionReason ?? "", /working directory changed/u);
-  assert.equal(mcp.admissions.filter(({ type }) => type === "child").length, 0);
+  assert.equal(afterCrossSession?.permissionDecision, "deny");
+  assert.match(afterCrossSession?.permissionDecisionReason ?? "", /authenticates one exact descriptor/u);
+  assert.equal(handler.admissions.filter(({ type }) => type === "child").length, 0);
 
   const task = contractHarness();
   const taskSession = "contract-cross-project-task";
@@ -759,7 +967,7 @@ test("Copilot /contract binds control and task hooks to the prompt project", asy
   assert.equal(task.admissions.filter(({ type }) => type === "child").length, 0);
   task.coordinator.observeEvent({
     type: "session.idle", id: "cross-project-task-idle",
-    parentId: `${taskSession}-control-complete`, data: { aborted: false },
+    parentId: `${taskSession}-contract-complete`, data: { aborted: false },
   });
   assert.equal(task.lifecycle.find((event) =>
     event.type === "run.finished" && event.kind === "root")?.outcome, "failed");
@@ -781,7 +989,7 @@ test("Copilot /contract fails closed on duplicate skills, child admission failur
     });
   }
   const duplicateDecision = await duplicate.coordinator.hooks.onPreToolUse(
-    contractInput(duplicateSession, { command: "contract", args: raw }, "opaque-control"),
+    contractInput(duplicateSession, { definition: raw }, "harbor_contract"),
     { sessionId: duplicateSession },
   );
   assert.equal(duplicateDecision?.permissionDecision, "deny");
@@ -804,7 +1012,7 @@ test("Copilot /contract fails closed on duplicate skills, child admission failur
   assert.equal(admission.lifecycle.filter((event) => event.type === "child.started").length, 0);
   admission.coordinator.observeEvent({
     type: "session.idle", id: "contract-child-admission-idle",
-    parentId: `${admissionSession}-control-complete`, data: { aborted: false },
+    parentId: `${admissionSession}-contract-complete`, data: { aborted: false },
   });
   assert.equal(admission.lifecycle.find((event) =>
     event.type === "run.finished" && event.kind === "root")?.outcome, "failed");
@@ -818,7 +1026,7 @@ test("Copilot /contract fails closed on duplicate skills, child admission failur
     ))?.permissionDecision, "allow");
     native.coordinator.observeEvent({
       type: "tool.execution_start", id: `${sessionId}-task-start`,
-      parentId: `${sessionId}-control-complete`, data: { toolName: "task", toolCallId: `${sessionId}-task-call` },
+      parentId: `${sessionId}-contract-complete`, data: { toolName: "task", toolCallId: `${sessionId}-task-call` },
     });
     let taskCompleteParentId = `${sessionId}-task-start`;
     if (variant === "prestart-drift") {
@@ -908,7 +1116,7 @@ test("Copilot /contract fails closed on duplicate skills, child admission failur
   ))?.permissionDecision, "allow");
   unrelated.coordinator.observeEvent({
     type: "tool.execution_start", id: "contract-terminal-only-task-start",
-    parentId: `${unrelatedSession}-control-complete`,
+    parentId: `${unrelatedSession}-contract-complete`,
     data: { toolName: "task", toolCallId: `${unrelatedSession}-task-call` },
   });
   unrelated.coordinator.observeEvent({
@@ -939,6 +1147,85 @@ test("Copilot /contract fails closed on duplicate skills, child admission failur
     event.type === "run.finished" && event.kind === "root")?.outcome, "completed");
 });
 
+test("Copilot /contract fails exactly once after critical usage identity becomes ambiguous", async () => {
+  const raw = JSON.stringify({
+    name: "ambiguous-reviewer", description: "Bounded reviewer", prompt: "PRIVATE RAW AMBIGUITY",
+    tools: ["read"], task: "Review bounded target",
+  });
+  const descriptor = {
+    agent_type: "explore", description: "Bounded reviewer", prompt: "PRIVATE CHILD AMBIGUITY",
+  };
+  const { coordinator, lifecycle } = contractHarness();
+  const sessionId = "contract-critical-usage-ambiguity";
+  const invocation = { sessionId };
+  await beginContract(coordinator, sessionId, raw, descriptor);
+  const task = contractInput(sessionId, descriptor);
+  assert.equal((await coordinator.hooks.onPreToolUse(task, invocation))?.permissionDecision, "allow");
+  coordinator.observeEvent({
+    type: "tool.execution_start", id: "ambiguity-task-start",
+    parentId: `${sessionId}-contract-complete`,
+    data: { toolName: "task", toolCallId: "ambiguity-task-call" },
+  });
+  coordinator.observeEvent({
+    type: "subagent.started", id: "ambiguity-child-start", parentId: "ambiguity-task-start",
+    agentId: "ambiguity-native-child",
+    data: { agentName: "explore", toolCallId: "ambiguity-task-call", model: "child-model" },
+  });
+  const timestamp = new Date(Date.now() + 60_000).toISOString();
+  const anonymousUsage = {
+    type: "assistant.usage", parentId: "ambiguity-child-start", timestamp,
+    agentId: "ambiguity-native-child",
+    data: {
+      parentToolCallId: "ambiguity-task-call", model: "child-model",
+      inputTokens: 5, outputTokens: 1,
+    },
+  } as const;
+  coordinator.observeEvent(anonymousUsage);
+  const identifiedDrift = {
+    ...anonymousUsage,
+    id: "ambiguity-identified-usage",
+    data: {
+      ...anonymousUsage.data,
+      serviceRequestId: "ambiguity-service-call", inputTokens: 999, outputTokens: 999,
+    },
+  } as const;
+  coordinator.observeEvent(identifiedDrift);
+  assert.equal(coordinator.hostEventDisposition(identifiedDrift), "unverified");
+  assert.equal(coordinator.lifecycleIdentityUnverified(), true);
+
+  coordinator.observeEvent({
+    type: "subagent.completed", id: "ambiguity-child-complete", parentId: "ambiguity-child-start",
+    agentId: "ambiguity-native-child",
+    data: { agentName: "explore", toolCallId: "ambiguity-task-call", model: "child-model" },
+  });
+  coordinator.observeEvent({
+    type: "tool.execution_complete", id: "ambiguity-task-complete", parentId: "ambiguity-child-complete",
+    data: { toolCallId: "ambiguity-task-call", toolDescription: { name: "task" }, success: true },
+  });
+  await coordinator.hooks.onPostToolUse({
+    ...task, toolResult: "PRIVATE RESULT AMBIGUITY",
+  }, invocation);
+  coordinator.observeEvent({
+    type: "session.idle", id: "ambiguity-root-idle", parentId: "ambiguity-task-complete",
+    data: { aborted: false },
+  });
+
+  const finishes = lifecycle.filter((event) => event.type === "run.finished");
+  assert.deepEqual(finishes.map((event) => [event.kind, event.outcome]), [
+    ["child", "failed"],
+    ["root", "failed"],
+  ]);
+  assert.equal(lifecycle.filter((event) => event.type === "child.started").length, 1);
+  assert.equal(lifecycle.filter((event) => event.type === "run.usage" && event.usage.totalTokens === 6).length, 1);
+  assert.equal(lifecycle.some((event) => event.type === "run.usage" && event.usage.inputTokens === 999), false);
+  assert.equal(lifecycle.filter((event) => event.type === "run.usage" && event.attributionUnverified).length, 1);
+  for (const secret of [
+    "PRIVATE RAW AMBIGUITY", "PRIVATE CHILD AMBIGUITY", "PRIVATE RESULT AMBIGUITY",
+  ]) {
+    assert.equal(JSON.stringify(lifecycle).includes(secret), false);
+  }
+});
+
 test("Copilot /contract buffers a successful post-tool hook until the exact native child terminal", async () => {
   const raw = JSON.stringify({ name: "worker", description: "x", prompt: "PRIVATE", tools: ["read"], task: "review" });
   const descriptor = { agent_type: "explore", description: "Validated", prompt: "PRIVATE CHILD" };
@@ -951,7 +1238,7 @@ test("Copilot /contract buffers a successful post-tool hook until the exact nati
     ))?.permissionDecision, "allow");
     harness.coordinator.observeEvent({
       type: "tool.execution_start", id: `${sessionId}-task-start`,
-      parentId: `${sessionId}-control-complete`,
+      parentId: `${sessionId}-contract-complete`,
       data: { toolName: "task", toolCallId: `${sessionId}-task-call` },
     });
     harness.coordinator.observeEvent({
@@ -997,7 +1284,7 @@ test("Copilot /contract buffers a successful post-tool hook until the exact nati
     ))?.permissionDecision, "allow");
     harness.coordinator.observeEvent({
       type: "tool.execution_start", id: `${sessionId}-task-start`,
-      parentId: `${sessionId}-control-complete`,
+      parentId: `${sessionId}-contract-complete`,
       data: { toolName: "task", toolCallId: `${sessionId}-task-call` },
     });
     harness.coordinator.observeEvent({
@@ -1044,7 +1331,7 @@ test("Copilot /contract buffers a successful post-tool hook until the exact nati
     ))?.permissionDecision, "allow");
     harness.coordinator.observeEvent({
       type: "tool.execution_start", id: `${sessionId}-task-start`,
-      parentId: `${sessionId}-control-complete`,
+      parentId: `${sessionId}-contract-complete`,
       data: { toolName: "task", toolCallId: `${sessionId}-task-call` },
     });
     harness.coordinator.observeEvent({
@@ -1105,7 +1392,7 @@ test("Copilot /contract keeps native child terminal outcomes single and failure-
     ))?.permissionDecision, "allow");
     harness.coordinator.observeEvent({
       type: "tool.execution_start", id: `${sessionId}-task-start`,
-      parentId: `${sessionId}-control-complete`,
+      parentId: `${sessionId}-contract-complete`,
       data: { toolName: "task", toolCallId: `${sessionId}-task-call` },
     });
     harness.coordinator.observeEvent({
@@ -1151,10 +1438,16 @@ test("Copilot /contract rejects false provenance, altered/second tasks, invalid 
   await unrelated.coordinator.hooks.onUserPromptSubmitted({
     sessionId: unrelatedSession, workingDirectory: project, prompt: "ordinary work",
   }, { sessionId: unrelatedSession });
-  for (const data of [
+  const unrelatedAt = Date.now() + 1_000;
+  for (const [index, data] of [
     { name: "contract", pluginName: "other-plugin", source: "plugin", trigger: "user-invoked" },
     { name: "contract", pluginName: "agent-foundry", source: "personal-copilot", trigger: "user-invoked" },
-  ]) unrelated.coordinator.observeEvent({ type: "skill.invoked", data });
+  ].entries()) unrelated.coordinator.observeEvent({
+    type: "skill.invoked",
+    id: `third-party-contract-skill-${index}`,
+    timestamp: new Date(unrelatedAt + index).toISOString(),
+    data,
+  });
   assert.equal(unrelated.lifecycle.length, 0);
   assert.equal(await unrelated.coordinator.hooks.onPreToolUse(
     contractInput(unrelatedSession, { agent_type: "third-party", prompt: "untouched" }), { sessionId: unrelatedSession },
@@ -1197,23 +1490,28 @@ test("Copilot /contract rejects false provenance, altered/second tasks, invalid 
     type: "skill.invoked", id: "invalid-skill",
     data: { name: "contract", pluginName: "agent-foundry", source: "plugin", trigger: "user-invoked" },
   });
-  const control = contractInput(invalidSession, { command: "contract", args: raw }, "any-flattening");
-  assert.equal(await invalid.coordinator.hooks.onPreToolUse(control, { sessionId: invalidSession }), undefined);
-  await invalid.coordinator.hooks.onPreMcpToolCall(contractMcpInput(invalidSession, raw), { sessionId: invalidSession });
+  const tool = contractInput(invalidSession, { definition: raw }, "harbor_contract");
+  assert.equal((await invalid.coordinator.hooks.onPreToolUse(tool, { sessionId: invalidSession }))?.permissionDecision, "allow");
+  const failedInvocation = contractToolInvocation(invalidSession, raw);
   invalid.coordinator.observeEvent({
-    type: "tool.execution_start", id: "invalid-control-start", parentId: "invalid-skill",
-    data: { toolName: "control", mcpServerName: "agent-harbor", mcpToolName: "control", toolCallId: "invalid-control", arguments: { command: "contract", args: raw } },
+    type: "tool.execution_start", id: "invalid-contract-start", parentId: "invalid-skill",
+    data: {
+      toolName: failedInvocation.toolName,
+      toolCallId: failedInvocation.toolCallId,
+      arguments: failedInvocation.arguments,
+    },
   });
+  await invalid.coordinator.contractToolFailed(failedInvocation);
   invalid.coordinator.observeEvent({
-    type: "tool.execution_complete", id: "invalid-control-complete", parentId: "invalid-control-start",
-    data: { toolCallId: "invalid-control", success: false, result: { content: "PRIVATE ERROR" } },
+    type: "tool.execution_complete", id: "invalid-contract-complete", parentId: "invalid-contract-start",
+    data: { toolCallId: failedInvocation.toolCallId, success: false, result: "PRIVATE ERROR" },
   });
   const deniedInvalid = await invalid.coordinator.hooks.onPreToolUse(
     contractInput(invalidSession, { agent_type: "explore", description: "x", prompt: "y" }), { sessionId: invalidSession },
   );
   assert.equal(deniedInvalid?.permissionDecision, "deny");
   assert.equal(invalid.admissions.filter(({ type }) => type === "child").length, 0);
-  invalid.coordinator.observeEvent({ type: "session.idle", id: "invalid-idle", parentId: "invalid-control-complete", data: { aborted: false } });
+  invalid.coordinator.observeEvent({ type: "session.idle", id: "invalid-idle", parentId: "invalid-contract-complete", data: { aborted: false } });
   assert.equal(invalid.lifecycle.find((event) => event.type === "run.finished" && event.kind === "root")?.outcome, "failed");
   assert.equal(JSON.stringify(invalid.lifecycle).includes("PRIVATE ERROR"), false);
 
@@ -1227,7 +1525,7 @@ test("Copilot /contract rejects false provenance, altered/second tasks, invalid 
     data: { name: "contract", pluginName: "agent-foundry", source: "plugin", trigger: "user-invoked" },
   });
   const capacityDecision = await capacity.coordinator.hooks.onPreToolUse(
-    contractInput(capacitySession, { command: "contract", args: raw }, "unknown-flattening"), { sessionId: capacitySession },
+    contractInput(capacitySession, { definition: raw }, "harbor_contract"), { sessionId: capacitySession },
   );
   assert.equal(capacityDecision?.permissionDecision, "deny");
   assert.match(capacityDecision?.permissionDecisionReason ?? "", /32 roots/u);
@@ -1256,7 +1554,7 @@ test("Copilot /contract rejects false provenance, altered/second tasks, invalid 
   assert.match(alteredDecision?.permissionDecisionReason ?? "", /unchanged/u);
   assert.equal(altered.admissions.filter(({ type }) => type === "child").length, 0);
   altered.coordinator.observeEvent({
-    type: "session.idle", id: "altered-idle", parentId: `${alteredSession}-control-complete`, data: { aborted: false },
+    type: "session.idle", id: "altered-idle", parentId: `${alteredSession}-contract-complete`, data: { aborted: false },
   });
   assert.equal(altered.lifecycle.find((event) => event.type === "run.finished" && event.kind === "root")?.outcome, "failed");
 
@@ -1264,33 +1562,24 @@ test("Copilot /contract rejects false provenance, altered/second tasks, invalid 
   const missingChildSession = "contract-without-task";
   await beginContract(missingChild.coordinator, missingChildSession, raw, descriptor);
   missingChild.coordinator.observeEvent({
-    type: "session.idle", id: "missing-child-idle", parentId: `${missingChildSession}-control-complete`, data: { aborted: false },
+    type: "session.idle", id: "missing-child-idle", parentId: `${missingChildSession}-contract-complete`, data: { aborted: false },
   });
   assert.equal(missingChild.admissions.filter(({ type }) => type === "child").length, 0);
   assert.equal(missingChild.lifecycle.find((event) => event.type === "run.finished" && event.kind === "root")?.outcome, "failed",
-    "a successful control with no mandatory child was reported completed");
+    "a successful contract tool with no mandatory child was reported completed");
 
-  const secondControl = contractHarness();
-  const secondControlSession = "second-contract-control";
-  await beginContract(secondControl.coordinator, secondControlSession, raw, descriptor);
-  await secondControl.coordinator.hooks.onPreMcpToolCall(contractMcpInput(secondControlSession, raw, {
-    toolCallId: "different-control-call",
-  }), { sessionId: secondControlSession });
-  secondControl.coordinator.observeEvent({
-    type: "tool.execution_start", id: "second-control-start", parentId: `${secondControlSession}-control-complete`,
-    data: {
-      toolName: "different-flattening",
-      mcpServerName: "agent-harbor",
-      mcpToolName: "control",
-      toolCallId: "different-control-call",
-      arguments: { command: "contract", args: raw },
-    },
-  });
-  const afterSecondControl = await secondControl.coordinator.hooks.onPreToolUse(
-    contractInput(secondControlSession, descriptor), { sessionId: secondControlSession },
+  const secondTool = contractHarness();
+  const secondToolSession = "second-contract-tool";
+  await beginContract(secondTool.coordinator, secondToolSession, raw, descriptor);
+  await assert.rejects(secondTool.coordinator.contractToolSucceeded(
+    contractToolInvocation(secondToolSession, raw, { toolCallId: "different-contract-call" }),
+    descriptor,
+  ), /exactly one/u);
+  const afterSecondTool = await secondTool.coordinator.hooks.onPreToolUse(
+    contractInput(secondToolSession, descriptor), { sessionId: secondToolSession },
   );
-  assert.equal(afterSecondControl?.permissionDecision, "deny");
-  assert.match(afterSecondControl?.permissionDecisionReason ?? "", /exactly one/u);
+  assert.equal(afterSecondTool?.permissionDecision, "deny");
+  assert.match(afterSecondTool?.permissionDecisionReason ?? "", /exactly one/u);
 
   const cancelled = contractHarness();
   const cancelledSession = "cancelled-contract";
@@ -1299,7 +1588,7 @@ test("Copilot /contract rejects false provenance, altered/second tasks, invalid 
     contractInput(cancelledSession, descriptor), { sessionId: cancelledSession },
   ))?.permissionDecision, "allow");
   cancelled.coordinator.observeEvent({
-    type: "tool.execution_start", id: "cancelled-task-start", parentId: `${cancelledSession}-control-complete`,
+    type: "tool.execution_start", id: "cancelled-task-start", parentId: `${cancelledSession}-contract-complete`,
     data: { toolName: "task", toolCallId: "cancelled-task-call" },
   });
   assert.equal((await cancelled.coordinator.hooks.onPreToolUse(
@@ -1313,4 +1602,53 @@ test("Copilot /contract rejects false provenance, altered/second tasks, invalid 
     ["child", "cancelled"],
     ["root", "cancelled"],
   ]);
+});
+
+test("Copilot /contract tombstones late task hooks until an authoritative new prompt epoch", async () => {
+  const completed = await runValidContract("start-first");
+  const completedInvocation = { sessionId: completed.sessionId };
+  const lateCompleted = await completed.coordinator.hooks.onPreToolUse(
+    contractInput(completed.sessionId, completed.descriptor),
+    completedInvocation,
+  );
+  assert.equal(lateCompleted?.permissionDecision, "deny");
+  assert.match(lateCompleted?.permissionDecisionReason ?? "", /late \/contract task replay.*new user prompt/u);
+
+  await completed.coordinator.hooks.onUserPromptSubmitted({
+    sessionId: completed.sessionId,
+    workingDirectory: project,
+    prompt: "ordinary work in a distinct user turn",
+  }, completedInvocation);
+  assert.equal(await completed.coordinator.hooks.onPreToolUse(
+    contractInput(completed.sessionId, { agent_type: "explore", prompt: "ordinary third-party task" }),
+    completedInvocation,
+  ), undefined, "a new prompt epoch did not supersede the completed-contract tombstone");
+
+  const abandoned = contractHarness();
+  const sessionId = "abandoned-contract-tombstone";
+  const raw = JSON.stringify({ name: "reviewer", task: "Review safely" });
+  const descriptor = { agent_type: "explore", description: "Disposable reviewer", prompt: "Review safely" };
+  await beginContract(abandoned.coordinator, sessionId, raw, descriptor);
+  abandoned.coordinator.observeEvent({
+    type: "session.idle",
+    id: "abandoned-contract-idle",
+    parentId: `${sessionId}-contract-complete`,
+    data: { aborted: false },
+  });
+  const lateAbandoned = await abandoned.coordinator.hooks.onPreToolUse(
+    contractInput(sessionId, descriptor),
+    { sessionId },
+  );
+  assert.equal(lateAbandoned?.permissionDecision, "deny");
+  assert.match(lateAbandoned?.permissionDecisionReason ?? "", /late \/contract task replay/u);
+
+  await abandoned.coordinator.hooks.onUserPromptSubmitted({
+    sessionId,
+    workingDirectory: project,
+    prompt: "new ordinary turn after the abandoned contract",
+  }, { sessionId });
+  assert.equal(await abandoned.coordinator.hooks.onPreToolUse(
+    contractInput(sessionId, { agent_type: "explore", prompt: "ordinary third-party task" }),
+    { sessionId },
+  ), undefined, "a new prompt epoch did not supersede the abandoned-contract tombstone");
 });

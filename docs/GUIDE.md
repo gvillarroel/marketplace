@@ -43,16 +43,29 @@ deliberately remains model-backed because it creates exactly one child. Use
 Copilot's native `/agent` selector for `team-lead`, `crafter`, or players
 activated through `/bench`.
 
+The unfiltered Copilot overview dynamically fits within 30 wrapped lines of 96
+terminal cells. It always keeps the nine factory IDs and uses any remaining
+space for personal members and activity; omitted rows include a count and a
+filter to retrieve them. Filtered member/run views are the richer detail path
+and retain the 96-cell line bound. If Copilot does not report a current model,
+the view says `no model reported (unobserved)` rather than inventing an
+`unknown/default` model.
+
 For a prompt sent straight to one named player, use
 `/<id> <task>`—for example `/design design the bounded change`.
 This selects that exact agent and sends one prompt without a separate routing
 inference. Fixed and bundled aliases are registered at startup; an inactive
 bundled player is rejected before inference. `/player <id> <task>` resolves the
-current active roster dynamically, so a newly joined personal player is usable
-immediately; reload only to add its convenience `/<id>` alias. `/team-lead` is
+currently enabled roster dynamically. A newly joined personal player can be
+usable in the same session when the authoritative refresh reports it `ready`
+and it needs no new skill loader. The same is possible for a skilled player
+whose ID already had a bound loader in the startup tool union, as in a same-ID
+replacement of a player that started with skills. Otherwise `/reload` repairs
+discovery or registers the missing loader before first use. Reload also adds a new
+convenience `/<id>` alias. `/team-lead` is
 deliberately different: the coordinator may run the smallest necessary
 sequence of one to six named children. The extension guards Copilot's native
-`task` calls in code: only exact active Agent Harbor targets are accepted,
+`task` calls in code: only exact enabled Agent Harbor targets are accepted,
 nested or concurrent delegation and persistent-member double-booking are
 denied before native child work, and the count resets per user prompt.
 
@@ -75,15 +88,29 @@ and keep `/extensions mode` on **Load Only** or **Load & Augment**. `/contract`
 remains the only command published as a skill because it intentionally creates
 one intelligent child.
 
-The `agent-foundry` plugin also contributes the global `agent-harbor` MCP
-server with only the bounded `control` tool. A player that has configured
-skills receives a separate player-scoped `skills` tool; it performs snapshot
-validation in code before returning invocation-local guidance.
-The fixed `agent-foundry:crafter` uses that player-scoped server directly.
+The `agent-foundry` extension contributes native custom tools from one shared
+closed-schema implementation. `/contract` receives `harbor_contract`; the
+recruiter receives only its roster/filter/join trio; and every player with
+configured skills receives a distinct `harbor_skill_<id>` loader whose handler
+is already bound to that ID. The model never supplies a player ID to a skill
+loader.
+The fixed `agent-foundry:crafter` uses `harbor_skill_crafter`.
+
+At startup the extension registers exactly those four static tools plus one
+bound loader for each skilled fixed role or canonical active profile. It does
+not register loaders for benched players. Copilot lead delegation remains
+native guard behavior; the roster custom tool is principal-bound to the scout,
+read-only and bounded. This surface uses no external server, transport
+configuration, or helper process.
 
 Start a new session after installing, updating, or changing project agents.
-The MCP process inherits the folder from which the Copilot session starts; start
-a new session from the target folder after changing projects.
+Copilot's public extension API fixes the registered tool set at `joinSession`,
+so a skilled player whose bound loader was absent at startup is stored with its
+active project copy but cannot be invoked until `/reload`. If the same bound
+loader was already registered, the handler revalidates and loads the current
+owned definition without another reload. Start the session from the target
+folder so project-scoped registration and ownership checks use the intended
+working tree.
 
 </details>
 
@@ -113,27 +140,59 @@ Re-run the installation command with `--force`, then start a new OpenCode sessio
 ### Use
 
 For a guaranteed direct execution, select one of these entries from OpenCode's
-slash autocomplete: `/bench-list`, `/bench-on`, `/bench-off`, `/harbor-join`,
+slash autocomplete: `/team`, `/bench-list`, `/bench-on`, `/bench-off`, `/harbor-join`,
 `/harbor-retire`, `/harbor-list-skills`, or `/harbor-filter-skills`. They run in
 the TUI plugin and do not create a model session. The `on`, `off`, `join`,
 `retire`, and filter entries collect their arguments in a dialog.
 
+`/team` also opens a dialog: press Enter for the compact whole-team overview,
+or enter a filter, `help`, `stop <run-id>`, or `stop all`. The overview is
+dynamically bounded to 30 wrapped lines of 96 cells, always includes the nine
+factory IDs, and counts any personal members or activity rows it omits while
+pointing to a narrowing filter. Broad filtered views remain compact; a narrow
+member/run filter exposes richer detail within the same 30-line dialog bound.
+It shows only ownership-verified project activity with opaque public run IDs
+and bounded native usage. See
+[OpenCode team observability](OPENCODE-TEAM-OBSERVABILITY.md) for provenance,
+privacy, stop, cleanup, and degradation semantics.
+
+Roster state and loaded host discovery are intentionally separate. An active
+profile that this OpenCode session already loaded is `ready · invocable`; a
+successful `/bench-on` or `/harbor-join` that is not loaded yet is `enabled ·
+reload required` for native selection and `/<id>`. The lead's live roster can
+still discover and delegate to that enabled member before reload; its own
+preflight remains authoritative. `/bench-off` and `/harbor-retire` block
+invocation immediately, but their confirmations require a reload when OpenCode
+still has a stale native agent or convenience alias to remove. If roster
+inventory is temporarily unavailable, the overview retains all nine factory
+IDs and marks the six known bundled teammates `unavailable` rather than
+dropping them.
+
 The canonical `/bench`, `/join`, `/retire`, `/contract`, and `/list-skills`
 commands remain available for parity, but OpenCode routes that command system
 through the model. For exact argument syntax without inference, use the package
-CLI, for example `agent-harbor opencode bench on portfolio-management`. Select `team-lead`,
-`crafter` or an activated player through OpenCode's native
-agent interface.
+CLI, for example `agent-harbor opencode bench on portfolio-management`. Select
+`team-lead`, `crafter`, or a player that `/team` reports as `ready · invocable`
+through OpenCode's native agent interface.
 
 OpenCode also exposes `/<id> <task>`. Its command configuration uses the
 exact agent, passes `$ARGUMENTS` unchanged and sets `subtask: false`, avoiding a
 router turn and OpenCode's extra parent-summary inference. Invocation-time
 preflight rejects an empty task or an alias whose ownership/activity changed
 after configuration. Start a new session after changing the roster so newly
-active aliases are added; a stale deactivated alias is blocked before inference.
+enabled agents and aliases are loaded. A stale deactivated or retired alias is
+blocked before inference even while the old discovery entry remains visible.
 
-The OpenCode `team-lead` can use only `harbor_delegate`. It resolves an exact
-target against the live active roster at each invocation, creates and cleans one child at a time, and enforces six calls per
+Set or update a personal member's model through `/harbor-join` JSON with
+`"model":"provider/model"` and, for an existing ID, `"replace":true`.
+Model, token, cost, context, and max-output values in `/team` are native
+observations only when OpenCode supplies them; they are not a hard Agent Harbor
+token cap.
+
+The OpenCode `team-lead` can use only the deterministic
+`harbor_team_roster` lookup and `harbor_delegate`. It inspects enabled capacity
+without creating a child, resolves an exact target against the live active
+roster at each delegation, creates and cleans one child at a time, and enforces six calls per
 originating user turn even though OpenCode creates intermediate assistant
 messages. This live validation allows delegation to a player added by `/join`
 during the session while still rejecting inactive or unmanaged IDs. Every generated agent policy starts
@@ -202,17 +261,56 @@ native handlers perform no model request. `/team` shows the roster, active roots
 and children, effective model/thinking, native usage and last mission. It can
 also stop one run or all project work. `/contract` creates exactly one child by
 design. Invoke `/team-lead <task>`, `/crafter <task>`, any activated bundled SDLC
-companion, or any active personal player directly.
+companion, or any enabled personal player directly.
 
-`/team-lead` can delegate sequentially to as many as six active specialists
+Pi's unfiltered overview follows the same 30-wrapped-line, 96-cell budget: all
+nine factory IDs stay visible, while personal members or active runs that do not
+fit are counted and recoverable through the printed filters. Filtered views can
+show richer matching details and keep the 96-cell line bound.
+
+Pi's `/join` confirmation shows the new member's role, tools and skill names,
+configured model or host inheritance, and `/<id> <task>` without exposing
+managed paths. See [Pi team observability](PI-TEAM-OBSERVABILITY.md) for the
+enabled-versus-active vocabulary, cancellation semantics, and native token
+accounting.
+
+`/team-lead` can delegate sequentially to as many as six enabled specialists
 when the task genuinely needs multiple stages. Each delegation is
 ownership-checked immediately before it creates one isolated in-memory child;
 recursion and a seventh call are rejected. Pi marks the custom delegation tool
 as sequential, so sibling tool calls cannot open children in parallel. The
-tool schema lists the exact active targets captured when that team-lead session
-starts.
+tool schema lists the exact enabled targets captured when that team-lead session
+starts. OpenCode exposes the same complete roster to its lead, reserves each
+selected project/member while its child is live, and uses the specialist's
+configured model when present instead of silently overriding it with the root
+model.
 
-The root `package.json` declares only the compiled Pi extension. Through `ExtensionAPI`, it registers the five lifecycle commands, the two fixed roles, and every ownership-verified active player. Role/player commands create a real in-memory `createAgentSession` child with a native tool allowlist; they are not static prompt templates. Active definitions live privately in the current project's `.pi/agents/`, and mutations register newly active names immediately (a reload removes names that were deactivated during the current session).
+An enabled member belongs to the available roster; an active member has a live
+`starting`, `working`, or `cleaning` run. `/team` shows both dimensions, marks
+enabled members with live work as busy, and blocks double-booking. A delegated
+specialist with a configured `provider/model` uses that model after availability
+and authentication preflight; specialists without one inherit the lead's
+effective Pi model.
+
+Pi 0.80.10 represents no active model with an `unknown/unknown` placeholder and
+zero maximum, while the public context can also omit the model. `/team` combines
+that state with Pi's stable usable-model snapshot: an empty healthy catalog is
+`unavailable` with `/login`; available models without a selection are `not
+selected` with `/model`; registry failure remains explicitly unobserved. None is
+advertised as an inherited model or a real zero-token limit, and none claims the
+lead can delegate. Aliases, `/contract`, and `/scout` perform the same model/auth
+preflight before creating a run or child. Valid custom providers work in child
+sessions because Harbor passes Pi's effective agent directory and replays only
+the registered provider configurations required by the selected model or lead
+roster into an isolated public `ModelRuntime`. A host key whose source is
+runtime-only stays in memory; extensions are not reloaded into the child.
+
+Pi injects these custom tools only into the isolated child that needs them. A
+lead child receives delegation and roster lookup, a recruiter child receives
+roster/filter/join, and an ordinary player or contractor inherits neither set.
+The Pi extension does not register them globally.
+
+The root `package.json` declares only the compiled Pi extension. Through `ExtensionAPI`, it registers the five lifecycle commands, the two fixed roles, and every ownership-verified enabled player. Role/player commands create a real in-memory `createAgentSession` child with a native tool allowlist; they are not static prompt templates. Enabled definitions live privately in the current project's `.pi/agents/`, and mutations register newly enabled names immediately (a reload removes names that were deactivated during the current session).
 
 </details>
 
@@ -227,7 +325,8 @@ integration:
 
 - Copilot consumes `plugins/` through its marketplace/plugin system; its client
   extension executes deterministic controls directly, while only the
-  model-backed `/contract` keeps a skill wrapper and MCP preflight;
+  model-backed `/contract` keeps a skill wrapper and native extension-tool
+  preflight;
 - `src/adapters/opencode.ts` exposes server commands and tools, while
   `src/adapters/opencode-tui.ts` exposes direct TUI controls;
 - `src/adapters/pi.ts` registers native commands through Pi `ExtensionAPI`;
@@ -254,9 +353,9 @@ Run a clean TypeScript build, the contract/security suite, and native discovery 
 npm test
 ```
 
-`npm test` is one Node wrapper rather than an npm/`&&` command chain. It rebuilds generated artifacts, removes inherited `NODE_TEST_CONTEXT`, validates each child exit/signal and requires the native runner's TAP summary (`tests > 0`, `fail = 0`), preventing shell propagation quirks, nested-runner state or loaded host code from creating a false green. The suite evaluates all five command contracts across the three runtimes; verifies byte-exact rollback, mutation locking, canonical ownership, idempotency, collisions and leaf/ancestor symlinks; checks remote-body validation, closed tool policies, disposable-session cleanup and double-failure reporting; confirms Copilot/OpenCode discovery; and installs Pi into a temporary home. The agent matrix proves that only the two fixed roles start active and all eight roster names are available after `bench on all`.
+`npm test` is one Node wrapper rather than an npm/`&&` command chain. It rebuilds generated artifacts, removes inherited `NODE_TEST_CONTEXT`, validates each child exit/signal and requires the native runner's TAP summary (`tests > 0`, `fail = 0`), preventing shell propagation quirks, nested-runner state or loaded host code from creating a false green. The suite evaluates all five command contracts across the three runtimes; verifies byte-exact rollback, mutation locking, canonical ownership, idempotency, collisions and leaf/ancestor symlinks; checks remote-body validation, closed tool policies, disposable-session cleanup and double-failure reporting; confirms Copilot/OpenCode discovery; and installs Pi into a temporary home. The agent matrix proves that only the two fixed roles start enabled and all eight roster names are available after `bench on all`.
 
-The literal, closed-schema dataset in `test-ts/fixtures/harbor-cycles.json` is independent from the runtime catalog. It defines the default fixed-role map/build cycle and the opt-in six-companion SDLC cycle. The same cases feed the Copilot hooks and the real OpenCode/Pi delegation tools, while a normalized SDK test proves activation, exact target identity, sequential evidence handoff and cleanup in all three orchestrators. Optional evidence hooks store only SHA-256 hashes, UTF-8 sizes and correlation metadata—never raw tasks or responses—and are no-ops unless explicitly injected. Events label their basis as observed or inferred, so Copilot's synchronous terminal fallback is not presented as a native cleanup event. These offline tests exercise no model or network. They prove requested routing and lifecycle mechanics; the separate live smoke below proves model-driven selection.
+The literal, closed-schema dataset in `test-ts/fixtures/harbor-cycles.json` is independent from the runtime catalog. It defines the default fixed-role map/build cycle and the opt-in six-companion SDLC cycle. The same cases feed the Copilot hooks and the real OpenCode/Pi delegation tools, while a normalized SDK test proves activation, exact target identity, sequential evidence handoff and cleanup in all three orchestrators. Pi and OpenCode return at most 30,000 UTF-8 bytes of child evidence, with an explicit truncation marker. Optional evidence hooks store only SHA-256 hashes, UTF-8 sizes and correlation metadata—never raw tasks or responses—and are no-ops unless explicitly injected. Events label their basis as observed or inferred, so Copilot's synchronous terminal fallback is not presented as a native cleanup event. These offline tests exercise no model or network. They prove requested routing and lifecycle mechanics; the separate live smoke below proves model-driven selection.
 
 Run the authenticated live acceptance explicitly when changing lead selection,
 handoff, or native orchestration hooks:
@@ -344,28 +443,28 @@ final-response byte budgets are also enforced. The tests account for native
 root and child usage without gaps. These bounds measure routing, immediate
 handoff and run resources, not universal model quality or cost.
 
-The suite also exercises exact dispatch of all eight OpenCode roster IDs, direct Pi invocation of all eight, and native Copilot discovery/selection of all eight. Coordinator tests enforce exact active targets, per-user-turn bounds, sequential execution, no recursion and cleanup across Copilot, OpenCode and Pi. A delayed-reload race test proves that stale Copilot discovery cannot overwrite a newer root selection event. The suite proves that every distribution can list the bench without a model, that Pi and OpenCode direct controls cannot enter an orchestrator, and that Copilot's lifecycle command and native agent selection emit no assistant message or usage event. The native CLI checks run concurrently in isolated directories. Missing CLIs skip only their runtime assertion; no Python runtime, live model call, API key, Docker service, or network access is required.
+The suite also exercises exact dispatch of all eight OpenCode roster IDs, direct Pi invocation of all eight, and native Copilot discovery/selection of all eight. Coordinator tests enforce exact enabled roster targets, per-user-turn bounds, sequential execution, no recursion and cleanup across Copilot, OpenCode and Pi. A delayed-reload race test proves that stale Copilot discovery cannot overwrite a newer root selection event. The suite proves that every distribution can list the bench without a model, that Pi and OpenCode direct controls cannot enter an orchestrator, and that Copilot's lifecycle command and native agent selection emit no assistant message or usage event. The native CLI checks run concurrently in isolated directories. Missing CLIs skip only their runtime assertion; no Python runtime, live model call, API key, Docker service, or network access is required.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `/team` (Copilot, Pi) | Show roster, live work, model/thinking, native usage and stop controls. |
-| `/player <id> <task>` (Copilot) | Run any currently active player directly, including one just joined. |
+| `/team` (Copilot, OpenCode, Pi) | Show roster, live work, observed model/usage and stop controls on each native direct surface. |
+| `/player <id> <task>` (Copilot) | Run an enabled player directly, including one just joined after `/team member:<id>` reports `ready` and its bound loader is available. |
 | `/bench` | List players or set their current-folder state with `on` and `off`. |
 | `/join` | Register a recurring player at user level and activate it here. |
 | `/retire` | Remove one personal registration and its managed local copy. |
 | `/contract` | Run one synchronous, invocation-scoped subagent without registration. |
 | `/list-skills` | List trusted GitHub skill references; distinct from built-in `/skills`. |
-| `/scout <need>` | Use one restricted recruiter turn to create and join a persistent player from the execution-trusted skill group. |
+| `/scout <need>` | Use one restricted recruiter turn to reuse sufficient ready capacity or create and join one missing persistent player. |
 
 The inference budget is part of the executable contract:
 
 | Operation | Required model budget |
 | --- | --- |
-| View the Pi team; view or change the bench; join; retire | 0 model requests on a direct surface |
+| View/filter/stop the Copilot, OpenCode, or Pi team; view or change the bench; join; retire | 0 model requests on a direct surface |
 | List trusted skills | 0 model requests; authenticated `gh` network I/O is allowed |
-| Scout and join a player | One recruiter model session; skill filtering and the final join are deterministic scoped tools |
+| Scout and join a player | One recruiter model session; its roster snapshot, skill filtering and final join are deterministic scoped tools; filtering/join are skipped when a ready teammate already covers the need |
 | Valid contract | Exactly one child model session |
 | Explicit non-coordinator player command | One prompt to the exact player; 0 routing prompts |
 | Coordinated mission | One coordinator prompt plus 1..6 sequential named children |
@@ -439,12 +538,19 @@ The model-assisted shortcut is:
 
 `/scout` selects the fixed internal `talent-scout` agent. That agent receives
 no filesystem, shell, ambient skill, delegation, contract, or general
-lifecycle tools. It can only enumerate the built-in trusted repositories and
-filter their exact skill references by public frontmatter metadata before
-calling one closed-schema `join`. It may issue at most
-three filter queries and one join. The generated player is persistent and
-otherwise follows the same validation, ownership, collision, and activation
-rules as a literal `/join`.
+lifecycle tools. It receives exactly three scoped tools. First it must inspect
+one bounded, path-redacted snapshot of the currently enabled team. Its explicit
+model policy says that, if a ready teammate already has a sufficient role, tool
+and skill set, it must report that member's direct command and stop without
+catalog I/O or roster mutation. The deterministic guard enforces the complete
+snapshot, call order, limits, serialization, and terminal state; it does not
+receive roster rows or infer semantic sufficiency. Only when the recruiter
+judges capacity missing may it filter exact trusted skill references by public
+frontmatter metadata, with at most three filter queries, before calling one
+closed-schema `join`. A large trusted catalog must first narrow by skill name,
+repository, or path to at most 64 metadata candidates; lookup concurrency is
+four. The generated player is persistent and otherwise follows the same
+validation, ownership, collision, and activation rules as a literal `/join`.
 
 ```text
 /join {"name":"reviewer","description":"Read-only reviewer","prompt":"Return three evidence-backed findings.","tools":["read","search"],"skills":[]}
@@ -464,16 +570,27 @@ That folder is user-level but is not a Copilot agent discovery directory. The id
 
 Here `current-folder` is the Copilot process working directory, resolved independently of `COPILOT_HOME`.
 
-Consequently the player is active where it joined and remains available from every other project through `bench on reviewer`. `bench off reviewer` removes only the active project copy. `retire reviewer` removes the user registration and the managed copy in the current project; copies in other projects remain intentionally untouched.
+Consequently the player is enabled where it joined and remains available from every other project through `bench on reviewer`. `bench off reviewer` removes only the enabled project copy. `retire reviewer` removes the user registration and the managed copy in the current project; copies in other projects remain intentionally untouched.
 
-The join result includes `command: /reviewer <request>`. Pi registers that
-command immediately in the current session. Copilot and OpenCode discover it
-automatically from the active profile when their session/configuration reloads;
-no separate command file or manual registration is needed.
+The Pi and Copilot native join confirmations summarize the ID, role, effective
+capacity (tools and skill names), and configured model or host inheritance
+without exposing local paths. Pi also reports and registers `/<id> <task>`
+immediately in the current session. Copilot reports that the roster transaction
+registered the player, directs the user to verify readiness with
+`/team member:<id>`, and presents `/player <id> <task>` only as the command to
+use once that view says `ready`; the confirmation never treats registration as
+proof of native availability. A player can become usable in the same session
+after an authoritative refresh when no new bound loader is needed. A skilled
+player can do so when its loader was registered at startup; a missing loader or
+unverified native discovery requires `/reload`. Copilot's convenience `/<id>`
+alias and OpenCode's active-profile alias appear when their configuration
+reloads. No separate command file or manual registration is needed.
 
-The canonical profile format uses revision 4 and stores the validated definition
+The canonical profile format uses revision 5 and stores the validated definition
 in every harness profile so the adapter can recover and enforce that exact
-player's skill group. Any other ownership metadata is treated as an unmanaged
+player's skill group. An exact structural revision-4 profile is recognized only
+as legacy owned/stale: it can be repaired explicitly but is never invocable.
+Metadata that is neither exact revision 4 nor exact revision 5 is an unmanaged
 collision and is never overwritten or deleted.
 
 `skills` accepts at most three references with unique names. A repository
@@ -497,9 +614,13 @@ capsule; sibling files are unavailable.
 
 Enforcement is harness-specific. Copilot SDK sessions disable config discovery,
 point `skillDirectories` at only that capsule, and preload only the configured
-names; persistent Copilot profiles expose one no-argument MCP tool bound to the
-player's complete group through a separate player-scoped server process; the
-global MCP server never lists any player skill group. OpenCode denies
+names; persistent Copilot profiles expose one no-argument extension tool bound
+to the player's complete group. At extension startup only the union required by
+skilled fixed roles and canonical active profiles is registered; benched players
+do not contribute loaders. Every invocation revalidates the selected agent,
+project and managed profile. A skilled player added under a new ID, or under an
+ID that had no startup loader, requires `/reload`; a same-ID replacement whose
+bound loader already exists does not. OpenCode denies
 its ambient `skill` tool and exposes one no-argument group loader whose handler
 derives the exact managed definition from `execution.agent`; `/contract`
 injects only the prevalidated group while keeping `skill` disabled. Pi uses
@@ -513,7 +634,17 @@ registry. A failure in any member creates zero children.
 /contract {"name":"reviewer","description":"Read-only reviewer","prompt":"Review only; never edit.","tools":["read","search"],"skills":[],"task":"Review src and return three findings."}
 ```
 
-Interactive Copilot `/contract` passes the literal JSON through the structured `control` tool of the plugin-provided `agent-harbor` MCP server—never through shell interpolation—then calls Copilot's native `task` exactly once with the validated payload; it never creates a second `CopilotClient`. The programmatic `agent-harbor copilot contract` entrypoint uses `@github/copilot-sdk` and explicitly deletes its session. OpenCode and Pi also create and dispose one SDK child. SDK-backed paths enforce native tool maps; Copilot's built-in `task` profiles can only represent the requested subset as child policy, not an operating-system sandbox.
+Interactive Copilot `/contract` passes the literal JSON to the extension-owned
+`harbor_contract` custom tool—never through shell interpolation. The handler
+validates it with shared core code and authenticates the native session, call
+ID, tool name and closed arguments. It then seals the exact three-field child
+descriptor in the coordinator, and only that successful handler permits
+Copilot's native `task` exactly once; later native output cannot authenticate a
+descriptor. It never creates a second `CopilotClient`. The programmatic `agent-harbor copilot
+contract` entrypoint uses `@github/copilot-sdk` and explicitly deletes its
+session. OpenCode and Pi also create and dispose one SDK child. SDK-backed paths
+enforce native tool maps; Copilot's built-in `task` profiles can only represent
+the requested subset as child policy, not an operating-system sandbox.
 
 ## Trusted skills
 

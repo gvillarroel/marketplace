@@ -62,39 +62,21 @@ def terminal_replies(data: bytes) -> bytes:
     return bytes(replies)
 
 
-def write_input(master: int, text: str) -> None:
-    for character in text:
-        os.write(master, character.encode())
-        time.sleep(0.035 if character != " " else 0.055)
-    os.write(master, b"\r")
-
-
-def command_tour(probe: bool, probe_command: str) -> list[tuple[float, str]]:
+def command_tour(probe: bool, probe_command: str) -> list[tuple[str, float]]:
     if probe:
-        return [(5.0, probe_command or "/team"), (18.0, "/exit")]
+        return [(probe_command or "/team", 12.0), ("/exit", 3.0)]
     return [
-        (6.0, "/team"),
-        (21.0, "/bench on all"),
-        (31.0, "/bench list design"),
-        (41.0, '/join {"name":"demo-reviewer","description":"Review correctness and risk.","prompt":"Report actionable findings.","tools":["read","search"]}'),
-        (53.0, "/team demo-reviewer"),
-        (65.0, "/list-skills zx-example-author"),
-        (77.0, "/team stop all"),
-        (85.0, "/agent-foundry:contract {}"),
-        (115.0, "/player"),
-        (123.0, "/scout"),
-        (131.0, "/team-lead"),
-        (139.0, "/crafter"),
-        (147.0, "/portfolio-management"),
-        (155.0, "/design"),
-        (163.0, "/build"),
-        (171.0, "/manage"),
-        (179.0, "/consume"),
-        (187.0, "/dispose"),
-        (195.0, "/retire demo-reviewer"),
-        (205.0, "/bench off all"),
-        (215.0, "/team"),
-        (233.0, "/exit"),
+        ("/team", 15.0),
+        ("/bench on all", 10.0),
+        ("/bench list design", 10.0),
+        ('/join {"name":"demo-reviewer","description":"Review risk.","prompt":"Report findings.","tools":["read","search"]}', 12.0),
+        ("/team demo-reviewer", 12.0),
+        ("/team stop all", 8.0),
+        ("/team help", 12.0),
+        ("/retire demo-reviewer", 10.0),
+        ("/bench off all", 10.0),
+        ("/team", 18.0),
+        ("/exit", 3.0),
     ]
 
 
@@ -119,6 +101,8 @@ def main() -> int:
         "--no-mouse",
         "--no-custom-instructions",
         "--disable-builtin-mcps",
+        "--disable-mcp-server",
+        "github-mcp-server",
         "--max-ai-credits",
         "30",
         "--plugin-dir",
@@ -149,14 +133,48 @@ def main() -> int:
     tool_prompt_at: float | None = None
     schedule = command_tour(args.probe, args.probe_command)
     position = 0
+    next_command_at: float | None = None
+    typing_command: str | None = None
+    typing_offset = 0
+    next_key_at: float | None = None
+    enter_at: float | None = None
+    last_submitted_at: float | None = None
     buffer = bytearray()
     exit_status = 1
     try:
         while True:
-            elapsed = time.monotonic() - (ready_at or started)
-            if ready_at is not None and position < len(schedule) and elapsed >= schedule[position][0]:
-                write_input(master, schedule[position][1])
-                position += 1
+            now = time.monotonic()
+            if ready_at is not None and next_command_at is None and position == 0:
+                next_command_at = ready_at + 6
+            if (
+                ready_at is not None
+                and typing_command is None
+                and position < len(schedule)
+                and next_command_at is not None
+                and now >= next_command_at
+            ):
+                typing_command = schedule[position][0]
+                typing_offset = 0
+                next_key_at = now
+                enter_at = None
+            if typing_command is not None and next_key_at is not None:
+                if typing_offset < len(typing_command) and now >= next_key_at:
+                    character = typing_command[typing_offset]
+                    os.write(master, character.encode())
+                    typing_offset += 1
+                    next_key_at = now + (0.18 if character == " " else 0.12)
+                elif typing_offset == len(typing_command):
+                    if enter_at is None:
+                        enter_at = now + 1.5
+                    elif now >= enter_at:
+                        os.write(master, b"\r")
+                        reading_seconds = schedule[position][1]
+                        position += 1
+                        typing_command = None
+                        next_key_at = None
+                        enter_at = None
+                        last_submitted_at = now
+                        next_command_at = now + reading_seconds
 
             ready, _, _ = select.select([master], [], [], 0.05)
             if ready:
@@ -204,7 +222,10 @@ def main() -> int:
             if waited == child:
                 exit_status = os.waitstatus_to_exitcode(status)
                 break
-            if ready_at is not None and elapsed > schedule[-1][0] + 15:
+            if position == len(schedule) and last_submitted_at is not None and now - last_submitted_at > 15:
+                os.kill(child, signal.SIGTERM)
+                break
+            if ready_at is not None and now - ready_at > 420:
                 os.kill(child, signal.SIGTERM)
                 break
             if ready_at is None and time.monotonic() - started > 45:

@@ -4,15 +4,20 @@ import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { copilotFixedAgentIds, createCopilotCoordinatorGuard } from "../src/adapters/copilot-coordinator.js";
+import {
+  copilotFixedAgentIds,
+  copilotFixedAgentPath,
+  createCopilotCoordinatorGuard,
+} from "../src/adapters/copilot-coordinator.js";
 import { AgentHarborPlugin } from "../src/adapters/opencode.js";
 import openCodeTui, { openCodeDirectCommands } from "../src/adapters/opencode-tui.js";
 import { commandNames } from "../src/core/types.js";
+import { harborCustomToolNames, harborStaticCustomToolSpecs } from "../src/core/custom-tools.js";
 import { bundledPlayers, rolePlayers, scoutPlayer, trustedSkills } from "../src/core/defaults.js";
 import { GhResolver } from "../src/core/github.js";
 import type { HarborEvidenceEvent } from "../src/core/evidence.js";
 import { Roster } from "../src/core/lifecycle.js";
-import { harnessSpec, normalizeDelegatedTaskPaths } from "../src/core/profiles.js";
+import { harnessSpec, normalizeDelegatedTaskPaths, playerDefinitionDigest } from "../src/core/profiles.js";
 import { visibleTextWidth } from "../src/core/text-layout.js";
 import { CopilotOrchestrator } from "../src/orchestrators/copilot.js";
 import { OpenCodeOrchestrator } from "../src/orchestrators/opencode.js";
@@ -35,6 +40,14 @@ const definition = { name: "worker", description: "Worker", prompt: "Work", tool
 const cycleDataset = loadHarborCycleDataset();
 const defaultCycle = cycleDataset.cycles.find((cycle) => cycle.id === "default-specialists")!;
 const fullCycle = cycleDataset.cycles.find((cycle) => cycle.id === "full-sdlc")!;
+const confirmOpenCodeSessionTitle = async ({ path, body }: any) => ({ data: { id: path.id, title: body.title } });
+
+function emptyOpenCodeActivitySession() {
+  return {
+    status: async () => ({ data: {} }),
+    messages: async () => { throw new Error("empty activity inventory must not request messages"); },
+  };
+}
 
 function emptyPiResourceSdk() {
   return {
@@ -46,6 +59,20 @@ function emptyPiResourceSdk() {
       getSkills() { return this.result; }
     },
     getAgentDir: () => "pi-agent-home",
+  };
+}
+
+const authenticatedPiHostModel = { provider: "test-provider", id: "test-model" };
+
+function authenticatedPiHostState(model: any = authenticatedPiHostModel) {
+  return {
+    model,
+    modelRegistry: {
+      find: (provider: string, id: string) => provider === model.provider && id === model.id ? model : undefined,
+      getAvailable: () => [model],
+      getError: () => undefined,
+      hasConfiguredAuth: (candidate: any) => candidate.provider === model.provider && candidate.id === model.id,
+    },
   };
 }
 
@@ -85,13 +112,105 @@ test("Copilot orchestrator uses one SDK custom-agent session", async () => {
   assert.deepEqual(events, ["create:worker:1:read:true", "send:Do it", "delete:child", "stop"]);
 });
 
+test("Copilot orchestrator reclaims a session created just after its local deadline", async () => {
+  const events: string[] = [];
+  let resolveCreation!: (session: any) => void;
+  const creation = new Promise<any>((resolvePromise) => { resolveCreation = resolvePromise; });
+  const client = {
+    createSession: () => creation,
+    deleteSession: async (id: string) => { events.push(`delete:${id}`); },
+    stop: async () => { events.push("stop"); },
+  };
+  const orchestrator = new CopilotOrchestrator(
+    () => client as any,
+    process.cwd(),
+    new GhResolver(),
+    undefined,
+    { operationTimeoutMs: 20, cleanupTimeoutMs: 100, abortTimeoutMs: 20 },
+  );
+  setTimeout(() => resolveCreation({
+    sessionId: "late-child",
+    abort: async () => { events.push("abort:late-child"); },
+    sendAndWait: async () => ({ data: { content: "must not run" } }),
+  }), 35);
+  await assert.rejects(() => orchestrator.run(definition as any), /session creation exceeded its 20ms deadline/u);
+  assert.deepEqual(events, ["abort:late-child", "delete:late-child", "stop"]);
+});
+
+test("Copilot orchestrator bounds abort and sequences delete before stop", async () => {
+  const events: string[] = [];
+  let deleting = false;
+  const never = new Promise<never>(() => {});
+  const client = {
+    createSession: async () => ({
+      sessionId: "hung-child",
+      abort: () => { events.push("abort"); return never; },
+      sendAndWait: () => { events.push("send"); return never; },
+    }),
+    deleteSession: async () => {
+      deleting = true;
+      events.push("delete:start");
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 15));
+      events.push("delete:end");
+      deleting = false;
+    },
+    stop: async () => {
+      assert.equal(deleting, false, "client.stop overlapped deleteSession and could close its transport");
+      events.push("stop");
+    },
+  };
+  const orchestrator = new CopilotOrchestrator(
+    () => client as any,
+    process.cwd(),
+    new GhResolver(),
+    undefined,
+    { operationTimeoutMs: 20, cleanupTimeoutMs: 100, abortTimeoutMs: 20 },
+  );
+  await assert.rejects(() => orchestrator.run(definition as any), (error: any) => {
+    assert.ok(error instanceof AggregateError);
+    const detail = [error.message, ...error.errors.map((entry: Error) => entry.message)].join(" | ");
+    assert.match(detail, /prompt exceeded its 20ms deadline/u);
+    assert.match(detail, /abort exceeded its 20ms deadline/u);
+    return true;
+  });
+  assert.deepEqual(events, ["send", "abort", "delete:start", "delete:end", "stop"]);
+});
+
+test("Copilot orchestrator bounds returned evidence on a UTF-8 boundary", async () => {
+  const evidence = "😀".repeat(10_000);
+  const observed: HarborEvidenceEvent[] = [];
+  const client = {
+    createSession: async () => ({
+      sessionId: "large-evidence",
+      abort: async () => {},
+      sendAndWait: async () => ({ data: { content: evidence } }),
+    }),
+    deleteSession: async () => {},
+    stop: async () => {},
+  };
+  const output = await new CopilotOrchestrator(
+    () => client as any,
+    process.cwd(),
+    new GhResolver(),
+    (event) => observed.push(event),
+  ).run(definition as any);
+  assert.ok(Buffer.byteLength(output, "utf8") <= 30_000);
+  assert.match(output, /\[HARBOR-EVIDENCE-TRUNCATED original_utf8_bytes=40000 limit=30000\]$/u);
+  assert.equal(
+    observed.find(({ phase }) => phase === "evidence.returned")?.evidence?.utf8Bytes,
+    Buffer.byteLength(output, "utf8"),
+  );
+});
+
 test("Copilot team-lead hooks enforce exact active sequential delegation across user turns", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-copilot-hooks-"));
   const project = join(root, "project");
   const roster = new Roster(harnessSpec("copilot", join(root, "home"), project));
   await roster.bench("on all", bundledPlayers);
   const agents = [
-    ...[...copilotFixedAgentIds.values()].map((id) => ({ id, userInvocable: true })),
+    ...[...copilotFixedAgentIds].map(([logical, id]) => ({
+      id, path: copilotFixedAgentPath(logical), userInvocable: true,
+    })),
     ...[...bundledPlayers.keys()].map((id) => ({ id, path: join(project, ".github", "agents", `${id}.agent.md`), userInvocable: true })),
   ];
   let current = copilotFixedAgentIds.get("team-lead")!;
@@ -99,7 +218,10 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   let reloads = 0;
   const evidenceEvents: HarborEvidenceEvent[] = [];
   const coordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => { if (failCurrent) throw new Error("current unavailable"); return { agent: { id: current } }; },
+    getCurrent: async () => {
+      if (failCurrent) throw new Error("current unavailable");
+      return { agent: agents.find(({ id }) => id === current) };
+    },
     reload: async () => { if (failReload) throw new Error("reload unavailable"); reloads += 1; return { agents }; },
   } } }), (event) => evidenceEvents.push(event));
   const hooks = coordinator.hooks;
@@ -110,7 +232,26 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   });
   const reset = (prompt: string) => hooks.onUserPromptSubmitted({ sessionId: "parent", workingDirectory: project, prompt }, invocation);
   const finish = (value: ReturnType<typeof input>, evidence: string) => hooks.onPostToolUse({ ...value, toolResult: evidence }, invocation);
-  const endTurn = (id: string) => coordinator.observeEvent({ type: "session.idle", id, data: { aborted: false } });
+  const terminalDispositions: string[] = [];
+  const endTurn = (id: string) => {
+    const activityId = `${id}-turn`;
+    const activity = {
+      type: "assistant.turn_start",
+      id: activityId,
+      data: { sessionId: "parent", turnId: activityId },
+    } as const;
+    const terminal = {
+      type: "session.idle",
+      id,
+      parentId: activityId,
+      data: { sessionId: "parent", aborted: false },
+    } as const;
+    coordinator.observeEvent(activity);
+    coordinator.observeEvent(terminal);
+    terminalDispositions.push(
+      `${coordinator.hostEventDisposition(activity)}/${coordinator.hostEventDisposition(terminal)}`,
+    );
+  };
   assert.match((await hooks.onPreToolUse(input("totally-unmanaged", "authoritative first snapshot"), invocation))?.permissionDecisionReason ?? "", /not active/);
   await coordinator.refresh();
 
@@ -124,34 +265,51 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
     priorEvidence = `evidence:${step.agent}`;
   }
 
+  assert.equal(coordinator.lifecycleIdentityUnverified(), false, "default hook-only cycle poisoned lifecycle identity");
   endTurn("default-cycle-idle");
+  assert.deepEqual(terminalDispositions, ["claimed/claimed"]);
+  assert.equal(coordinator.lifecycleIdentityUnverified(), false, "correlated root terminal poisoned lifecycle identity");
   await reset("run the SDLC stages");
   priorEvidence = undefined;
   for (const [index, step] of fullCycle.steps.entries()) {
     const id = step.agent;
     const call = input(id, datasetTask(fullCycle, index, priorEvidence));
+    const decision = await hooks.onPreToolUse(call, invocation);
+    assert.equal(
+      decision?.permissionDecision,
+      "allow",
+      `${step.agent}: ${decision?.permissionDecisionReason ?? "no decision reason"}`,
+    );
     if (index === 0) {
-      coordinator.observeEvent({ type: "tool.execution_start", data: { toolName: "task", toolCallId: "sdlc-portfolio-management-call" } });
+      coordinator.observeEvent({
+        type: "assistant.turn_start",
+        id: "sdlc-root-turn",
+        data: { sessionId: "parent", turnId: "sdlc-root-turn" },
+      });
+      coordinator.observeEvent({
+        type: "tool.execution_start",
+        id: "sdlc-portfolio-management-start",
+        parentId: "sdlc-root-turn",
+        data: { sessionId: "parent", toolName: "task", toolCallId: "sdlc-portfolio-management-call" },
+      });
     }
-    assert.equal((await hooks.onPreToolUse(call, invocation))?.permissionDecision, "allow");
     if (index === 0) {
       coordinator.observeEvent({
-        type: "subagent.started", agentId: "wrong-child",
-        data: { agentName: step.agent, toolCallId: "different-call" },
+        type: "subagent.started", id: "sdlc-child-start", parentId: "sdlc-portfolio-management-start",
+        agentId: "portfolio-management-child",
+        data: { sessionId: "parent", agentName: step.agent, toolCallId: "sdlc-portfolio-management-call" },
       });
       coordinator.observeEvent({
-        type: "subagent.started", agentId: "portfolio-management-child",
-        data: { agentName: step.agent, toolCallId: "sdlc-portfolio-management-call" },
+        type: "subagent.completed", id: "sdlc-child-complete", parentId: "sdlc-child-start",
+        agentId: "portfolio-management-child",
+        data: { sessionId: "parent", agentName: step.agent, toolCallId: "sdlc-portfolio-management-call" },
       });
-      coordinator.observeEvent({
-        type: "subagent.completed", agentId: "portfolio-management-child",
-        data: { agentName: step.agent, toolCallId: "sdlc-portfolio-management-call" },
-      });
-      coordinator.observeEvent({ type: "tool.execution_complete", agentId: "nested-child", data: { toolDescription: { name: "task" } } });
       assert.match((await hooks.onPreToolUse(input(fullCycle.steps[1].agent, "parallel"), invocation))?.permissionDecisionReason ?? "", /sequentially/);
       coordinator.observeEvent({
+        id: "sdlc-tool-complete",
+        parentId: "sdlc-child-complete",
         type: "tool.execution_complete",
-        data: { toolCallId: "sdlc-portfolio-management-call", success: true, result: `evidence:${step.agent}` },
+        data: { sessionId: "parent", toolCallId: "sdlc-portfolio-management-call", success: true, result: `evidence:${step.agent}` },
       });
     } else {
       await finish(call, `evidence:${step.agent}`);
@@ -168,7 +326,6 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   );
   assert.ok(evidenceEvents.filter((event) => event.phase === "evidence.returned").every((event) => (event.evidence?.utf8Bytes ?? 0) > 0));
   assert.ok(evidenceEvents.some((event) => event.agent === "portfolio-management" && event.invocationId === "sdlc-portfolio-management-call"));
-  assert.ok(!evidenceEvents.some((event) => event.childId === "wrong-child"));
   assert.ok(evidenceEvents.some((event) => event.childId === "portfolio-management-child" && event.phase === "child.started" && event.basis === "observed"));
   assert.ok(evidenceEvents.some((event) => event.agent === "portfolio-management" && event.phase === "child.cleaned" && event.basis === "inferred"));
   assert.deepEqual(
@@ -215,17 +372,37 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   await coordinator.refresh();
   assert.equal(await hooks.onPreToolUse(input("portfolio-management", "unrelated agent task"), invocation), undefined);
   current = copilotFixedAgentIds.get("team-lead")!;
-  coordinator.observeEvent({ type: "subagent.selected", data: { agentName: "team-lead" } });
+  coordinator.observeEvent({
+    type: "subagent.selected",
+    id: "manual-team-lead-selected",
+    data: { sessionId: "parent", agentName: "team-lead" },
+  });
   endTurn("invalid-cycle-idle");
   await reset("selection event normalizes the logical lead ID");
   const selectedCall = input("portfolio-management", "selected lead task");
   assert.equal((await hooks.onPreToolUse(selectedCall, invocation))?.permissionDecision, "allow");
   await finish(selectedCall, "selected lead evidence");
   endTurn("selected-cycle-idle");
-  coordinator.observeEvent({ type: "subagent.selected", agentId: "nested", data: { agentName: "crafter" } });
+  coordinator.observeEvent({
+    type: "subagent.selected",
+    id: "nested-crafter-selected",
+    parentId: "nested-task-event",
+    agentId: "nested",
+    data: {
+      sessionId: "parent",
+      agentName: "crafter",
+      initiator: "sub-agent",
+      parentToolCallId: "nested-task",
+    },
+  });
   await reset("nested selection events cannot replace the root selection");
   const afterNestedSelection = input("portfolio-management", "root lead remains selected");
-  assert.equal((await hooks.onPreToolUse(afterNestedSelection, invocation))?.permissionDecision, "allow");
+  const afterNestedDecision = await hooks.onPreToolUse(afterNestedSelection, invocation);
+  assert.equal(
+    afterNestedDecision?.permissionDecision,
+    "allow",
+    afterNestedDecision?.permissionDecisionReason,
+  );
   await finish(afterNestedSelection, "nested selection ignored");
   current = copilotFixedAgentIds.get("crafter")!;
   coordinator.observeEvent({ type: "subagent.deselected", data: {} });
@@ -239,7 +416,7 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   const racingEvidence: HarborEvidenceEvent[] = [];
   let racingCurrent = copilotFixedAgentIds.get("crafter")!;
   const racingCoordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: racingCurrent } }),
+    getCurrent: async () => ({ agent: agents.find(({ id }) => id === racingCurrent) }),
     reload: async () => {
       markReloadStarted();
       await reloadGate;
@@ -292,9 +469,9 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   let failingReload = true;
   const failureRaceEvidence: HarborEvidenceEvent[] = [];
   const failureRaceCoordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: failingReload
+    getCurrent: async () => ({ agent: agents.find(({ id }) => id === (failingReload
       ? copilotFixedAgentIds.get("crafter")!
-      : copilotFixedAgentIds.get("team-lead")! } }),
+      : copilotFixedAgentIds.get("team-lead")!)) }),
     reload: async () => {
       if (failingReload) {
         markFailingReloadStarted();
@@ -309,16 +486,21 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   failureRaceCoordinator.observeEvent({ type: "subagent.selected", data: { agentName: "team-lead" } });
   releaseFailingReload();
   await assert.rejects(failedRefresh, /delayed reload failure/);
+  failingReload = false;
+  await failureRaceCoordinator.refresh();
+  // The failed refresh retained only an id-only event, so wait for the fresh
+  // registry/path proof before claiming a native task correlation.
   failureRaceCoordinator.observeEvent({
     type: "tool.execution_start", data: { toolName: "task", toolCallId: "post-failure-selection-call" },
   });
-  failingReload = false;
-  await failureRaceCoordinator.refresh();
   const failureRaceInvocation = { sessionId: "failure-race-parent" };
   const failureRaceCall = input("portfolio-management", "selection survives failed refresh", failureRaceInvocation.sessionId);
   assert.equal((await failureRaceCoordinator.hooks.onPreToolUse(failureRaceCall, failureRaceInvocation))?.permissionDecision, "allow");
-  assert.equal(failureRaceEvidence.find((event) => event.phase === "target.resolved")?.invocationId,
-    "post-failure-selection-call", "a failed refresh erased a newer selection event");
+  const refreshedInvocation = failureRaceEvidence.find((event) => event.phase === "target.resolved")?.invocationId;
+  assert.match(refreshedInvocation ?? "", /^[A-Za-z0-9_-]{43}$/,
+    "a failed refresh erased a newer selection event");
+  assert.notEqual(refreshedInvocation, "post-failure-selection-call",
+    "raw host correlation IDs must not be retained in public evidence");
   await failureRaceCoordinator.hooks.onPostToolUse({ ...failureRaceCall, toolResult: "failure race evidence" }, failureRaceInvocation);
 });
 
@@ -326,6 +508,7 @@ test("OpenCode orchestrator uses one child session through its SDK client", asyn
   const events: string[] = [];
   const client = { session: {
     create: async () => { events.push("create"); return { data: { id: "child" } }; },
+    update: confirmOpenCodeSessionTitle,
     prompt: async ({ path, body }: any) => { events.push(`prompt:${path.id}:${body.agent}:${body.tools.read}:${body.tools.bash}`); return { data: { parts: [{ type: "text", text: "done" }] } }; },
     delete: async ({ path }: any) => { events.push(`delete:${path.id}`); return { data: true }; },
   } };
@@ -334,10 +517,42 @@ test("OpenCode orchestrator uses one child session through its SDK client", asyn
   assert.deepEqual(events, ["create", "prompt:child:explore:true:false", "delete:child"]);
 });
 
+test("OpenCode bounds hung child cleanup and preserves a simultaneous execution failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-opencode-cleanup-bounds-"));
+  const neverDeletes = { session: {
+    create: async () => ({ data: { id: "hung-cleanup" } }),
+    update: confirmOpenCodeSessionTitle,
+    prompt: async () => ({ data: { parts: [{ type: "text", text: "done" }] } }),
+    delete: async () => new Promise<never>(() => {}),
+  } };
+  const started = Date.now();
+  const hungCleanup = new OpenCodeOrchestrator(neverDeletes as any, join(root, "hung"), undefined, undefined, 25);
+  await assert.rejects(() => hungCleanup.run(definition as any), /OpenCode child cleanup failed after two bounded attempts/u);
+  assert.ok(Date.now() - started < 500, "hung OpenCode cleanup was not bounded");
+
+  const promptAndCleanupFail = new OpenCodeOrchestrator({ session: {
+    create: async () => ({ data: { id: "double-failure" } }),
+    update: confirmOpenCodeSessionTitle,
+    prompt: async () => { throw new Error("OpenCode prompt failed before hung cleanup"); },
+    delete: async () => new Promise<never>(() => {}),
+  } } as any, join(root, "double"), undefined, undefined, 25);
+  await assert.rejects(() => promptAndCleanupFail.run(definition as any), (error: any) => {
+    assert.ok(error instanceof AggregateError);
+    assert.equal(error.errors[0].message, "OpenCode prompt failed before hung cleanup");
+    assert.ok(error.errors[1] instanceof AggregateError);
+    assert.equal(error.errors[1].errors.length, 2);
+    assert.ok(error.errors[1].errors.every((entry: Error) => /timed out after 25ms/u.test(entry.message)));
+    return true;
+  });
+});
+
 test("Pi orchestrator uses one in-memory SDK session", async () => {
   const events: string[] = [];
   const loaders: any[] = [];
-  const model = { provider: "openai-codex", id: "gpt-5.3-codex-spark" };
+  const agentDir = "pi-agent-home";
+  const model = { provider: "openai-codex", id: "gpt-test" };
+  const hostAuthPath = join(agentDir, "auth.json");
+  let modelRuntimeCreates = 0;
   let createOptions: any;
   const session = {
     subscribe: (handler: any) => { session.handler = handler; return () => events.push("unsubscribe"); },
@@ -357,10 +572,15 @@ test("Pi orchestrator uses one in-memory SDK session", async () => {
       }
       getSkills() { return this.result; }
     },
-    getAgentDir: () => "pi-agent-home",
+    getAgentDir: () => agentDir,
+    ModelRuntime: { create: async () => { modelRuntimeCreates += 1; throw new Error("unexpected runtime"); } },
     SessionManager: { inMemory: (cwd: string) => { events.push(`memory:${cwd === process.cwd()}`); return {}; } },
     createAgentSession: async (options: any) => {
       createOptions = options;
+      const derivedAuthPath = options.agentDir === undefined ? undefined : join(options.agentDir, "auth.json");
+      if (derivedAuthPath !== hostAuthPath || options.model?.provider !== "openai-codex") {
+        throw new Error("No API key found for openai-codex");
+      }
       events.push(`create:${options.cwd === process.cwd()}:${options.tools.join(",")}`);
       return { session };
     },
@@ -377,9 +597,113 @@ test("Pi orchestrator uses one in-memory SDK session", async () => {
     skillsOverride: undefined,
   });
   assert.equal(typeof loaders[0].skillsOverride, "function");
+  assert.equal(createOptions.agentDir, agentDir);
+  assert.equal(createOptions.modelRuntime, undefined);
+  assert.equal(modelRuntimeCreates, 0, "a builtin provider created an unnecessary isolated model runtime");
   assert.equal(createOptions.model, model);
   assert.equal(createOptions.thinkingLevel, "minimal");
   assert.equal(createOptions.resourceLoader instanceof sdk.DefaultResourceLoader, true);
+});
+
+test("Pi orchestrator replays projected providers into a public isolated ModelRuntime before session creation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-provider-replay-"));
+  const agentDir = join(root, "pi-home");
+  const secret = "runtime-secret-must-stay-in-memory";
+  const events: string[] = [];
+  const registered = new Map<string, any>();
+  let runtimeCreateOptions: any;
+  let createOptions: any;
+  const runtime = {
+    registerProvider: (id: string, config: any) => {
+      events.push(`runtime:register:${id}`);
+      registered.set(id, config);
+    },
+    setRuntimeApiKey: async (id: string, key: string) => {
+      assert.equal(key, secret);
+      events.push(`runtime:key:${id}`);
+    },
+    refresh: async (options: any) => {
+      assert.deepEqual(options, { allowNetwork: false });
+      events.push("runtime:refresh");
+    },
+  };
+  const session = {
+    subscribe: (handler: any) => { session.handler = handler; return () => events.push("unsubscribe"); },
+    handler: (_event: any) => {},
+    prompt: async () => {
+      events.push("prompt");
+      session.handler({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "replayed" } });
+    },
+    abort: async () => {},
+    dispose: () => events.push("dispose"),
+  };
+  const sdk = {
+    DefaultResourceLoader: class {
+      private result = { skills: [], diagnostics: [] };
+      constructor(private readonly options: any) {}
+      async reload() {
+        events.push("loader:reload");
+        this.result = this.options.skillsOverride(this.result);
+      }
+      getSkills() { return this.result; }
+    },
+    getAgentDir: () => agentDir,
+    ModelRuntime: {
+      create: async (options: any) => {
+        runtimeCreateOptions = options;
+        events.push("runtime:create");
+        return runtime;
+      },
+    },
+    SessionManager: { inMemory: () => ({}) },
+    createAgentSession: async (options: any) => {
+      createOptions = options;
+      events.push("session:create");
+      return { session };
+    },
+  };
+  const model = { provider: "runtime-router", id: "runtime-model" };
+  const providerProjections = [
+    { id: "runtime-router", config: { name: "Runtime router" }, runtimeKey: secret },
+    { id: "stored-router", config: { name: "Stored router" } },
+  ];
+  const orchestrator = new PiOrchestrator(
+    root,
+    async () => sdk as any,
+    [],
+    undefined,
+    [],
+    undefined,
+    { model, thinkingLevel: "low", providerProjections },
+  );
+
+  const evidence = await orchestrator.run(definition as any);
+
+  assert.equal(evidence, "replayed");
+  assert.deepEqual(runtimeCreateOptions, {
+    authPath: join(agentDir, "auth.json"),
+    modelsPath: join(agentDir, "models.json"),
+    allowModelNetwork: false,
+  });
+  assert.deepEqual(events, [
+    "loader:reload",
+    "runtime:create",
+    "runtime:register:runtime-router",
+    "runtime:register:stored-router",
+    "runtime:key:runtime-router",
+    "runtime:refresh",
+    "session:create",
+    "prompt",
+    "unsubscribe",
+    "dispose",
+  ]);
+  assert.equal(createOptions.modelRuntime, runtime);
+  assert.equal(createOptions.model, model);
+  assert.deepEqual(registered.get("runtime-router"), { name: "Runtime router" });
+  assert.deepEqual(registered.get("stored-router"), { name: "Stored router" });
+  assert.doesNotMatch(`${evidence}\n${events.join("\n")}`, new RegExp(secret, "u"));
+  await assert.rejects(access(join(agentDir, "auth.json")));
+  await assert.rejects(access(join(agentDir, "models.json")));
 });
 
 test("Pi orchestrator recovers evidence from the settled child transcript when streaming emits no deltas", async () => {
@@ -405,6 +729,40 @@ test("Pi orchestrator recovers evidence from the settled child transcript when s
     createAgentSession: async () => ({ session }),
   };
   assert.equal(await new PiOrchestrator(process.cwd(), async () => sdk as any).run(definition as any), "settled evidence");
+});
+
+test("OpenCode and Pi return explicitly truncated child evidence within one shared UTF-8 cap", async () => {
+  const hugeEvidence = `start:${"🙂".repeat(10_000)}:end`;
+  const openClient = { session: {
+    create: async () => ({ data: { id: "bounded-child" } }),
+    update: confirmOpenCodeSessionTitle,
+    prompt: async () => ({ data: { parts: [{ type: "text", text: hugeEvidence }] } }),
+    delete: async () => ({ data: true }),
+  } };
+  const openEvidence = await new OpenCodeOrchestrator(openClient as any, process.cwd()).run(definition as any);
+
+  const piSession = {
+    messages: [{ role: "assistant", content: [{ type: "text", text: hugeEvidence }] }],
+    subscribe: () => () => {}, prompt: async () => {}, abort: async () => {}, dispose: () => {},
+  };
+  const piSdk = {
+    DefaultResourceLoader: class {
+      private readonly options: any;
+      constructor(options: any) { this.options = options; }
+      async reload() { this.options.skillsOverride({ skills: [], diagnostics: [] }); }
+      getSkills() { return { skills: [], diagnostics: [] }; }
+    },
+    getAgentDir: () => "pi-agent-home",
+    SessionManager: { inMemory: () => ({}) },
+    createAgentSession: async () => ({ session: piSession }),
+  };
+  const piEvidence = await new PiOrchestrator(process.cwd(), async () => piSdk as any).run(definition as any);
+
+  for (const evidence of [openEvidence, piEvidence]) {
+    assert.ok(Buffer.byteLength(evidence, "utf8") <= 30_000);
+    assert.match(evidence, /\[HARBOR-EVIDENCE-TRUNCATED original_utf8_bytes=40010 limit=30000\]$/u);
+    assert.doesNotMatch(evidence, /�/u);
+  }
 });
 
 test("Pi gives a child exactly its invocation-scoped skill allowlist", async () => {
@@ -613,6 +971,7 @@ test("SDK orchestrators clean up child sessions when prompting fails", async () 
   const openCodeEvents: string[] = [];
   const openCode = new OpenCodeOrchestrator({ session: {
     create: async () => ({ data: { id: "failed" } }),
+    update: confirmOpenCodeSessionTitle,
     prompt: async () => { throw new Error("prompt failed"); },
     delete: async () => { openCodeEvents.push("delete"); return { data: true }; },
   } } as any, process.cwd());
@@ -646,14 +1005,20 @@ test("SDK orchestrators preserve execution and cleanup failures together", async
     return true;
   });
 
+  const openCodeProject = await mkdtemp(join(tmpdir(), "harbor-opencode-double-failure-"));
   const openCode = new OpenCodeOrchestrator({ session: {
     create: async () => ({ data: { id: "failed" } }),
+    update: confirmOpenCodeSessionTitle,
     prompt: async () => { throw new Error("opencode prompt failed"); },
     delete: async () => { throw new Error("opencode delete failed"); },
-  } } as any, process.cwd());
+  } } as any, openCodeProject);
   await assert.rejects(() => openCode.run(definition as any), (error: any) => {
     assert.ok(error instanceof AggregateError);
-    assert.deepEqual(error.errors.map((entry: Error) => entry.message), ["opencode prompt failed", "opencode delete failed"]);
+    assert.equal(error.errors[0].message, "opencode prompt failed");
+    assert.ok(error.errors[1] instanceof AggregateError);
+    assert.deepEqual(error.errors[1].errors.map((entry: Error) => entry.message), [
+      "opencode delete failed", "opencode delete failed",
+    ]);
     return true;
   });
 
@@ -713,7 +1078,22 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
   const previous = process.env.OPENCODE_CONFIG_DIR;
   process.env.OPENCODE_CONFIG_DIR = join(root, "home");
   const initial = join(root, "initial"); const current = join(root, "current");
-  const plugin = await AgentHarborPlugin({ client: { session: {} }, directory: initial } as any, {});
+  const plugin = await AgentHarborPlugin({
+    client: {
+      session: {
+        ...emptyOpenCodeActivitySession(),
+        message: async ({ path }: any) => ({ data: {
+          info: {
+            id: path.messageID,
+            role: "user",
+            model: { providerID: "openai", modelID: "gpt-5.3-codex-spark" },
+          },
+          parts: [],
+        } }),
+      },
+    },
+    directory: initial,
+  } as any, {});
   const config: any = {};
   await plugin.config?.(config);
   assert.deepEqual(Object.keys(config.command).slice(0, commandNames.length), [...commandNames]);
@@ -727,9 +1107,11 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
   assert.equal(config.agent["team-lead"].tools["*"], false);
   assert.equal(config.agent["team-lead"].tools.harbor_contract, false);
   assert.equal(config.agent["team-lead"].tools.harbor_delegate, true);
+  assert.equal(config.agent["team-lead"].tools.harbor_team_roster, true);
   assert.equal(config.agent["team-lead"].tools.bash, false);
   assert.equal(config.agent["team-lead"].permission["*"], "deny");
   assert.equal(config.agent["team-lead"].permission.harbor_delegate, "allow");
+  assert.equal(config.agent["team-lead"].permission.harbor_team_roster, "allow");
   assert.equal(config.agent["team-lead"].permission.read, "deny");
   assert.equal(config.agent["team-lead"].steps, 7);
   assert.equal(config.agent.crafter.steps, 4);
@@ -746,14 +1128,16 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
   assert.equal(config.agent.crafter.tools.agent_harbor_skills, true);
   assert.equal(config.agent.crafter.tools.skill, false);
   assert.equal(config.command.scout.agent, "talent-scout");
+  assert.equal(config.agent["talent-scout"].tools.harbor_team_roster, true);
   assert.equal(config.agent["talent-scout"].tools.harbor_filter_skills, true);
   assert.equal(config.agent["talent-scout"].tools.harbor_join_player, true);
   assert.equal(config.agent["talent-scout"].tools.read, false);
   assert.equal(config.agent["talent-scout"].permission.task, "deny");
+  assert.ok(plugin.tool?.harbor_team_roster);
   assert.ok(plugin.tool?.harbor_filter_skills);
   assert.ok(plugin.tool?.harbor_join_player);
   assert.ok(plugin.tool?.harbor);
-  assert.ok(plugin.tool?.harbor_contract);
+  assert.equal(plugin.tool?.harbor_contract, undefined, "OpenCode must not expose an unauthenticated contract preflight tool");
   assert.ok(plugin.tool?.harbor_delegate);
   assert.ok(plugin.tool?.agent_harbor_skills);
   const directPreflight = plugin["command.execute.before"]!;
@@ -780,7 +1164,7 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
   assert.match(String(result), /joined native/);
   assert.match(String(result), /command: \/native <request>/);
   assert.match(String(result), new RegExp(current.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  const reloadedPlugin = await AgentHarborPlugin({ client: { session: {} }, directory: current } as any, {});
+  const reloadedPlugin = await AgentHarborPlugin({ client: { session: emptyOpenCodeActivitySession() }, directory: current } as any, {});
   const reloadedConfig: any = {};
   await reloadedPlugin.config?.(reloadedConfig);
   assert.deepEqual(reloadedConfig.command.native, {
@@ -803,26 +1187,103 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
   const originalListCatalog = GhResolver.prototype.listCatalog;
   const originalInspectCatalog = GhResolver.prototype.inspectCatalog;
   try {
-    GhResolver.prototype.describe = async () => ({ commit: "e".repeat(40), description: "Author zx automation scripts." });
     GhResolver.prototype.listCatalog = async (source) => [{
       repo: source.repo, path: "skills/zx-example-author/SKILL.md", name: "zx-example-author", track: source.track, commit: "f".repeat(40),
     }];
     GhResolver.prototype.inspectCatalog = async (entry) => ({ name: entry.name, description: "Author zx automation scripts." });
+    const scoutExecution = (messageID: string, agent = "talent-scout") => ({
+      directory: current,
+      agent,
+      sessionID: "scout-session",
+      messageID,
+      abort: new AbortController().signal,
+    });
     await assert.rejects(() => plugin.tool!.harbor_filter_skills.execute(
       { query: "zx scripts" }, { directory: current, agent: "team-lead", abort: new AbortController().signal } as any,
-    ), /only to talent-scout/);
+    ), /not available to this principal/);
+    await assert.rejects(() => plugin.tool!.harbor_team_roster.execute(
+      { query: "native" }, { directory: current, agent: "crafter", abort: new AbortController().signal } as any,
+    ), /not available to this principal/);
+
+    let enterBlockedFilter!: () => void;
+    let releaseBlockedFilter!: () => void;
+    const blockedFilterEntered = new Promise<void>((resolve) => { enterBlockedFilter = resolve; });
+    const blockedFilterRelease = new Promise<void>((resolve) => { releaseBlockedFilter = resolve; });
+    let blockOneDescription = true;
+    GhResolver.prototype.describe = async () => {
+      if (blockOneDescription) {
+        blockOneDescription = false;
+        enterBlockedFilter();
+        await blockedFilterRelease;
+      }
+      return { commit: "e".repeat(40), description: "Author zx automation scripts." };
+    };
+    await plugin.tool!.harbor_team_roster.execute(
+      { query: "" }, scoutExecution("scout-concurrent") as any,
+    );
+    const blockedFilter = plugin.tool!.harbor_filter_skills.execute(
+      { query: "zx scripts" }, scoutExecution("scout-concurrent") as any,
+    );
+    await blockedFilterEntered;
+    await assert.rejects(() => plugin.tool!.harbor_filter_skills.execute(
+      { query: "automation" }, scoutExecution("scout-concurrent") as any,
+    ), /must run sequentially/);
+    releaseBlockedFilter();
+    await blockedFilter;
+
+    GhResolver.prototype.describe = async () => ({ commit: "e".repeat(40), description: "Author zx automation scripts." });
+    await assert.rejects(() => plugin.tool!.harbor_join_player.execute(
+      { definition: JSON.stringify({ name: "out-of-order", description: "Out of order", prompt: "Work.", tools: ["read"] }) },
+      scoutExecution("scout-order") as any,
+    ), /requires one successful complete harbor_team_roster snapshot first/);
+    await plugin.tool!.harbor_team_roster.execute({ query: "" }, scoutExecution("scout-order") as any);
+    await assert.rejects(() => plugin.tool!.harbor_join_player.execute(
+      { definition: JSON.stringify({ name: "still-out-of-order", description: "Out of order", prompt: "Work.", tools: ["read"] }) },
+      scoutExecution("scout-order") as any,
+    ), /requires a successful harbor_filter_skills call first/);
+
+    await plugin.tool!.harbor_team_roster.execute({ query: "" }, scoutExecution("scout-filter-limit") as any);
+    for (let index = 0; index < 3; index += 1) {
+      await plugin.tool!.harbor_filter_skills.execute(
+        { query: `zx scripts ${index}` }, scoutExecution("scout-filter-limit") as any,
+      );
+    }
+    await assert.rejects(() => plugin.tool!.harbor_filter_skills.execute(
+      { query: "fourth filter" }, scoutExecution("scout-filter-limit") as any,
+    ), /per-run limit \(3\)/);
+
+    const roster = await plugin.tool!.harbor_team_roster.execute(
+      { query: "native" }, scoutExecution("scout-main") as any,
+    );
+    assert.match(String(roster), /"id":"native".*"availability":"ready"/u);
+    assert.doesNotMatch(String(roster), /\.opencode|agent-harbor\/bench/iu);
+    await assert.rejects(() => plugin.tool!.harbor_team_roster.execute(
+      { query: "again" }, scoutExecution("scout-main") as any,
+    ), /exactly once/u);
     const matches = await plugin.tool!.harbor_filter_skills.execute(
-      { query: "zx scripts" }, { directory: current, agent: "talent-scout", abort: new AbortController().signal } as any,
+      { query: "zx scripts" }, scoutExecution("scout-main") as any,
     );
     assert.match(String(matches), /zx-example-author/);
     await assert.rejects(() => plugin.tool!.harbor_join_player.execute(
       { definition: "{}" }, { directory: current, agent: "crafter", abort: new AbortController().signal } as any,
-    ), /only to talent-scout/);
+    ), /not available to this principal/);
     const scouted = await plugin.tool!.harbor_join_player.execute(
       { definition: JSON.stringify({ name: "open-scouted", description: "Scouted", prompt: "Work narrowly.", tools: ["read"] }) },
-      { directory: current, agent: "talent-scout", abort: new AbortController().signal } as any,
+      scoutExecution("scout-main") as any,
     );
-    assert.match(String(scouted), /joined open-scouted/);
+    assert.match(String(scouted), /open-scouted joined/);
+    assert.match(String(scouted), /Role: Scouted/u);
+    assert.match(String(scouted), /Capacity: read/u);
+    assert.match(String(scouted), /Model: inherits the OpenCode host/u);
+    assert.match(String(scouted), /Reload OpenCode configuration/u);
+    assert.doesNotMatch(String(scouted), /registration:|active:|\\home\\|\/home\//u);
+    await assert.rejects(() => plugin.tool!.harbor_join_player.execute(
+      { definition: JSON.stringify({ name: "open-scouted-again", description: "Scouted again", prompt: "Work narrowly.", tools: ["read"] }) },
+      scoutExecution("scout-main") as any,
+    ), /talent-scout turn is terminal: join completed/);
+    await assert.rejects(() => plugin.tool!.harbor_filter_skills.execute(
+      { query: "after join" }, scoutExecution("scout-main") as any,
+    ), /talent-scout turn is terminal: join completed/);
   } finally {
     GhResolver.prototype.describe = originalDescribe;
     GhResolver.prototype.listCatalog = originalListCatalog;
@@ -850,6 +1311,103 @@ test("OpenCode removes an owned stale profile from host discovery instead of inh
   }
 });
 
+test("OpenCode incomplete startup drops owned host residue, preserves foreign commands, and emits a path-free repair warning", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-opencode-incomplete-startup-"));
+  const project = join(root, "project"); const home = join(root, "home");
+  const previous = process.env.OPENCODE_CONFIG_DIR;
+  process.env.OPENCODE_CONFIG_DIR = home;
+  try {
+    const spec = harnessSpec("opencode", home, project);
+    const active = join(project, spec.activeDir);
+    await new Roster(spec).join({
+      name: "reload-worker", description: "Reload worker", prompt: "Work narrowly.", tools: ["read"],
+    });
+    const logs: any[] = [];
+    const plugin = await AgentHarborPlugin({
+      client: {
+        session: {},
+        app: { log: async (entry: any) => { logs.push(entry); return { data: true }; } },
+      },
+      directory: project,
+    } as any, {});
+    const foreignBuild = { description: "User-owned build command", template: "keep $ARGUMENTS" };
+    const foreignAgent = { description: "Unrelated host agent", tools: { bash: true } };
+    const config: any = {
+      command: { build: foreignBuild },
+      agent: { "foreign-worker": foreignAgent },
+    };
+    await plugin.config?.(config);
+    assert.equal(config.agent["reload-worker"].metadata.owner, "agent-foundry");
+    assert.equal(config.command["reload-worker"].agent, "reload-worker");
+    const reloadProfile = join(active, `reload-worker${spec.extension}`);
+    await writeFile(reloadProfile,
+      (await readFile(reloadProfile, "utf8")).replace("  skill: false", "  skill: true"), "utf8");
+    config.agent["stale-worker"] = {
+      metadata: { owner: "agent-foundry", roster: "personal", player: "stale-worker", revision: "5" },
+      tools: { bash: true, edit: true },
+    };
+    await Promise.all(Array.from({ length: 513 }, (_, index) =>
+      writeFile(join(active, `noise-${index.toString().padStart(3, "0")}.txt`), "foreign", "utf8")));
+    await plugin.config?.(config);
+    assert.equal(Object.hasOwn(config.agent, "reload-worker"), false,
+      "partial reload retained the plugin's prior owned agent configuration");
+    assert.equal(Object.hasOwn(config.command, "reload-worker"), false,
+      "partial reload retained the plugin's prior direct alias");
+    assert.equal(Object.hasOwn(config.agent, "stale-worker"), false,
+      "partial startup retained a preloaded owned agent with expanded tools");
+    assert.equal(config.agent["foreign-worker"], foreignAgent, "partial cleanup removed a foreign host agent");
+    assert.equal(config.command.build, foreignBuild, "inactive Agent Harbor alias replaced a foreign /build command");
+    await plugin["command.execute.before"]?.(
+      { command: "build", sessionID: "foreign-build", arguments: "" }, { parts: [] },
+    );
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0].body.level, "warn");
+    assert.match(logs[0].body.message, /directory-entry-limit/u);
+    assert.match(logs[0].body.message, /Repair:/u);
+    assert.equal(logs[0].body.message.includes(project), false, "startup warning exposed an absolute project path");
+  } finally {
+    if (previous === undefined) delete process.env.OPENCODE_CONFIG_DIR; else process.env.OPENCODE_CONFIG_DIR = previous;
+  }
+});
+
+test("OpenCode direct aliases reject a replaced definition until host discovery reloads", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-opencode-direct-reload-"));
+  const project = join(root, "project");
+  const roster = new Roster(harnessSpec("opencode", join(root, "home"), project));
+  await roster.join({ name: "reviewer", description: "Original", prompt: "Use original policy.", tools: ["read"] });
+  const first = await AgentHarborPlugin({
+    client: { session: emptyOpenCodeActivitySession() },
+    directory: project,
+  } as any, {});
+  const firstConfig: any = {};
+  await first.config?.(firstConfig);
+  assert.equal(typeof firstConfig.agent.reviewer.metadata.definitionDigest, "string");
+  await first["command.execute.before"]?.(
+    { command: "reviewer", sessionID: "before-replace", arguments: "review" }, { parts: [] },
+  );
+  await first.event?.({ event: { type: "session.idle", properties: { sessionID: "before-replace" } } } as any);
+
+  await roster.join({
+    name: "reviewer", description: "Replacement", prompt: "Use replacement policy.",
+    tools: ["read", "search"], replace: true,
+  });
+  await assert.rejects(() => first["command.execute.before"]?.(
+    { command: "reviewer", sessionID: "stale-loaded-definition", arguments: "review" }, { parts: [] },
+  ), /requires an OpenCode reload because its loaded Agent Harbor definition changed/u);
+
+  const reloaded = await AgentHarborPlugin({
+    client: { session: emptyOpenCodeActivitySession() },
+    directory: project,
+  } as any, {});
+  const reloadedConfig: any = {};
+  await reloaded.config?.(reloadedConfig);
+  assert.notEqual(reloadedConfig.agent.reviewer.metadata.definitionDigest,
+    firstConfig.agent.reviewer.metadata.definitionDigest);
+  await reloaded["command.execute.before"]?.(
+    { command: "reviewer", sessionID: "after-reload", arguments: "review" }, { parts: [] },
+  );
+});
+
 test("OpenCode team lead dispatches exact active agents sequentially without a router", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-opencode-delegate-"));
   const project = join(root, "project");
@@ -862,6 +1420,8 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
   const portfolioManagementEntered = new Promise<void>((resolve) => { enterPortfolioManagement = resolve; });
   const portfolioManagementReleased = new Promise<void>((resolve) => { releasePortfolioManagement = resolve; });
   const client = { session: {
+    ...emptyOpenCodeActivitySession(),
+    update: confirmOpenCodeSessionTitle,
     create: async ({ body }: any) => {
       const id = `child-${creates.length + 1}`;
       creates.push({ id, body });
@@ -905,7 +1465,8 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
     assert.equal(config.command[id].template, "$ARGUMENTS");
   }
   const directPreflight = plugin["command.execute.before"]!;
-  await directPreflight({ command: "portfolio-management", sessionID: "parent", arguments: "prioritize" }, { parts: [] });
+  await directPreflight({ command: "portfolio-management", sessionID: "direct-preflight", arguments: "prioritize" }, { parts: [] });
+  await plugin.event?.({ event: { type: "session.idle", properties: { sessionID: "direct-preflight" } } } as any);
   await assert.rejects(() => directPreflight(
     { command: "portfolio-management", sessionID: "parent", arguments: "   " }, { parts: [] },
   ), /non-empty/);
@@ -939,8 +1500,8 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
 
   const beforeInvalid = creates.length;
   const sdlcExecution = { ...execution, messageID: "sdlc-invalid" };
-  await assert.rejects(() => delegate.execute({ agent: "portfolio-management", task: "work" }, { ...sdlcExecution, agent: "crafter" }), /only to team-lead/);
-  await assert.rejects(() => delegate.execute({ agent: "team-lead", task: "recurse" }, sdlcExecution), /recursively/);
+  await assert.rejects(() => delegate.execute({ agent: "portfolio-management", task: "work" }, { ...sdlcExecution, agent: "crafter" }), /not available to this principal/);
+  await assert.rejects(() => delegate.execute({ agent: "team-lead", task: "recurse" }, sdlcExecution), /recursive/);
   await assert.rejects(() => delegate.execute({ agent: "unknown", task: "work" }, sdlcExecution), /not found/);
   await assert.rejects(() => delegate.execute({ agent: "manage", task: "   " }, sdlcExecution), /non-empty/);
   await roster.bench("off dispose", bundledPlayers);
@@ -992,6 +1553,70 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
   assert.deepEqual(deletes, creates.map((entry) => entry.id));
 });
 
+test("OpenCode shares truthful reservations across direct aliases and team-lead delegation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-opencode-shared-reservation-"));
+  const project = join(root, "project");
+  let enterPrompt!: () => void; let releasePrompt!: () => void;
+  const promptEntered = new Promise<void>((resolve) => { enterPrompt = resolve; });
+  const promptReleased = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  const client = { session: {
+    ...emptyOpenCodeActivitySession(),
+    update: confirmOpenCodeSessionTitle,
+    message: async ({ path }: any) => path.messageID.startsWith("user-")
+      ? { data: { info: {
+        id: path.messageID, role: "user",
+        model: { providerID: "openai", modelID: "gpt-5.3-codex-spark" },
+      }, parts: [] } }
+      : { data: { info: {
+        id: path.messageID, role: "assistant",
+        parentID: path.messageID.includes("-2") ? "user-2" : "user-1",
+      }, parts: [] } },
+    create: async () => ({ data: { id: "reserved-child" } }),
+    prompt: async () => { enterPrompt(); await promptReleased; return { data: { parts: [{ type: "text", text: "done" }] } }; },
+    delete: async () => ({ data: true }),
+  } };
+  const plugin = await AgentHarborPlugin({ client, directory: project } as any, {});
+  await plugin.config?.({} as any);
+  const direct = plugin["command.execute.before"]!;
+  const delegate = plugin.tool!.harbor_delegate;
+  const roster = plugin.tool!.harbor_team_roster;
+  const execution = (messageID: string) => ({
+    agent: "team-lead", directory: project, worktree: project,
+    sessionID: "lead-session", messageID, abort: new AbortController().signal,
+    metadata: () => {}, ask: async () => {},
+  });
+
+  await direct({ command: "crafter", sessionID: "direct-a", arguments: "implement" }, { parts: [] });
+  assert.match(String(await roster.execute({ query: "crafter" }, execution("lead-roster-1") as any)),
+    /"id":"crafter","availability":"busy"/u);
+  await assert.rejects(() => delegate.execute(
+    { agent: "crafter", task: "must not overlap" }, execution("lead-delegate-1") as any,
+  ), /busy in another direct or delegated/u);
+  await assert.rejects(() => direct(
+    { command: "crafter", sessionID: "direct-b", arguments: "also overlap" }, { parts: [] },
+  ), /busy in another direct or delegated run/u);
+
+  await plugin.event?.({ event: { type: "session.idle", properties: { sessionID: "direct-a" } } } as any);
+  await direct({ command: "crafter", sessionID: "direct-b", arguments: "released" }, { parts: [] });
+  await plugin.event?.({ event: { type: "session.error", properties: { sessionID: "direct-b" } } } as any);
+
+  const delegated = delegate.execute(
+    { agent: "crafter", task: "hold the shared reservation" }, execution("lead-delegate-1") as any,
+  );
+  await promptEntered;
+  await assert.rejects(() => direct(
+    { command: "crafter", sessionID: "direct-c", arguments: "blocked by delegate" }, { parts: [] },
+  ), /busy in another direct or delegated run/u);
+  assert.match(String(await roster.execute({ query: "crafter" }, execution("lead-roster-2") as any)),
+    /"id":"crafter","availability":"busy"/u);
+  releasePrompt();
+  assert.equal(await delegated, "done");
+
+  await direct({ command: "crafter", sessionID: "direct-c", arguments: "after delegate" }, { parts: [] });
+  await plugin.event?.({ event: { type: "session.status", properties: { sessionID: "direct-c", status: { type: "idle" } } } } as any);
+  await direct({ command: "crafter", sessionID: "direct-d", arguments: "after terminal release" }, { parts: [] });
+});
+
 test("OpenCode TUI exposes direct controls that bypass sessions and models", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-opencode-tui-"));
   const previous = process.env.OPENCODE_CONFIG_DIR;
@@ -1004,49 +1629,94 @@ test("OpenCode TUI exposes direct controls that bypass sessions and models", asy
     clear: () => {}, setSize: () => {}, size: "medium", depth: 0, open: false,
   };
   const api: any = {
-    state: { path: { directory: project } },
+    route: { current: { name: "home" } },
+    state: {
+      path: { directory: project }, config: { agent: {} }, provider: [],
+      session: { get: () => undefined, messages: () => [], status: () => undefined },
+      part: () => [],
+    },
+    client: { v2: { session: {
+      list: async () => ({ data: { data: [], cursor: {} } }),
+      active: async () => ({ data: { data: {} } }),
+    } } },
     ui: {
       toast: (value: unknown) => toasts.push(value), dialog,
       DialogPrompt: (props: unknown) => props,
+      DialogAlert: (props: unknown) => props,
     },
+    lifecycle: { signal: new AbortController().signal, onDispose: () => () => {} },
     keymap: { registerLayer: (layer: unknown) => { layers.push(layer); return () => {}; } },
   };
   try {
     GhResolver.prototype.listCatalog = async (source) => [{ repo: source.repo, path: source.path ?? "skills/zx-example-author/SKILL.md", name: source.name ?? "zx-example-author" }];
     const commands = openCodeDirectCommands(api);
     assert.deepEqual(commands.map((command) => command.slashName), [
-      "bench-list", "bench-on", "bench-off", "harbor-join", "harbor-retire", "harbor-list-skills", "harbor-filter-skills",
+      "team", "bench-list", "bench-on", "bench-off", "harbor-join", "harbor-retire", "harbor-list-skills", "harbor-filter-skills",
     ]);
     assert.ok(commands.every((command) => command.namespace === "palette"));
     await commands.find((command) => command.name.endsWith("bench-list"))!.run();
-    assert.match(toasts.at(-1).title, /0 model tokens/);
-    assert.match(toasts.at(-1).message, /portfolio-management \| bundled \| bench/);
+    assert.match(prompts.at(-1).title, /0 model tokens/);
+    assert.match(prompts.at(-1).message, /portfolio-management \| bundled \| bench/);
 
     commands.find((command) => command.name.endsWith("bench-on"))!.run();
     await prompts.at(-1).onConfirm("portfolio-management");
-    assert.match(toasts.at(-1).message, /turned on/);
+    assert.match(prompts.at(-1).message, /portfolio-management enabled · reload required/u);
+    const portfolioManagement = bundledPlayers.get("portfolio-management")!;
+    api.state.config.agent["portfolio-management"] = {
+      metadata: {
+        owner: "agent-foundry",
+        roster: "sdlc",
+        player: "portfolio-management",
+        revision: "5",
+        definitionDigest: playerDefinitionDigest(portfolioManagement),
+      },
+    };
     commands.find((command) => command.name.endsWith("bench-off"))!.run();
     await prompts.at(-1).onConfirm("portfolio-management");
-    assert.match(toasts.at(-1).message, /turned off/);
+    assert.match(prompts.at(-1).message, /portfolio-management benched · reload required to remove stale discovery/u);
+    assert.match(prompts.at(-1).message, /Invocation is blocked now/u);
+    commands.find((command) => command.name.endsWith("bench-on"))!.run();
+    await prompts.at(-1).onConfirm("portfolio-management");
+    assert.match(prompts.at(-1).message, /portfolio-management enabled · ready · invocable/u);
+    commands.find((command) => command.name.endsWith("bench-off"))!.run();
+    await prompts.at(-1).onConfirm("portfolio-management");
 
+    const nativeDefinition = { name: "native", description: "Native", prompt: "Work", tools: ["read"] };
     commands.find((command) => command.name.endsWith("join"))!.run();
-    await prompts.at(-1).onConfirm(JSON.stringify({ name: "native", description: "Native", prompt: "Work", tools: ["read"] }));
-    assert.match(toasts.at(-1).message, /joined native/);
+    await prompts.at(-1).onConfirm(JSON.stringify(nativeDefinition));
+    assert.match(prompts.at(-1).message, /native joined · personal · enabled · reload required/u);
+    api.state.config.agent.native = {
+      metadata: {
+        owner: "agent-foundry",
+        roster: "personal",
+        player: "native",
+        revision: "5",
+        definitionDigest: playerDefinitionDigest(nativeDefinition),
+      },
+    };
+    commands.find((command) => command.name.endsWith("join"))!.run();
+    await prompts.at(-1).onConfirm(JSON.stringify(nativeDefinition));
+    assert.match(prompts.at(-1).message, /native joined · personal · ready · invocable/u);
+    assert.match(prompts.at(-1).message, /Run now: \/native <task>/u);
     commands.find((command) => command.name.endsWith("retire"))!.run();
     await prompts.at(-1).onConfirm("native");
-    assert.match(toasts.at(-1).message, /retired native/);
+    assert.match(prompts.at(-1).message, /native retired here · other projects intentionally untouched/u);
+    assert.match(prompts.at(-1).message, /reload required to remove its stale native agent and \/native alias/u);
 
     await commands.find((command) => command.name.endsWith("skills-list"))!.run();
-    assert.match(toasts.at(-1).message, /REPOSITORY.*PATH.*SKILL/);
-    assert.match(toasts.at(-1).message, /\x1b\[/);
+    assert.match(prompts.at(-1).message, /REPOSITORY.*PATH.*SKILL/su);
+    assert.doesNotMatch(prompts.at(-1).message, /\x1b\[/u);
     commands.find((command) => command.name.endsWith("skills-filter"))!.run();
     await prompts.at(-1).onConfirm("zx");
-    assert.match(toasts.at(-1).message, /zx-example-author/);
-    assert.ok(toasts.every((toast) => /0 model tokens/.test(toast.title)));
+    assert.match(prompts.at(-1).message, /zx-example-author/);
+    assert.equal(toasts.length, 0);
+    assert.ok(prompts.filter((entry) => entry?.message).every((entry) => /0 model tokens/.test(entry.title)));
+    assert.ok(prompts.flatMap((entry) => typeof entry?.message === "string" ? entry.message.split("\n") : [])
+      .every((line) => visibleTextWidth(line) <= 96), "an OpenCode direct-control result exceeded 96 cells");
 
     await openCodeTui.tui(api, undefined, {} as any);
     assert.equal(layers.length, 1);
-    assert.equal(layers[0].commands.length, 7);
+    assert.equal(layers[0].commands.length, 8);
     assert.ok(!("server" in openCodeTui));
   } finally {
     GhResolver.prototype.listCatalog = originalListCatalog;
@@ -1063,11 +1733,10 @@ test("Pi extension registers lifecycle and fixed roles through ExtensionAPI", ()
     getThinkingLevel: () => "minimal",
   } as any);
   assert.deepEqual(names, ["team", ...commandNames, ...rolePlayers.keys(), "scout"]);
-  assert.deepEqual(tools.map((tool) => tool.name), ["harbor_contract"]);
-  assert.equal(tools[0].executionMode, "sequential");
+  assert.deepEqual(tools, [], "Pi must not expose a model-callable global contract tool");
 });
 
-test("Pi /scout receives only filtering and one deterministic join tool", async () => {
+test("Pi /scout inspects one roster snapshot before filtering and one deterministic join", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-pi-scout-"));
   const previousHome = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = join(root, "home");
@@ -1083,9 +1752,48 @@ test("Pi /scout receives only filtering and one deterministic join tool", async 
   const originalListCatalog = GhResolver.prototype.listCatalog;
   const originalInspectCatalog = GhResolver.prototype.inspectCatalog;
   let captured: any;
+  let exercisedWhileRootWasLive = false;
   try {
     PiOrchestrator.prototype.run = async function (definition: any) {
       captured = { definition, customTools: [...(this as any).customTools], additionalTools: [...(this as any).additionalTools] };
+      await assert.rejects(() => captured.customTools[1].execute(
+        "filter-before-roster", { query: "zx scripts" }, new AbortController().signal, undefined, { cwd: project },
+      ), /requires one successful complete harbor_team_roster/u);
+      const roster = await captured.customTools[0].execute(
+        "roster", { query: "" }, new AbortController().signal, undefined, { cwd: project },
+      );
+      assert.match(roster.content[0].text, /"id":"crafter".*"availability":"ready"/u);
+      assert.doesNotMatch(roster.content[0].text, /"id":"team-lead"/u,
+        "the scout roster must count only reusable/recruitable capacity, not its manager");
+      await assert.rejects(() => captured.customTools[0].execute(
+        "roster-again", { query: "" }, new AbortController().signal, undefined, { cwd: project },
+      ), /exactly once/u);
+      await assert.rejects(() => captured.customTools[2].execute(
+        "join-before-filter", { definition: JSON.stringify({ name: "early", description: "Early", prompt: "Work", tools: ["read"] }) },
+        new AbortController().signal, undefined, { cwd: project },
+      ), /requires a successful harbor_filter_skills/u);
+      const filtered = await captured.customTools[1].execute(
+        "filter", { query: "zx scripts" }, new AbortController().signal, undefined, { cwd: project },
+      );
+      assert.match(filtered.content[0].text, /zx-example-author/);
+      await captured.customTools[1].execute("filter-2", { query: "zx" }, new AbortController().signal, undefined, { cwd: project });
+      await captured.customTools[1].execute("filter-3", { query: "automation" }, new AbortController().signal, undefined, { cwd: project });
+      await assert.rejects(() => captured.customTools[1].execute(
+        "filter-4", { query: "more" }, new AbortController().signal, undefined, { cwd: project },
+      ), /harbor_filter_skills reached its per-run limit \(3\)/u);
+      const joined = await captured.customTools[2].execute(
+        "join", { definition: JSON.stringify({
+          name: "zx-automator", description: "Writes zx automation", prompt: "Write bounded zx automation scripts.",
+          tools: ["read", "edit", "execute"], skills: [trustedSkills[0]],
+        }) }, new AbortController().signal, undefined, { cwd: project },
+      );
+      assert.match(joined.content[0].text, /zx-automator joined/u);
+      assert.doesNotMatch(joined.content[0].text, /registration:|active:|\\home\\|\/home\//u);
+      await assert.rejects(() => captured.customTools[2].execute(
+        "join-again", { definition: JSON.stringify({ name: "second", description: "Second", prompt: "Work", tools: ["read"] }) },
+        new AbortController().signal, undefined, { cwd: project },
+      ), /talent-scout turn is terminal: join completed/u);
+      exercisedWhileRootWasLive = true;
       return "scout-complete";
     };
     GhResolver.prototype.describe = async () => ({
@@ -1096,40 +1804,72 @@ test("Pi /scout receives only filtering and one deterministic join tool", async 
     }];
     GhResolver.prototype.inspectCatalog = async (entry) => ({ name: entry.name, description: "Author zx automation scripts." });
     await commands.get("scout").handler("alguien que escriba scripts en zx", {
-      cwd: project, model: undefined, ui: { notify: (message: string) => notices.push(message) },
+      cwd: project, ...authenticatedPiHostState(), ui: { notify: (message: string) => notices.push(message) },
     });
     assert.equal(captured.definition.name, scoutPlayer.name);
-    assert.deepEqual(captured.additionalTools, ["harbor_filter_skills", "harbor_join_player"]);
+    assert.deepEqual(captured.additionalTools, ["harbor_team_roster", "harbor_filter_skills", "harbor_join_player"]);
     assert.deepEqual(captured.customTools.map((entry: any) => entry.name), captured.additionalTools);
-    const filtered = await captured.customTools[0].execute(
-      "filter", { query: "zx scripts" }, new AbortController().signal, undefined, { cwd: project },
-    );
-    assert.match(filtered.content[0].text, /zx-example-author/);
-    await captured.customTools[0].execute("filter-2", { query: "zx" }, new AbortController().signal, undefined, { cwd: project });
-    await captured.customTools[0].execute("filter-3", { query: "automation" }, new AbortController().signal, undefined, { cwd: project });
+    assert.equal(exercisedWhileRootWasLive, true);
     await assert.rejects(() => captured.customTools[0].execute(
-      "filter-4", { query: "more" }, new AbortController().signal, undefined, { cwd: project },
-    ), /filter limit reached \(3\)/u);
-    const joined = await captured.customTools[1].execute(
-      "join", { definition: JSON.stringify({
-        name: "zx-automator", description: "Writes zx automation", prompt: "Write bounded zx automation scripts.",
-        tools: ["read", "edit", "execute"], skills: [trustedSkills[0]],
-      }) }, new AbortController().signal, undefined, { cwd: project },
-    );
-    assert.match(joined.content[0].text, /zx-automator joined/u);
-    assert.doesNotMatch(joined.content[0].text, /registration:|active:|\\home\\|\/home\//u);
-    await assert.rejects(() => captured.customTools[1].execute(
-      "join-again", { definition: JSON.stringify({ name: "second", description: "Second", prompt: "Work", tools: ["read"] }) },
-      new AbortController().signal, undefined, { cwd: project },
-    ), /at most one player/u);
+      "late-roster", { query: "" }, new AbortController().signal, undefined, { cwd: project },
+    ), /root is terminal or cleaning; late custom-tool calls are blocked/u);
     assert.match(await readFile(join(project, ".pi", "agents", "zx-automator.md"), "utf8"), /zx-example-author/);
-    assert.match(notices.at(-1)!, /^scout-complete\nTEAM RUN \(native Pi telemetry\)/u);
+    assert.match(notices.at(-1)!, /^scout-complete\nRoster commit preserved: zx-automator is joined and active in this project\.\nTEAM RUN \(native Pi telemetry\)/u);
   } finally {
     PiOrchestrator.prototype.run = originalRun;
     GhResolver.prototype.describe = originalDescribe;
     GhResolver.prototype.listCatalog = originalListCatalog;
     GhResolver.prototype.inspectCatalog = originalInspectCatalog;
     if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
+});
+
+test("Pi scout and delegate tool failures expose only bounded public errors", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-public-tool-error-"));
+  const project = join(root, "project");
+  const commands = new Map<string, any>();
+  const notices: string[] = [];
+  let observedToolError: any;
+  piExtension({
+    registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerTool: () => {},
+    getThinkingLevel: () => "minimal",
+  } as any);
+  const originalRun = PiOrchestrator.prototype.run;
+  const originalListCatalog = GhResolver.prototype.listCatalog;
+  try {
+    GhResolver.prototype.listCatalog = async () => {
+      throw new Error("GitHub failed at C:/Users/alice/private.txt with Bearer abcdefghijklmnop");
+    };
+    PiOrchestrator.prototype.run = async function () {
+      const roster = (this as any).customTools.find((tool: any) => tool.name === "harbor_team_roster");
+      const filter = (this as any).customTools.find((tool: any) => tool.name === "harbor_filter_skills");
+      await roster.execute("private-roster", { query: "" }, undefined, undefined, { cwd: project });
+      try {
+        await filter.execute("private-filter", { query: "security" }, undefined, undefined, { cwd: project });
+      } catch (error) {
+        observedToolError = error;
+        throw error;
+      }
+      return "unexpected";
+    };
+    await commands.get("scout").handler("find security capacity", {
+      cwd: project,
+      ...authenticatedPiHostState(),
+      ui: { notify: (message: string) => notices.push(message) },
+    });
+
+    assert.match(observedToolError?.message ?? "", /GitHub failed at \[path\] with \[redacted\]/u);
+    assert.equal(observedToolError?.cause, undefined);
+    assert.doesNotMatch(JSON.stringify({
+      name: observedToolError?.name,
+      message: observedToolError?.message,
+      cause: observedToolError?.cause,
+    }), /alice|private\.txt|abcdefghijklmnop/u);
+    assert.doesNotMatch(notices.join("\n"), /alice|private\.txt|abcdefghijklmnop/u);
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    GhResolver.prototype.listCatalog = originalListCatalog;
   }
 });
 
@@ -1146,11 +1886,31 @@ test("Pi /scout preserves and reconciles a committed join after failure or cance
     getThinkingLevel: () => "minimal",
   } as any);
   const originalRun = PiOrchestrator.prototype.run;
+  const originalDescribe = GhResolver.prototype.describe;
+  const originalListCatalog = GhResolver.prototype.listCatalog;
+  const originalInspectCatalog = GhResolver.prototype.inspectCatalog;
   let attempt = 0;
   try {
+    GhResolver.prototype.describe = async () => ({
+      commit: "d".repeat(40), description: "Author bounded failure-handling skills.",
+    });
+    GhResolver.prototype.listCatalog = async (source) => [{
+      repo: source.repo,
+      path: "skills/zx-example-author/SKILL.md",
+      name: "zx-example-author",
+      track: source.track,
+      commit: "e".repeat(40),
+    }];
+    GhResolver.prototype.inspectCatalog = async (entry) => ({
+      name: entry.name, description: "Author bounded failure-handling skills.",
+    });
     PiOrchestrator.prototype.run = async function () {
       const id = attempt++ === 0 ? "joined-before-failure" : "joined-before-cancel";
+      const rosterTool = (this as any).customTools.find((tool: any) => tool.name === "harbor_team_roster");
+      const filterTool = (this as any).customTools.find((tool: any) => tool.name === "harbor_filter_skills");
       const joinTool = (this as any).customTools.find((tool: any) => tool.name === "harbor_join_player");
+      await rosterTool.execute("roster", { query: "failure" }, new AbortController().signal, undefined, { cwd: project });
+      await filterTool.execute("filter", { query: "failure handling" }, new AbortController().signal, undefined, { cwd: project });
       await joinTool.execute("join", { definition: JSON.stringify({
         name: id, description: `Committed ${id}`, prompt: "Work narrowly.", tools: ["read"],
       }) }, new AbortController().signal, undefined, { cwd: project });
@@ -1159,7 +1919,7 @@ test("Pi /scout preserves and reconciles a committed join after failure or cance
     };
 
     await commands.get("scout").handler("find a failure specialist", {
-      cwd: project, model: undefined, ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+      cwd: project, ...authenticatedPiHostState(), ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
     });
     assert.ok(commands.has("joined-before-failure"), "committed alias was not reconciled after failure");
     assert.equal(notices.at(-1)!.level, "error");
@@ -1167,7 +1927,7 @@ test("Pi /scout preserves and reconciles a committed join after failure or cance
     assert.match(notices.at(-1)!.message, /recruiter child ended after that commit/u);
 
     await commands.get("scout").handler("find a cancellable specialist", {
-      cwd: project, model: undefined, ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+      cwd: project, ...authenticatedPiHostState(), ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
     });
     assert.ok(commands.has("joined-before-cancel"), "committed alias was not reconciled after cancellation");
     assert.equal(notices.at(-1)!.level, "warning");
@@ -1176,12 +1936,91 @@ test("Pi /scout preserves and reconciles a committed join after failure or cance
     await access(join(project, ".pi", "agents", "joined-before-cancel.md"));
   } finally {
     PiOrchestrator.prototype.run = originalRun;
+    GhResolver.prototype.describe = originalDescribe;
+    GhResolver.prototype.listCatalog = originalListCatalog;
+    GhResolver.prototype.inspectCatalog = originalInspectCatalog;
     if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousHome;
   }
 });
 
-test("Pi contract entrypoints inherit the host SDK model and thinking level", async () => {
+test("Pi /scout reconciles and reports a join that commits after the cancelled UI has settled", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-scout-late-commit-"));
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, "home");
+  const project = join(root, "project");
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  let shutdown!: () => Promise<void>;
+  piExtension({
+    registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerTool: () => {},
+    getThinkingLevel: () => "minimal",
+    on: (event: string, handler: () => Promise<void>) => { if (event === "session_shutdown") shutdown = handler; },
+  } as any);
+  const originalRun = PiOrchestrator.prototype.run;
+  const originalJoin = Roster.prototype.join;
+  const originalDescribe = GhResolver.prototype.describe;
+  const originalListCatalog = GhResolver.prototype.listCatalog;
+  const originalInspectCatalog = GhResolver.prototype.inspectCatalog;
+  let enterJoin!: () => void; let releaseJoin!: () => void;
+  const joinEntered = new Promise<void>((resolve) => { enterJoin = resolve; });
+  const joinReleased = new Promise<void>((resolve) => { releaseJoin = resolve; });
+  try {
+    GhResolver.prototype.describe = async () => ({ commit: "d".repeat(40), description: "Late commit skill." });
+    GhResolver.prototype.listCatalog = async (source) => [{
+      repo: source.repo, path: "skills/late/SKILL.md", name: "late-skill", track: source.track, commit: "e".repeat(40),
+    }];
+    GhResolver.prototype.inspectCatalog = async (entry) => ({ name: entry.name, description: "Late commit skill." });
+    Roster.prototype.join = async function (input: unknown) {
+      enterJoin();
+      await joinReleased;
+      return originalJoin.call(this, input);
+    };
+    PiOrchestrator.prototype.run = async function () {
+      const rosterTool = (this as any).customTools.find((tool: any) => tool.name === "harbor_team_roster");
+      const filterTool = (this as any).customTools.find((tool: any) => tool.name === "harbor_filter_skills");
+      const joinTool = (this as any).customTools.find((tool: any) => tool.name === "harbor_join_player");
+      await rosterTool.execute("roster", { query: "late" }, new AbortController().signal, undefined, { cwd: project });
+      await filterTool.execute("filter", { query: "late" }, new AbortController().signal, undefined, { cwd: project });
+      await joinTool.execute("join", { definition: JSON.stringify({
+        name: "late-commit", description: "Late commit", prompt: "Work narrowly.", tools: ["read"],
+      }) }, new AbortController().signal, undefined, { cwd: project });
+      return "late scout completed";
+    };
+    const controller = new AbortController();
+    const handler = commands.get("scout").handler("find a late specialist", {
+      cwd: project, ...authenticatedPiHostState(), signal: controller.signal,
+      ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+    });
+    await joinEntered;
+    controller.abort(new DOMException("cancel while join is in flight", "AbortError"));
+    await handler;
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0].level, "warning");
+    assert.match(notices[0].message, /^Cancellation requested; provider cleanup is still settling\./u);
+    assert.equal(commands.has("late-commit"), false, "alias existed before the delayed transaction committed");
+
+    releaseJoin();
+    await shutdown();
+    assert.ok(commands.has("late-commit"), "late committed alias was not reconciled from the settlement callback");
+    assert.equal(notices.length, 2, "late commit did not produce a distinct corrective notice");
+    assert.equal(notices[1].level, "warning");
+    assert.match(notices[1].message, /Roster commit preserved: late-commit is joined and active/u);
+    assert.match(notices[1].message, /reconciled the alias after commit/u);
+    await access(join(project, ".pi", "agents", "late-commit.md"));
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    Roster.prototype.join = originalJoin;
+    GhResolver.prototype.describe = originalDescribe;
+    GhResolver.prototype.listCatalog = originalListCatalog;
+    GhResolver.prototype.inspectCatalog = originalInspectCatalog;
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
+});
+
+test("Pi direct /contract inherits the host SDK model and thinking level without a global tool", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-pi-contract-model-"));
   const commands = new Map<string, any>();
   const tools = new Map<string, any>();
@@ -1214,21 +2053,250 @@ test("Pi contract entrypoints inherit the host SDK model and thinking level", as
       ui: { notify: (message: string) => notices.push(message) },
     };
     await commands.get("contract").handler(contract, context);
-    const toolResult = await tools.get("harbor_contract").execute(
-      "contract-tool", { definition: contract }, new AbortController().signal, undefined, context,
-    );
-    assert.equal(toolResult.content[0].text, "contract-evidence");
+    assert.equal(tools.size, 0);
     await commands.get("contract").handler(JSON.stringify({ ...definition, model: "router/special" }), context);
   } finally {
     PiOrchestrator.prototype.run = originalRun;
   }
 
   assert.match(notices.at(-1)!, /^contract-evidence\nTEAM RUN \(native Pi telemetry\)/u);
-  assert.equal(observed.length, 3);
+  assert.equal(observed.length, 2);
   assert.ok(observed.every((entry) => entry.hostMarker === "host-sdk-static-import"));
-  assert.ok(observed.slice(0, 2).every((entry) => entry.sessionOptions.model === hostModel));
-  assert.equal(observed[2].sessionOptions.model, configuredModel);
+  assert.equal(observed[0].sessionOptions.model, hostModel);
+  assert.equal(observed[1].sessionOptions.model, configuredModel);
   assert.ok(observed.every((entry) => entry.sessionOptions.thinkingLevel === "minimal"));
+});
+
+test("Pi model-backed commands fail before run creation without a usable authenticated inherited model", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-model-preflight-"));
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, "home");
+  const project = join(root, "project");
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  piExtension({
+    registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerTool: () => {},
+    getThinkingLevel: () => "minimal",
+  } as any);
+  const sentinel = {
+    provider: "unknown", id: "unknown", api: "unknown", contextWindow: 0, maxTokens: 0,
+  };
+  const selected = { provider: "authenticated-provider", id: "selected-model" };
+  const notify = (message: string, level?: string) => notices.push({ message, level });
+  const context = (model: any, modelRegistry: any) => ({
+    cwd: project, model, modelRegistry, ui: { notify },
+  });
+  const registry = (
+    available: any[],
+    options: { error?: string; authenticated?: boolean; configured?: any } = {},
+  ) => ({
+    getAvailable: () => available,
+    getError: () => options.error,
+    find: (provider: string, id: string) => {
+      const configured = options.configured;
+      return configured?.provider === provider && configured?.id === id ? configured : undefined;
+    },
+    hasConfiguredAuth: () => options.authenticated ?? false,
+  });
+  const contract = (model?: string) => JSON.stringify({
+    name: "preflight-contract", description: "Preflight contract", prompt: "Return evidence.",
+    tools: ["read"], task: "Check model preflight", ...(model ? { model } : {}),
+  });
+  const originalRun = PiOrchestrator.prototype.run;
+  const started: Array<{ name: string; model: any }> = [];
+  try {
+    PiOrchestrator.prototype.run = async function (definition: any) {
+      started.push({ name: definition.name, model: (this as any).sessionOptions.model });
+      return `evidence:${definition.name}`;
+    };
+
+    for (const [command, args] of [
+      ["crafter", "craft without a model"],
+      ["scout", "find capacity without a model"],
+      ["contract", contract()],
+    ] as const) {
+      await commands.get(command).handler(args, context(sentinel, registry([], { authenticated: false })));
+      assert.match(notices.at(-1)!.message, /Pi reports no usable authenticated model/u);
+      assert.match(notices.at(-1)!.message, /\/login[\s\S]*\/model/u);
+      assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
+      assert.doesNotMatch(notices.at(-1)!.message, /TEAM RUN/u);
+    }
+    await commands.get("team-lead").handler("lead without a selected model", context(
+      undefined,
+      registry([], { authenticated: false }),
+    ));
+    assert.match(notices.at(-1)!.message, /Pi reports no usable authenticated model/u);
+    assert.equal(started.length, 0);
+
+    await commands.get("crafter").handler("select before running", context(
+      sentinel,
+      registry([selected], { authenticated: true }),
+    ));
+    assert.match(notices.at(-1)!.message, /Pi has 1 usable model, but none is selected/u);
+    assert.match(notices.at(-1)!.message, /Use \/model/u);
+    assert.equal(started.length, 0);
+
+    await commands.get("crafter").handler("registry is unhealthy", context(
+      sentinel,
+      registry([], { error: "availability refresh failed", authenticated: false }),
+    ));
+    assert.match(notices.at(-1)!.message, /model availability is unobserved/u);
+    assert.equal(started.length, 0);
+
+    await commands.get("crafter").handler("stale authentication", context(
+      selected,
+      registry([selected], { authenticated: false }),
+    ));
+    assert.match(notices.at(-1)!.message, /selected Pi model has no configured authentication/u);
+    assert.match(notices.at(-1)!.message, /\/login authenticated-provider/u);
+    assert.equal(started.length, 0);
+
+    await commands.get("team").handler("", context(undefined, registry([], { authenticated: false })));
+    assert.match(notices.at(-1)!.message, /No one is working right now/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /LAST MISSION|TEAM RUN/u);
+
+    const authenticated = context(selected, registry([selected], { authenticated: true }));
+    await commands.get("crafter").handler("authenticated direct work", authenticated);
+    await commands.get("scout").handler("authenticated scout work", authenticated);
+    await commands.get("contract").handler(contract(), authenticated);
+    assert.deepEqual(started.map(({ name }) => name), ["crafter", "talent-scout", "preflight-contract"]);
+    assert.ok(started.every(({ model }) => model === selected));
+
+    const configured = { provider: "private-router", id: "contract-model" };
+    await commands.get("contract").handler(contract("private-router/contract-model"), context(
+      sentinel,
+      registry([], { authenticated: true, configured }),
+    ));
+    assert.equal(started.at(-1)!.name, "preflight-contract");
+    assert.equal(started.at(-1)!.model, configured,
+      "an explicit authenticated contract model was incorrectly blocked by the inherited-model preflight");
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
+});
+
+test("Pi captures only command-required public provider projections before creating a run", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-provider-capture-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = home;
+  const roster = new Roster(harnessSpec("pi", home, project));
+  await roster.join({
+    name: "alpha-worker", description: "Alpha route", prompt: "Work", tools: ["read"], model: "alpha/model-a",
+  });
+  await roster.join({
+    name: "beta-worker", description: "Beta route", prompt: "Work", tools: ["read"], model: "beta/model-b",
+  });
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(project);
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => "minimal",
+    } as any);
+  } finally { process.chdir(previousCwd); }
+
+  const selected = { provider: "selected-custom", id: "main" };
+  const secret = "runtime-key-never-persist-or-log";
+  const configs = new Map<string, any>([
+    ["selected-custom", { name: "Selected custom provider", api: "openai-completions" }],
+    ["alpha", { name: "Alpha provider", api: "openai-completions" }],
+    ["beta", { name: "Beta provider", api: "openai-completions" }],
+    ["unused", { name: "Unused provider", api: "openai-completions" }],
+  ]);
+  const configLookups: string[] = [];
+  const statusLookups: string[] = [];
+  const runtimeKeyLookups: string[] = [];
+  let runtimeKeyFailure = true;
+  const context = {
+    cwd: project,
+    model: selected,
+    modelRegistry: {
+      find: (provider: string, id: string) => provider === selected.provider && id === selected.id
+        ? selected
+        : undefined,
+      getAvailable: () => [selected],
+      getError: () => undefined,
+      hasConfiguredAuth: (candidate: any) => candidate === selected,
+      getRegisteredProviderConfig: (id: string) => {
+        configLookups.push(id);
+        return configs.get(id);
+      },
+      getProviderAuthStatus: (id: string) => {
+        statusLookups.push(id);
+        return { configured: true, source: id === "selected-custom" ? "runtime" : "stored" };
+      },
+      getApiKeyForProvider: async (id: string) => {
+        runtimeKeyLookups.push(id);
+        if (runtimeKeyFailure) throw new Error(`private provider failure containing ${secret}`);
+        return id === "selected-custom" ? secret : undefined;
+      },
+    },
+    ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+  } as any;
+  const captures: Array<{ definition: any; sessionOptions: any }> = [];
+  const originalRun = PiOrchestrator.prototype.run;
+  try {
+    PiOrchestrator.prototype.run = async function (runDefinition: any) {
+      captures.push({
+        definition: runDefinition,
+        sessionOptions: (this as any).sessionOptions,
+      });
+      return `evidence:${runDefinition.name}`;
+    };
+
+    await commands.get("crafter").handler("must fail during provider capture", context);
+    assert.equal(captures.length, 0, "runtime-only key failure created a child run");
+    assert.match(notices.at(-1)!.message, /could not transfer runtime-only authentication for provider selected-custom/u);
+    assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
+    assert.doesNotMatch(notices.at(-1)!.message, new RegExp(secret, "u"));
+    await commands.get("team").handler("", context);
+    assert.match(notices.at(-1)!.message, /No one is working right now/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /LAST MISSION|TEAM RUN/u);
+
+    runtimeKeyFailure = false;
+    await commands.get("crafter").handler("direct work", context);
+    const firstCapture = captures[0];
+    configs.get("selected-custom").name = "Mutated after capture";
+    await commands.get("scout").handler("find a teammate", context);
+    await commands.get("contract").handler(JSON.stringify({
+      name: "provider-contract", description: "Provider capture", prompt: "Return evidence.",
+      tools: ["read"], task: "contract work",
+    }), context);
+    await commands.get("team-lead").handler("coordinate configured teammates", context);
+
+    assert.deepEqual(captures.map(({ definition: item }) => item.name), [
+      "crafter", "talent-scout", "provider-contract", "team-lead",
+    ]);
+    for (const capture of captures.slice(0, 3)) {
+      assert.deepEqual(capture.sessionOptions.providerProjections.map(({ id }: any) => id), ["selected-custom"]);
+      assert.equal(capture.sessionOptions.providerProjections[0].runtimeKey, secret);
+    }
+    assert.equal(firstCapture.sessionOptions.providerProjections[0].config.name, "Selected custom provider",
+      "provider configuration was not snapshotted at command time");
+    const leadProjections = captures[3].sessionOptions.providerProjections;
+    assert.equal(leadProjections[0].id, "selected-custom");
+    assert.deepEqual(new Set(leadProjections.slice(1).map(({ id }: any) => id)), new Set(["alpha", "beta"]));
+    assert.equal(leadProjections.find(({ id }: any) => id === "alpha").runtimeKey, undefined);
+    assert.equal(leadProjections.find(({ id }: any) => id === "beta").runtimeKey, undefined);
+    assert.equal(configLookups.includes("unused"), false);
+    assert.equal(statusLookups.includes("unused"), false);
+    assert.deepEqual(new Set(runtimeKeyLookups), new Set(["selected-custom"]));
+    assert.ok(notices.every(({ message }) => !message.includes(secret)), "runtime key leaked into Pi notices");
+    await assert.rejects(access(join(home, "auth.json")));
+    await assert.rejects(access(join(home, "models.json")));
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
 });
 
 test("Pi configured personal models fail closed before a child and resolve when authenticated", async () => {
@@ -1370,6 +2438,88 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
     assert.match(notices.at(-1)!.message, /team-lead · manager · ready/u);
     assert.match(notices.at(-1)!.message, /talent-scout \(\/scout\) · utility · ready/u);
     assert.match(notices.at(-1)!.message, /No one is working right now/u);
+    const offlineSentinel = {
+      ...context,
+      model: { provider: "unknown", id: "unknown", maxTokens: 0 },
+    } as any;
+    await commands.get("team").handler("", offlineSentinel);
+    const offlineTeam = notices.at(-1)!.message.replace(/\s+/gu, " ");
+    assert.match(offlineTeam,
+      /Next default child: no active model; availability unobserved \(use \/model or \/login\).*model max output per response unknown/u);
+    assert.match(offlineTeam,
+      /Delegable now: none \(model availability unobserved; use \/model or \/login\)/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /unknown\/unknown \(inherited\)|max output per response 0 tokens/u);
+    await commands.get("team").handler("", {
+      ...context,
+      model: { provider: "unknown", id: "default", maxTokens: 0 },
+      modelRegistry: { getAvailable: () => [], getError: () => undefined },
+    } as any);
+    const noModelTeam = notices.at(-1)!.message.replace(/\s+/gu, " ");
+    assert.match(noModelTeam,
+      /Next default child: unavailable \(Pi reports no usable models; use \/login\).*model max output per response unknown/u);
+    assert.doesNotMatch(noModelTeam, /unknown\/default \(unobserved\)|max output per response 0 tokens/u);
+    await commands.get("team").handler("", {
+      ...context,
+      model: undefined,
+      modelRegistry: { getAvailable: () => [], getError: () => undefined },
+    } as any);
+    const emptyRegistryTeam = notices.at(-1)!.message.replace(/\s+/gu, " ");
+    assert.match(emptyRegistryTeam,
+      /Next default child: unavailable \(Pi reports no usable models; use \/login\).*model max output per response unknown/u);
+    assert.match(emptyRegistryTeam, /Delegable now: none \(model unavailable\)/u);
+    await commands.get("team").handler("", {
+      ...context,
+      model: undefined,
+      modelRegistry: {
+        getAvailable: () => [{ provider: "available-provider", id: "available-model" }],
+        getError: () => undefined,
+      },
+    } as any);
+    const unselectedTeam = notices.at(-1)!.message.replace(/\s+/gu, " ");
+    assert.match(unselectedTeam,
+      /Next default child: not selected \(1 available; use \/model\).*model max output per response unknown/u);
+    assert.doesNotMatch(unselectedTeam, /Pi reports no usable models/u);
+    assert.match(unselectedTeam, /Delegable now: none \(select a model with \/model\)/u);
+    assert.doesNotMatch(unselectedTeam, /Delegable now: crafter/u);
+    await commands.get("team").handler("", {
+      ...context,
+      model: undefined,
+      modelRegistry: { getAvailable: () => [], getError: () => "availability refresh failed" },
+    } as any);
+    const unhealthyRegistryTeam = notices.at(-1)!.message.replace(/\s+/gu, " ");
+    assert.match(unhealthyRegistryTeam,
+      /Next default child: no active model; availability unobserved \(use \/model or \/login\).*model max output per response unknown/u);
+    assert.match(unhealthyRegistryTeam,
+      /Delegable now: none \(model availability unobserved; use \/model or \/login\)/u);
+    assert.doesNotMatch(unhealthyRegistryTeam, /Pi reports no usable models/u);
+    await commands.get("team").handler("", {
+      ...context,
+      model: { provider: "unknown", id: "unknown", api: "unknown", maxTokens: 0, contextWindow: 0 },
+      modelRegistry: { getAvailable: () => [], getError: () => undefined },
+    } as any);
+    const canonicalSentinelTeam = notices.at(-1)!.message.replace(/\s+/gu, " ");
+    assert.match(canonicalSentinelTeam,
+      /Next default child: unavailable \(Pi reports no usable models; use \/login\).*Delegable now: none \(model unavailable\)/u);
+    await commands.get("team").handler("", {
+      ...context,
+      model: { provider: "unknown", id: "default", maxTokens: 0 },
+      modelRegistry: {
+        getAvailable: () => [{ provider: "available-provider", id: "available-model" }],
+        getError: () => undefined,
+      },
+    } as any);
+    const sentinelWithAvailableModel = notices.at(-1)!.message.replace(/\s+/gu, " ");
+    assert.match(sentinelWithAvailableModel, /Next default child: not selected \(1 available; use \/model\)/u);
+    assert.match(sentinelWithAvailableModel, /Delegable now: none \(select a model with \/model\)/u);
+    assert.doesNotMatch(sentinelWithAvailableModel, /model unavailable|Delegable now: crafter/u);
+    await commands.get("team").handler("", {
+      ...context,
+      model: { provider: "openai", id: "gpt-valid", maxTokens: -1 },
+    } as any);
+    assert.match(notices.at(-1)!.message.replace(/\s+/gu, " "),
+      /Next default child: openai\/gpt-valid \(inherited\).*model max output per response unknown/u);
+    assert.match(notices.at(-1)!.message, /Delegable now: crafter/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /max output per response -1 tokens/u);
     await commands.get("bench").handler("list construction", context);
     assert.match(notices.at(-1)!.message, /build · bundled · bench/u);
     assert.doesNotMatch(notices.at(-1)!.message, /portfolio-management · bundled/u);
@@ -1399,7 +2549,18 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
     assert.match(commands.get("retire").description, /Unregister one personal teammate/u);
     assert.match(commands.get("list-skills").description, /Search the trusted skill catalog/u);
     await commands.get("team").handler("help", context);
-    assert.match(notices.at(-1)!.message, /configured\/observed model, thinking,\s+state, safe task label, and run ID/u);
+    assert.match(notices.at(-1)!.message,
+      /Field filters: member:\/id: · kind:\/role: · description: · capability:\/tool:\/skill:/u);
+    assert.match(notices.at(-1)!.message, /status:\/state: · model: · thinking: · task: · run:/u);
+    assert.match(notices.at(-1)!.message,
+      /Examples: \/team status:working · \/team member:reviewer · \/team model:gpt/u);
+    assert.match(notices.at(-1)!.message, /Choose one exact teammate: \/<id> <task>.*\/player <id> <task>/u);
+    assert.match(notices.at(-1)!.message, /Set a personal model with \/join JSON model:"provider\/model"; add replace:true/u);
+    assert.match(notices.at(-1)!.message, /Tokens, AI credits, and max-output are observations only when the host reports/u);
+    assert.match(notices.at(-1)!.message, /does not simulate a hard per-run token cap/u);
+    assert.match(notices.at(-1)!.message, /limits 32 concurrent roots.*6 sequential team-lead delegations/u);
+    assert.match(notices.at(-1)!.message, /Disposable work: \/contract <json> \(exactly 1 model child\)/u);
+    assert.match(notices.at(-1)!.message, /Recruit: \/scout <need> \(1 recruiter\s+model child\)/u);
     await commands.get("bench").handler("on design", context);
     assert.equal((notices.at(-1)!.message.match(/0 model tokens/gu) ?? []).length, 1);
     assert.match(commands.get("design").description, /Solution design/u);
@@ -1426,14 +2587,46 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
     await commands.get("retire").handler("", context);
     assert.match(notices.at(-1)!.message, /Usage: \/retire <personal-id>/u);
     assert.equal((notices.at(-1)!.message.match(/0 model tokens/gu) ?? []).length, 1);
-    const joinedInput = JSON.stringify({ name: "concise", description: "Concise reviewer", prompt: "Review", tools: ["read"] });
+    const joinedInput = JSON.stringify({
+      name: "concise", description: "Concise reviewer", prompt: "Review", tools: ["read"],
+      skills: [trustedSkills[0]], model: "router/special",
+    });
     await commands.get("join").handler(joinedInput, context);
     assert.match(notices.at(-1)!.message, /concise joined · personal · ready/u);
+    assert.match(notices.at(-1)!.message, /Capacity: read, skill:zx-example-author/u);
+    assert.match(notices.at(-1)!.message, /Model: configured router\/special/u);
     assert.doesNotMatch(notices.at(-1)!.message, /registration:|active:|\\home\\|\/home\//u);
+    const joinedCompletion = await commands.get("team").getArgumentCompletions("concise");
+    assert.deepEqual(joinedCompletion.map((item: any) => item.value), ["concise"], "join did not invalidate the completion cache");
     await commands.get("join").handler(JSON.stringify({
       name: "concise", description: "Updated concise reviewer", prompt: "Review", tools: ["read"], replace: true,
     }), context);
     assert.match(commands.get("concise").description, /Updated concise reviewer/u);
+    await commands.get("join").handler(JSON.stringify({
+      name: "private-metadata",
+      description: "Review C:/Users/alice/secret.txt with Bearer abcdefghijklmnop",
+      prompt: "Review",
+      tools: ["read"],
+    }), context);
+    assert.match(notices.at(-1)!.message, /Role: Review \[path\] with \[redacted\]/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /alice|secret\.txt|abcdefghijklmnop/u);
+    await commands.get("team").handler("private-metadata", context);
+    assert.match(notices.at(-1)!.message, /Review \[path\] with \[redacted\]/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /alice|secret\.txt|abcdefghijklmnop/u);
+
+    for (const [command, input, expected] of [
+      ["team", "x".repeat(4_097), /\/team arguments exceeds 4096 bytes/u],
+      ["bench", "x".repeat(4_097), /\/bench arguments exceeds 4096 bytes/u],
+      ["join", "x".repeat(100_001), /\/join arguments exceeds 100000 bytes/u],
+      ["contract", "x".repeat(100_001), /\/contract definition exceeds 100000 bytes/u],
+      ["crafter", "x".repeat(30_001), /\/crafter task exceeds 30000 bytes/u],
+      ["scout", "x".repeat(30_001), /\/scout task exceeds 30000 bytes/u],
+    ] as const) {
+      await commands.get(command).handler(input, context);
+      assert.match(notices.at(-1)!.message, expected);
+      assert.doesNotMatch(notices.at(-1)!.message, /x{100}/u);
+    }
+    assert.equal(await commands.get("team").getArgumentCompletions("x".repeat(4_097)), null);
     assert.ok(notices.every(({ message }) => !message.includes("model boundary crossed")));
   } finally {
     PiOrchestrator.prototype.run = originalRun;
@@ -1530,7 +2723,7 @@ test("Pi Alt+H cancels an idle slash child without a caller signal and clears li
       }, { once: true }));
     };
     const invocation = commands.get("crafter").handler("cancel me", {
-      cwd: process.cwd(), model: undefined, signal: undefined,
+      cwd: process.cwd(), ...authenticatedPiHostState(), signal: undefined,
       ui: {
         notify: (message: string, level?: string) => notices.push({ message, level }),
         setStatus: (_key: string, value?: string) => statuses.push(value),
@@ -1552,6 +2745,188 @@ test("Pi Alt+H cancels an idle slash child without a caller signal and clears li
     assert.equal(widgets.at(-1), undefined);
     assert.equal(shutdownHandlers.length, 1);
   } finally { PiOrchestrator.prototype.run = originalRun; }
+});
+
+test("Pi stop keeps abort-ignoring work cleaning until real settlement and blocks reuse", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-ignore-abort-"));
+  const project = join(root, "project");
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, "home");
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  const statuses: Array<string | undefined> = [];
+  const widgets: Array<string[] | undefined> = [];
+  piExtension({
+    registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerTool: () => {},
+    getThinkingLevel: () => "minimal",
+  } as any);
+  const originalRun = PiOrchestrator.prototype.run;
+  let starts = 0;
+  let ignoredSignal: AbortSignal | undefined;
+  const releases: Array<() => void> = [];
+  try {
+    PiOrchestrator.prototype.run = async function (_definition: any, signal?: AbortSignal) {
+      starts += 1;
+      ignoredSignal = signal;
+      (this as any).runObserver.sessionStarted();
+      return new Promise<string>((resolve) => releases.push(() => resolve("late provider settlement")));
+    };
+    const context = {
+      cwd: project, ...authenticatedPiHostState(), signal: undefined,
+      ui: {
+        notify: (message: string, level?: string) => notices.push({ message, level }),
+        setStatus: (_key: string, value?: string) => statuses.push(value),
+        setWidget: (_key: string, value?: string[]) => widgets.push(value),
+      },
+    } as any;
+    const awaitBounded = async (promise: Promise<unknown>): Promise<void> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          promise,
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error("Pi command remained hung after stop")), 1_000);
+            timer.unref?.();
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+
+    const first = commands.get("crafter").handler("ignore the first abort", context);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await commands.get("team").handler("stop all", context);
+    await awaitBounded(first);
+    assert.equal(ignoredSignal?.aborted, true);
+    assert.match(notices.at(-1)!.message,
+      /Cancellation requested; provider cleanup is still settling[\s\S]*crafter · run pi-run-1 · fixed · cleaning/u);
+    assert.ok(statuses.some((value) => value?.includes("cleaning")), "stop never exposed the bounded cleanup transition");
+    assert.equal(statuses.at(-1), undefined);
+    assert.equal(widgets.at(-1), undefined);
+    await commands.get("team").handler("", context);
+    assert.match(notices.at(-1)!.message,
+      /1 active[\s\S]*crafter · pi-run-1 · cleaning[\s\S]*crafter · fixed · cleaning/u);
+
+    await commands.get("crafter").handler("capacity must stay blocked", context);
+    assert.equal(starts, 1, "cleaning abort-ignoring work released specialist capacity early");
+    assert.match(notices.at(-1)!.message, /already working in pi-run-1/u);
+    await commands.get("team").handler("stop all", context);
+    assert.match(notices.at(-1)!.message, /Already stopping 1 root run\(s\): pi-run-1.*waiting for provider cleanup/isu);
+
+    releases[0]();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await commands.get("team").handler("", context);
+    assert.match(notices.at(-1)!.message,
+      /0 active[\s\S]*LAST MISSION[\s\S]*crafter · pi-run-1 · cancelled/u);
+
+    const second = commands.get("crafter").handler("capacity is reusable after settlement", context);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(starts, 2, "settled cancellation did not release specialist capacity");
+    await commands.get("team").handler("stop all", context);
+    await awaitBounded(second);
+    releases[1]();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const alreadyCancelled = new AbortController();
+    alreadyCancelled.abort(new DOMException("cancelled before invocation", "AbortError"));
+    await commands.get("crafter").handler("must not create a child", { ...context, signal: alreadyCancelled.signal });
+    assert.equal(starts, 2, "a pre-aborted command entered the Pi orchestrator");
+
+    const personalDefinition = JSON.stringify({
+      name: "steady-reviewer", description: "Review safely", prompt: "Review only", tools: ["read"],
+    });
+    await commands.get("join").handler(personalDefinition, context);
+    const personal = commands.get("steady-reviewer").handler("stay active during retire", context);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await commands.get("retire").handler("steady-reviewer", context);
+    const personalRunId = /working in (pi-run-\d+)/u.exec(notices.at(-1)!.message)?.[1];
+    assert.ok(personalRunId);
+    assert.match(notices.at(-1)!.message,
+      new RegExp(`cannot retire steady-reviewer while it is working in ${personalRunId}`, "u"));
+    assert.match(notices.at(-1)!.message,
+      new RegExp(`use /team stop ${personalRunId}, then wait for cleanup to settle`, "u"));
+    await access(join(project, ".pi", "agents", "steady-reviewer.md"));
+    await commands.get("team").handler(`stop ${personalRunId}`, context);
+    await awaitBounded(personal);
+    releases[2]();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await commands.get("retire").handler("steady-reviewer", context);
+    assert.match(notices.at(-1)!.message, /steady-reviewer unregistered and deactivated here/u);
+    await assert.rejects(access(join(project, ".pi", "agents", "steady-reviewer.md")));
+
+    // A disposable contractor may intentionally share a descriptive name; it
+    // does not own the persistent roster entry and therefore cannot block its retirement.
+    await commands.get("join").handler(personalDefinition, context);
+    const contractor = commands.get("contract").handler(JSON.stringify({
+      name: "steady-reviewer", description: "Disposable review", prompt: "Review once",
+      tools: ["read"], task: "hold contractor open",
+    }), context);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await commands.get("retire").handler("steady-reviewer", context);
+    assert.match(notices.at(-1)!.message, /steady-reviewer unregistered and deactivated here/u);
+    await commands.get("team").handler("stop all", context);
+    await awaitBounded(contractor);
+    releases[3]();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
+});
+
+test("Pi stop all cancels abortable roots even when another root is already cleaning", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-mixed-stop-"));
+  const project = join(root, "project");
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, "home");
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  piExtension({
+    registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerTool: () => {},
+    getThinkingLevel: () => "minimal",
+  } as any);
+  const originalRun = PiOrchestrator.prototype.run;
+  const signals: AbortSignal[] = [];
+  const releases: Array<() => void> = [];
+  try {
+    PiOrchestrator.prototype.run = async function (_definition: any, signal?: AbortSignal) {
+      signals.push(signal!);
+      (this as any).runObserver.sessionStarted();
+      return new Promise<string>((resolve) => releases.push(() => resolve("provider settled")));
+    };
+    const context = {
+      cwd: project, ...authenticatedPiHostState(), signal: undefined,
+      ui: {
+        notify: (message: string, level?: string) => notices.push({ message, level }),
+        setStatus: () => {}, setWidget: () => {},
+      },
+    } as any;
+    const crafter = commands.get("crafter").handler("first root", context);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await commands.get("team").handler("stop pi-run-1", context);
+    await crafter;
+    assert.equal(signals[0]?.aborted, true);
+
+    const lead = commands.get("team-lead").handler("second root", context);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(signals[1]?.aborted, false);
+    await commands.get("team").handler("stop all", context);
+    const mixedStop = notices.at(-1)!.message;
+    assert.match(mixedStop, /Stopping 1 Agent Harbor root run\(s\): pi-run-2/u);
+    assert.match(mixedStop, /Already stopping 1 root run\(s\): pi-run-1/u);
+    await lead;
+    assert.equal(signals[1]?.aborted, true, "mixed stop skipped the still-abortable root");
+    releases.forEach((release) => release());
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
 });
 
 test("Pi extension invokes every fixed and activated agent and equips the team lead for named delegation", async () => {
@@ -1579,18 +2954,25 @@ test("Pi extension invokes every fixed and activated agent and equips the team l
     customTools: any[];
     sessionOptions: any;
     hostMarker: unknown;
+    rosterResult?: any;
   }> = []; const notices: string[] = [];
   const originalRun = PiOrchestrator.prototype.run;
   try {
     PiOrchestrator.prototype.run = async function (definition: any) {
       const sdk = await (this as any).loadSdk();
-      received.push({
+      const entry: (typeof received)[number] = {
         definition,
         additionalTools: [...(this as any).additionalTools],
         customTools: [...(this as any).customTools],
         sessionOptions: { ...(this as any).sessionOptions },
         hostMarker: sdk.HARBOR_PI_SDK_HOST_TEST_MARKER,
-      });
+      };
+      received.push(entry);
+      if (definition.name === "team-lead") {
+        entry.rosterResult = await entry.customTools[1].execute(
+          "roster-build", { query: "construction" }, undefined, undefined, { cwd: project },
+        );
+      }
       return `completed:${definition.name}`;
     };
     await commands.get("reviewer").handler("inspect src", { cwd: project, model: hostModel, ui: { notify: (message: string) => notices.push(message) } });
@@ -1607,11 +2989,10 @@ test("Pi extension invokes every fixed and activated agent and equips the team l
   assert.deepEqual(lead.additionalTools, ["harbor_delegate", "harbor_team_roster"]);
   assert.deepEqual(lead.customTools.map((tool) => tool.name), ["harbor_delegate", "harbor_team_roster"]);
   assert.equal(lead.customTools[0].executionMode, "sequential");
-  assert.ok([...lead.customTools[0].description].length < 7_000, "lead roster metadata was not context-bounded");
+  assert.ok([...lead.customTools[0].description].length < 2_500, "lead roster preview was not compact enough");
   assert.doesNotMatch(lead.customTools[0].description, /x{500}/u, "personal description was not truncated");
-  const rosterResult = await lead.customTools[1].execute(
-    "roster-build", { query: "construction" }, undefined, undefined, { cwd: project },
-  );
+  assert.match(lead.customTools[0].description, /harbor_team_roster with query "" for the full invocation snapshot/u);
+  const rosterResult = lead.rosterResult;
   assert.match(rosterResult.content[0].text, /"id":"build".*"tools":\["read","edit"\].*"skills":\[\]/u);
   assert.equal(rosterResult.details.childCreated, false);
   for (const entry of received.filter((item) => item.definition.name !== "team-lead")) {
@@ -1628,7 +3009,7 @@ test("Pi extension invokes every fixed and activated agent and equips the team l
   assert.ok(notices.every((notice) => notice.includes("TEAM RUN (native Pi telemetry)")));
 });
 
-test("Pi team lead delegates sequentially to different active agents with bounds and preflight", async () => {
+test("Pi team lead delegates sequentially to different enabled agents with bounds and preflight", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-pi-delegate-"));
   const project = join(root, "project");
   const roster = new Roster(harnessSpec("pi", join(root, "home"), project));
@@ -1645,72 +3026,88 @@ test("Pi team lead delegates sequentially to different active agents with bounds
   } finally { process.chdir(previous); }
 
   const calls: any[] = []; const delegates: any[] = []; const notices: string[] = []; const runtimes: any[] = [];
+  const context = { cwd: project, model: hostModel };
+  let leadInvocation = 0;
   const originalRun = PiOrchestrator.prototype.run;
   try {
     PiOrchestrator.prototype.run = async function (definition: any) {
       calls.push(definition);
       const sdk = await (this as any).loadSdk();
       runtimes.push({ sessionOptions: { ...(this as any).sessionOptions }, hostMarker: sdk.HARBOR_PI_SDK_HOST_TEST_MARKER });
-      if (definition.name === "team-lead") delegates.push((this as any).customTools[0]);
+      if (definition.name === "team-lead") {
+        const delegate = (this as any).customTools[0];
+        delegates.push(delegate);
+        assert.equal(delegate.executionMode, "sequential");
+        assert.deepEqual(
+          new Set(delegate.parameters.properties.agent.enum),
+          new Set(["crafter", ...bundledPlayers.keys()]),
+          "Pi delegate schema did not enumerate the exact enabled snapshot",
+        );
+        assert.equal(delegate.parameters.properties.agent.pattern,
+          (harborStaticCustomToolSpecs[harborCustomToolNames.delegate].parameters as any).properties.agent.pattern);
+        assert.equal(
+          (harborStaticCustomToolSpecs[harborCustomToolNames.delegate].parameters as any).properties.agent.enum,
+          undefined,
+          "invocation-specific enum mutated the shared static schema",
+        );
+        if (leadInvocation === 0) {
+          let priorEvidence: string | undefined;
+          for (const [index, step] of defaultCycle.steps.entries()) {
+            const result: any = await delegate.execute(
+              `default-${index + 1}`,
+              { agent: step.agent, task: datasetTask(defaultCycle, index, priorEvidence) },
+              new AbortController().signal, undefined, context,
+            );
+            priorEvidence = result.content[0].text;
+            assert.equal(priorEvidence, `evidence:${step.agent}`);
+          }
+        } else {
+          let priorEvidence: string | undefined;
+          for (const [index, step] of fullCycle.steps.slice(0, 2).entries()) {
+            const result: any = await delegate.execute(
+              `call-${index + 1}`,
+              { agent: step.agent, task: datasetTask(fullCycle, index, priorEvidence) },
+              new AbortController().signal, undefined, context,
+            );
+            priorEvidence = result.content[0].text;
+            assert.equal(priorEvidence, `evidence:${step.agent}`);
+          }
+          await assert.rejects(() => delegate.execute(
+            "call-duplicate",
+            { agent: fullCycle.steps[0].agent, task: "duplicate stage" },
+            new AbortController().signal, undefined, context,
+          ), /already delegated/);
+          assert.deepEqual(
+            calls.slice(0, 2 + defaultCycle.steps.length + 2).map((call) => call.name),
+            ["team-lead", ...defaultCycle.steps.map((step) => step.agent), "team-lead", ...fullCycle.steps.slice(0, 2).map((step) => step.agent)],
+          );
+          assert.match(calls.at(-1).task, new RegExp(`evidence:${fullCycle.steps[0].agent}`));
+
+          const beforeInvalid = calls.length;
+          await assert.rejects(() => delegate.execute("bad", { agent: "team-lead", task: "recurse" }, new AbortController().signal, undefined, context), /recursive/);
+          await assert.rejects(() => delegate.execute("bad", { agent: "unknown", task: "work" }, new AbortController().signal, undefined, context), /not in this team-lead roster snapshot/);
+          await assert.rejects(() => delegate.execute("bad", { agent: "manage", task: "   " }, new AbortController().signal, undefined, context), /non-empty/);
+          assert.equal(calls.length, beforeInvalid, "invalid delegation must not create a child");
+
+          for (const [index, step] of fullCycle.steps.slice(2).entries()) {
+            const result: any = await delegate.execute(
+              `call-${step.agent}`,
+              { agent: step.agent, task: datasetTask(fullCycle, index + 2, priorEvidence) },
+              new AbortController().signal, undefined, context,
+            );
+            priorEvidence = result.content[0].text;
+          }
+          await assert.rejects(() => delegate.execute(
+            "call-7", { agent: fullCycle.steps[0].agent, task: "too many" },
+            new AbortController().signal, undefined, context,
+          ), /limit reached/);
+        }
+        leadInvocation += 1;
+      }
       return `evidence:${definition.name}`;
     };
     await commands.get("team-lead").handler("use the fixed specialists", { cwd: project, model: hostModel, ui: { notify: (message: string) => notices.push(message) } });
-    const context = { cwd: project, model: hostModel };
-    assert.equal(delegates[0].executionMode, "sequential");
-    assert.deepEqual(
-      new Set(delegates[0].parameters.properties.agent.enum),
-      new Set([...rolePlayers.keys(), ...bundledPlayers.keys()].filter((id) => id !== "team-lead")),
-    );
-    let priorEvidence: string | undefined;
-    for (const [index, step] of defaultCycle.steps.entries()) {
-      const result: any = await delegates[0].execute(
-        `default-${index + 1}`,
-        { agent: step.agent, task: datasetTask(defaultCycle, index, priorEvidence) },
-        new AbortController().signal, undefined, context,
-      );
-      priorEvidence = result.content[0].text;
-      assert.equal(priorEvidence, `evidence:${step.agent}`);
-    }
-
     await commands.get("team-lead").handler("complete one SDLC mission", { cwd: project, model: hostModel, ui: { notify: (message: string) => notices.push(message) } });
-    const delegate = delegates[1];
-    assert.equal(delegate.executionMode, "sequential");
-    priorEvidence = undefined;
-    for (const [index, step] of fullCycle.steps.slice(0, 2).entries()) {
-      const result: any = await delegate.execute(
-        `call-${index + 1}`,
-        { agent: step.agent, task: datasetTask(fullCycle, index, priorEvidence) },
-        new AbortController().signal, undefined, context,
-      );
-      priorEvidence = result.content[0].text;
-      assert.equal(priorEvidence, `evidence:${step.agent}`);
-    }
-    await assert.rejects(() => delegate.execute(
-      "call-duplicate",
-      { agent: fullCycle.steps[0].agent, task: "duplicate stage" },
-      new AbortController().signal, undefined, context,
-    ), /already delegated/);
-    assert.deepEqual(
-      calls.slice(0, 2 + defaultCycle.steps.length + 2).map((call) => call.name),
-      ["team-lead", ...defaultCycle.steps.map((step) => step.agent), "team-lead", ...fullCycle.steps.slice(0, 2).map((step) => step.agent)],
-    );
-    assert.match(calls.at(-1).task, new RegExp(`evidence:${fullCycle.steps[0].agent}`));
-
-    const beforeInvalid = calls.length;
-    await assert.rejects(() => delegate.execute("bad", { agent: "team-lead", task: "recurse" }, new AbortController().signal, undefined, context), /recursive/);
-    await assert.rejects(() => delegate.execute("bad", { agent: "unknown", task: "work" }, new AbortController().signal, undefined, context), /not in this team-lead roster snapshot/);
-    await assert.rejects(() => delegate.execute("bad", { agent: "manage", task: "   " }, new AbortController().signal, undefined, context), /non-empty/);
-    assert.equal(calls.length, beforeInvalid, "invalid delegation must not create a child");
-
-    for (const [index, step] of fullCycle.steps.slice(2).entries()) {
-      const result: any = await delegate.execute(
-        `call-${step.agent}`,
-        { agent: step.agent, task: datasetTask(fullCycle, index + 2, priorEvidence) },
-        new AbortController().signal, undefined, context,
-      );
-      priorEvidence = result.content[0].text;
-    }
-    await assert.rejects(() => delegate.execute("call-7", { agent: fullCycle.steps[0].agent, task: "too many" }, new AbortController().signal, undefined, context), /limit reached/);
     assert.deepEqual(
       calls.map((call) => call.name),
       ["team-lead", ...defaultCycle.steps.map((step) => step.agent), "team-lead", ...fullCycle.steps.map((step) => step.agent)],
@@ -1723,7 +3120,109 @@ test("Pi team lead delegates sequentially to different active agents with bounds
   assert.ok(notices.every((notice) => notice.includes("Mission total")));
 });
 
-test("Pi team lead rejects more than 32 active specialists before creating a ghost run", async () => {
+test("Pi team lead resolves each specialist's configured model with auth before consuming delegation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-delegate-model-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = home;
+  const roster = new Roster(harnessSpec("pi", home, project));
+  await roster.join({
+    name: "model-worker", description: "Uses a dedicated route", prompt: "Work only on the delegated task.",
+    tools: ["read"], model: "router/special",
+  });
+  const previous = process.cwd();
+  const commands = new Map<string, any>();
+  try {
+    process.chdir(project);
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => "minimal",
+    } as any);
+  } finally { process.chdir(previous); }
+
+  const hostModel = { provider: "host", id: "default" };
+  const configuredModel = { provider: "router", id: "special" };
+  const notices: string[] = [];
+  const children: Array<{ definition: any; model: any }> = [];
+  let delegate: any;
+  let authenticatedResult: any;
+  const unavailable = {
+    cwd: project, model: hostModel,
+    modelRegistry: { find: () => undefined, hasConfiguredAuth: () => true },
+  };
+  const unauthenticated = {
+    cwd: project, model: hostModel,
+    modelRegistry: { find: () => configuredModel, hasConfiguredAuth: () => false },
+  };
+  const authenticated = {
+    cwd: project, model: hostModel,
+    modelRegistry: { find: () => configuredModel, hasConfiguredAuth: () => true },
+  };
+  const originalRun = PiOrchestrator.prototype.run;
+  try {
+    PiOrchestrator.prototype.run = async function (definition: any) {
+      (this as any).runObserver.sessionStarted({ model: (this as any).sessionOptions.model });
+      if (definition.name === "team-lead") {
+        delegate = (this as any).customTools[0];
+        await assert.rejects(() => delegate.execute(
+          "unavailable", { agent: "model-worker", task: "first attempt" },
+          new AbortController().signal, undefined, unavailable,
+        ), /configured Pi model is unavailable: router\/special/u);
+        assert.equal(children.length, 0, "unavailable model created a specialist child");
+
+        await assert.rejects(() => delegate.execute(
+          "unauthenticated", { agent: "model-worker", task: "second attempt" },
+          new AbortController().signal, undefined, unauthenticated,
+        ), /configured Pi model has no available authentication: router\/special/u);
+        assert.equal(children.length, 0, "unauthenticated model created a specialist child");
+
+        authenticatedResult = await delegate.execute(
+          "authenticated", { agent: "model-worker", task: "third attempt" },
+          new AbortController().signal, undefined, authenticated,
+        );
+        await assert.rejects(
+          () => delegate.execute(
+            "private-provider", { agent: "crafter", task: "trigger private provider failure" },
+            new AbortController().signal, undefined, authenticated,
+          ),
+          (error: any) => {
+            assert.match(error.message, /provider failed at \[path\] with \[redacted\]/u);
+            assert.doesNotMatch(`${error.name}\n${error.message}\n${String(error.cause)}`,
+              /alice|private\.txt|abcdefghijklmnop/u);
+            assert.equal(error.cause, undefined);
+            return true;
+          },
+        );
+      } else {
+        if (definition.task === "trigger private provider failure") {
+          throw new Error("provider failed at C:/Users/alice/private.txt with Bearer abcdefghijklmnop");
+        }
+        children.push({ definition, model: (this as any).sessionOptions.model });
+      }
+      return `evidence:${definition.name}`;
+    };
+    await commands.get("team-lead").handler("delegate by configured route", {
+      cwd: project, model: hostModel, ui: { notify: (message: string) => notices.push(message) },
+    });
+    assert.ok(delegate);
+    assert.equal(authenticatedResult.content[0].text, "evidence:model-worker");
+    assert.equal(children.length, 1, "failed preflights consumed the one-agent delegation slot");
+    assert.equal(children[0].model, configuredModel);
+    await commands.get("team").handler("member:model-worker", {
+      cwd: project, ui: { notify: (message: string) => notices.push(message) },
+    });
+    assert.match(notices.at(-1)!, /LAST MISSION · MATCHING MEMBERS/u);
+    assert.match(notices.at(-1)!, /model-worker · run pi-run-2[\s\S]*router\/special \(configured\)/u);
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
+});
+
+test("Pi team lead rejects more than 32 enabled specialists before creating a ghost run", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-pi-lead-cap-"));
   const home = join(root, "home");
   const project = join(root, "project");
@@ -1731,7 +3230,7 @@ test("Pi team lead rejects more than 32 active specialists before creating a gho
   process.env.PI_CODING_AGENT_DIR = home;
   const roster = new Roster(harnessSpec("pi", home, project));
   try {
-    for (let index = 0; index < 26; index += 1) {
+    for (let index = 0; index < 50; index += 1) {
       await roster.join({ name: `member-${index}`, description: `Member ${index}`, prompt: "Work", tools: ["read"] });
     }
     await roster.bench("on all", bundledPlayers);
@@ -1742,14 +3241,26 @@ test("Pi team lead rejects more than 32 active specialists before creating a gho
       registerTool: () => {},
       getThinkingLevel: () => "low",
     } as any);
-    const context = { cwd: project, model: undefined, ui: { notify: (message: string, level?: string) => notices.push({ message, level }) } } as any;
+    const context = { cwd: project, ...authenticatedPiHostState(), ui: { notify: (message: string, level?: string) => notices.push({ message, level }) } } as any;
     await commands.get("team-lead").handler("coordinate", context);
-    assert.match(notices.at(-1)!.message, /at most 32 active specialists; found 33/u);
+    assert.match(notices.at(-1)!.message, /at most 32 enabled specialists; found 57/u);
     assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
     assert.doesNotMatch(notices.at(-1)!.message, /TEAM RUN/u);
     await commands.get("team").handler("", context);
-    assert.match(notices.at(-1)!.message, /Lead capacity exceeded: 33\/32/u);
+    assert.match(notices.at(-1)!.message, /Lead capacity exceeded: 57\/32/u);
+    assert.match(notices.at(-1)!.message, /Reduce enabled roster:/u);
     assert.match(notices.at(-1)!.message, /No one is working right now/u);
+    const teamCompletions = await commands.get("team").getArgumentCompletions("");
+    assert.equal(teamCompletions.length, 50, "Pi team completions exceeded or missed their fixed cap");
+    const statusCompletions = await commands.get("team").getArgumentCompletions("status:");
+    assert.deepEqual(statusCompletions.map(({ value }: { value: string }) => value),
+      ["status:bench", "status:ready", "status:working"]);
+    const kindCompletions = await commands.get("team").getArgumentCompletions("kind:p");
+    assert.equal(kindCompletions[0]?.value, "kind:personal");
+    assert.equal((await commands.get("team").getArgumentCompletions("model:"))[0]?.value, "model:");
+    assert.equal((await commands.get("team").getArgumentCompletions("task:"))[0]?.value, "task:");
+    const benchCompletions = await commands.get("bench").getArgumentCompletions("");
+    assert.equal(benchCompletions.length, 50, "Pi bench completions exceeded or missed their fixed cap");
   } finally {
     if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousHome;
@@ -1774,7 +3285,7 @@ test("Pi team-lead preparation failure creates no ghost root", async () => {
       registerTool: () => {},
       getThinkingLevel: () => "low",
     } as any);
-    const context = { cwd: project, model: undefined, ui: { notify: (message: string, level?: string) => notices.push({ message, level }) } } as any;
+    const context = { cwd: project, ...authenticatedPiHostState(), ui: { notify: (message: string, level?: string) => notices.push({ message, level }) } } as any;
     await commands.get("team-lead").handler("coordinate", context);
     assert.match(notices.at(-1)!.message, /too many active profiles: 201/u);
     assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
@@ -1805,7 +3316,7 @@ test("Pi blocks direct double-booking, caps concurrent roots at 32, and stops ac
       }, { once: true }));
     };
     const context = {
-      cwd: project, model: undefined, signal: undefined,
+      cwd: project, ...authenticatedPiHostState(), signal: undefined,
       ui: {
         notify: (message: string, level?: string) => notices.push({ message, level }),
         setStatus: () => {}, setWidget: () => {},
@@ -1818,8 +3329,8 @@ test("Pi blocks direct double-booking, caps concurrent roots at 32, and stops ac
     assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
     await commands.get("team").handler("", context);
     const live = notices.at(-1)!.message;
-    assert.match(live, /Team: .*1 working/u);
-    assert.equal((live.match(/· run pi-run-/gu) ?? []).length, 1);
+    assert.match(live, /Team: .*1 active \(1 working\)/u);
+    assert.match(live, /crafter · pi-run-1 · working/u);
     await commands.get("team").handler("stop all", context);
     await firstCrafter;
 
@@ -1834,8 +3345,19 @@ test("Pi blocks direct double-booking, caps concurrent roots at 32, and stops ac
       commands.get("contract").handler(contract(index), context));
     await new Promise<void>((resolve) => setImmediate(resolve));
     await commands.get("team").handler("", context);
-    assert.match(notices.at(-1)!.message, /Team: .*32 working/u);
-    assert.equal((notices.at(-1)!.message.match(/· run pi-run-/gu) ?? []).length, 32);
+    assert.match(notices.at(-1)!.message, /Team: .*32 active \(32 working\)/u);
+    assert.equal((notices.at(-1)!.message.match(/^● contractor-\d+ · pi-run-/gmu) ?? []).length, 4);
+    assert.match(notices.at(-1)!.message, /\+28 active runs omitted; narrow with \/team run:<id>/u);
+    await commands.get("team").handler("run:pi-run-33", context);
+    assert.match(notices.at(-1)!.message,
+      /contractor-31 · run pi-run-33[\s\S]*Task: “Concurrent contract 31”/u);
+
+    const otherContext = { ...context, cwd: join(root, "other-project") };
+    const otherInvocation = commands.get("contract").handler(contract(99), otherContext);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await commands.get("team").handler("", otherContext);
+    assert.match(notices.at(-1)!.message, /Team: .*1 active \(1 working\)/u,
+      "32 roots in one project blocked an independent project");
 
     await commands.get("contract").handler(contract(32), context);
     assert.match(notices.at(-1)!.message, /at most 32 concurrent root runs per project/u);
@@ -1844,11 +3366,14 @@ test("Pi blocks direct double-booking, caps concurrent roots at 32, and stops ac
     const stopCompletions = await commands.get("team").getArgumentCompletions("stop");
     assert.equal(stopCompletions.filter((item: any) => item.value.startsWith("stop pi-run-")).length, 32);
     await commands.get("team").handler("stop all", context);
-    assert.match(notices.at(-1)!.message, /^Agent Harbor stop · 0 model tokens\nStopping 32 root run/u);
+    assert.match(notices.at(-1)!.message,
+      /^Agent Harbor stop · 0 model tokens\nStopping 32 Agent Harbor root run\(s\):/u);
     const settled = await Promise.allSettled(invocations);
     assert.ok(settled.every(({ status }) => status === "fulfilled"));
+    await commands.get("team").handler("stop all", otherContext);
+    await otherInvocation;
     await commands.get("team").handler("", context);
-    assert.match(notices.at(-1)!.message, /0 working/u);
+    assert.match(notices.at(-1)!.message, /0 active/u);
     await commands.get("team").handler("stop all", context);
     assert.equal(notices.at(-1)!.level, "info");
     assert.match(notices.at(-1)!.message, /No Agent Harbor work is active in this project/u);

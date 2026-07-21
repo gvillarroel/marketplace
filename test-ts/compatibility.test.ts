@@ -7,6 +7,7 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CopilotClient, RuntimeConnection, approveAll } from "@github/copilot-sdk";
+import { harborCustomToolNames, harborPlayerSkillToolName } from "../src/core/custom-tools.js";
 import { bundledPlayers, rolePlayers } from "../src/core/defaults.js";
 import { commandNames, deterministicCommandNames } from "../src/core/types.js";
 import { runCopilotControl } from "../src/adapters/copilot.js";
@@ -311,8 +312,9 @@ async function inspectCopilotDirectExtension(launch: Launch, sandbox: string, wo
     const joinMessage = extensionMessages.length;
     assert.equal((await session.rpc.commands.invoke({ name: "join", input: definition })).kind, "completed");
     const joinOutput = extensionMessages.slice(joinMessage).findLast((message) => message.includes("Agent Harbor /join"));
-    assert.match(joinOutput ?? "", /joined · personal · ready/u);
-    assert.match(joinOutput ?? "", new RegExp(`Run now: /player ${personalId} <task>`, "u"));
+    assert.match(joinOutput ?? "", /joined · personal · registered/u);
+    assert.match(joinOutput ?? "", new RegExp(`Availability: verify with /team member:${personalId}`, "u"));
+    assert.match(joinOutput ?? "", new RegExp(`When ready: /player ${personalId} <task>`, "u"));
     assert.match(joinOutput ?? "", new RegExp(`After restarting Copilot: /${personalId} <task>`, "u"));
     assert.doesNotMatch(joinOutput ?? "", /registration:|active:/u);
     assert.equal((joinOutput ?? "").includes(sandbox), false);
@@ -377,7 +379,7 @@ test("distribution declares native TypeScript entrypoints", async () => {
   assert.ok(!("prompts" in manifest.pi));
   assert.equal(manifest.engines.node, ">=22.19.0");
   assert.equal(manifest.dependencies["@github/copilot-sdk"], "1.0.6");
-  assert.equal(manifest.dependencies["@opencode-ai/plugin"], "1.17.13");
+  assert.equal(manifest.dependencies["@opencode-ai/plugin"], "1.18.3");
   assert.equal(manifest.peerDependencies["@earendil-works/pi-coding-agent"], "0.80.10");
   assert.match(manifest.scripts["test:live:lead"], /run-live-lead\.mjs/);
   assert.match(manifest.scripts.test, /run-tests\.mjs/);
@@ -442,7 +444,7 @@ test("opt-in Codex live scripts invoke a guarded report-validating runner", asyn
   assert.match(runner, /catch \(error\)[\s\S]*process\.exit\(1\)/);
 });
 
-test("Copilot plugins expose canonical commands and one plugin-provided MCP server", async () => {
+test("Copilot plugins expose canonical commands and extension-owned custom tools without MCP", async () => {
   const directories = await pluginDirectories();
   const skillNames = new Set<string>();
   const manifests: Array<{ name: string; version: string }> = [];
@@ -467,28 +469,21 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
   assert.equal(marketplace.metadata.version, "0.12.0");
   await Promise.all([
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot.js")),
-    access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-mcp.js")),
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-coordinator.js")),
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-team-runtime.js")),
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-team-view.js")),
   ]);
   const contract = await readFile(join(plugins, "agent-foundry", "skills", "contract", "SKILL.md"), "utf8");
-  assert.match(contract, /agent-harbor\(control\)/);
+  assert.match(contract, /^allowed-tools: \["harbor_contract"\]$/mu);
+  assert.match(contract, /extension tool `harbor_contract` exactly once/);
   assert.match(contract, /Call `task` exactly once/);
   for (const name of deterministicCommandNames) {
     await assert.rejects(() => access(join(plugins, "agent-foundry", "skills", name, "SKILL.md")), /ENOENT/);
   }
   const foundryManifest = JSON.parse(await readFile(join(plugins, "agent-foundry", "plugin.json"), "utf8"));
-  assert.equal(foundryManifest.mcpServers, ".mcp.json");
+  assert.equal(Object.hasOwn(foundryManifest, "mcpServers"), false);
   assert.deepEqual(foundryManifest.extensions, { paths: ["extensions/agent-harbor"], exclusive: false });
-  const mcpConfiguration = JSON.parse(await readFile(join(plugins, "agent-foundry", ".mcp.json"), "utf8"));
-  assert.deepEqual(Object.keys(mcpConfiguration.mcpServers), ["agent-harbor"]);
-  const harbor = mcpConfiguration.mcpServers["agent-harbor"];
-  assert.equal(harbor.type, "stdio");
-  assert.equal(harbor.command, "node");
-  assert.deepEqual(harbor.tools, ["control"], "the global MCP server must expose no player skill groups");
-  assert.equal(harbor.timeout, 45_000);
-  assert.ok(harbor.args.some((argument: string) => argument.includes("copilot-mcp.js")));
+  await assert.rejects(() => access(join(plugins, "agent-foundry", ".mcp.json")), /ENOENT/);
   const extension = await readFile(join(plugins, "agent-foundry", "extensions", "agent-harbor", "extension.mjs"), "utf8");
   assert.match(extension, /joinSession/);
   assert.match(extension, /runDeterministicCommand/);
@@ -501,7 +496,7 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
   assert.match(extension, /event\.phase !== "target\.resolved"/);
   assert.match(extension, /type: "agent-harbor-guard"/);
   assert.match(extension, /ephemeral: true/);
-  assert.match(extension, /boundedHostCall\("Copilot coordinator (?:refresh|startup refresh)", \(\) => coordinator\.refresh\(\)\)/);
+  assert.match(extension, /boundedHostCall\("Copilot coordinator (?:refresh|startup refresh)", \(\) => coordinator\.refreshAuthoritative\(\)\)/);
   for (const name of deterministicCommandNames) assert.match(extension, new RegExp(`\\["${name}"`));
   assert.equal(extension.match(/session\.send\(/g)?.length, 1, "only explicit player commands may send one prompt");
   assert.doesNotMatch(extension, /sendAndWait/);
@@ -512,21 +507,22 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
   assert.match(extension, /agent\.select/);
   assert.match(extension, /name: agent\.id/);
   assert.doesNotMatch(extension, /createSession|\.prompt\(/);
-  assert.doesNotMatch(extension, /[\[\"]contract[\]\"]\s*,/);
+  const controlsBlock = extension.match(/const controls = \[([\s\S]*?)\n\];/u)?.[1] ?? "";
+  assert.doesNotMatch(controlsBlock, /\["contract"/u,
+    "contract must remain a user-invoked skill backed by a native custom tool, not a deterministic command alias");
+  assert.match(extension, /runCopilotControl\("contract", call\.definition/u);
   assert.match(extension, /catch \(error\)[\s\S]*throw error;/);
   const crafter = await readFile(join(plugins, "agent-foundry", "agents", "crafter.agent.md"), "utf8");
-  assert.match(crafter, /"agent-harbor-skills-crafter\/skills"/);
-  assert.match(crafter, /mcp-servers:\n  agent-harbor-skills-crafter:/);
-  assert.match(crafter, /"--skills-player",\s*"crafter"/);
-  assert.match(crafter, /player-scoped `agent-harbor-skills-crafter` MCP server/);
-  assert.doesNotMatch(crafter, /"agent-harbor\/skill"/);
-  assert.doesNotMatch(crafter, /agent_harbor_skill/);
+  assert.match(crafter, /^tools: \["read", "search", "edit", "execute", "harbor_skill_crafter"\]$/mu);
+  assert.match(crafter, /extension tool `harbor_skill_crafter` exactly once/);
+  assert.doesNotMatch(crafter, /mcp|server|--skills-player/iu);
   const scout = await readFile(join(plugins, "agent-foundry", "agents", "talent-scout.agent.md"), "utf8");
-  assert.match(scout, /"agent-harbor-scout\/filter_skills"/);
-  assert.match(scout, /"agent-harbor-scout\/join_player"/);
-  assert.match(scout, /"--scout"/);
-  assert.match(scout, /^tools: \["agent-harbor-scout\/filter_skills", "agent-harbor-scout\/join_player"\]$/mu);
+  assert.match(scout, /"harbor_filter_skills"/);
+  assert.match(scout, /"harbor_join_player"/);
+  assert.match(scout, /"harbor_team_roster"/);
+  assert.match(scout, /^tools: \["harbor_team_roster", "harbor_filter_skills", "harbor_join_player"\]$/mu);
   assert.doesNotMatch(scout, /^tools: .*\b(?:read|search|edit|execute|task)\b/mu);
+  assert.doesNotMatch(scout, /mcp|server|--scout/iu);
 });
 
 test("Copilot runtimes contain exact physical byte copies of their shared build inputs", async () => {
@@ -537,7 +533,6 @@ test("Copilot runtimes contain exact physical byte copies of their shared build 
     name: "agent-foundry",
     adapters: [
       "copilot-coordinator.js",
-      "copilot-mcp.js",
       "copilot-team-runtime.js",
       "copilot-team-view.js",
       "copilot.js",
@@ -603,7 +598,10 @@ test("active profile discovery validates the same bytes read once for each candi
   const invocable = section("export function listInvocablePlayerIds", "export function loadManagedActivePlayer");
 
   assert.equal(scan.match(/\breadOwnedActiveProfile\(/g)?.length, 1, "the candidate loop has one profile read site");
-  assert.match(scan, /for \(const entry of candidates\)[\s\S]*const content = readOwnedActiveProfile\(harness, projectRoot, id\);/);
+  assert.match(
+    scan,
+    /for \(const entry of candidates\)[\s\S]*let content: string \| undefined;[\s\S]*content = readOwnedActiveProfile\(harness, projectRoot, id\);/,
+  );
   assert.match(scan, /managedProfiles\.push\(\{ id, definition: validatedDefinition\(content, id, harness, projectRoot\) \}\)/);
   assert.match(validation, /decodePlayer\(content, id\)/);
   assert.match(validation, /isCanonicalPlayerProfile\(content, harness, definition,/);
@@ -614,13 +612,15 @@ test("active profile discovery validates the same bytes read once for each candi
   }
 });
 
-test("generated native runtime retains gh timeout and MCP cancellation guards", async () => {
+test("generated native runtime retains gh timeout and closed custom-tool contracts", async () => {
   const github = await readFile(join(dist, "core", "github.js"), "utf8");
-  const mcp = await readFile(join(dist, "adapters", "copilot-mcp.js"), "utf8");
+  const customTools = await readFile(join(dist, "core", "custom-tools.js"), "utf8");
   assert.match(github, /timeoutMs = 20_000/);
   assert.match(github, /timeout:\s*timeoutMs/);
-  assert.match(mcp, /notifications\/cancelled/);
-  assert.match(mcp, /activeRequests\.get\(requestId\)\?\.abort\(\)/);
+  assert.match(customTools, /harbor_contract/);
+  assert.match(customTools, /additionalProperties: false/);
+  assert.match(customTools, /harbor_skill_/);
+  await assert.rejects(() => access(join(dist, "adapters", "copilot-mcp.js")), /ENOENT/);
 });
 
 test("every distribution has a direct zero-model bench entrypoint", async (t) => {
@@ -651,155 +651,38 @@ test("Copilot native control performs deterministic shared contract preflight", 
   await assert.rejects(() => runCopilotControl("contract", JSON.stringify({ ...JSON.parse(input), replace: true }), root), /does not accept replace/);
 });
 
-test("compiled Copilot MCP servers are bounded and scope every player skill group to its own process", async (t) => {
-  const sandbox = await mkdtemp(join(tmpdir(), "harbor-copilot-mcp-"));
+test("compiled Copilot profiles bind custom skill tools without transport servers", async (t) => {
+  const sandbox = await mkdtemp(join(tmpdir(), "harbor-copilot-custom-tools-"));
   t.after(() => rm(sandbox, { recursive: true, force: true }));
   const project = join(sandbox, "project"); const home = join(sandbox, "copilot-home");
-  await mkdir(project);
-  const negotiationInput = [
-    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2099-01-01", capabilities: {}, clientInfo: { name: "test", version: "1" } } },
-    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
-    { jsonrpc: "2.0", method: "notifications/initialized" },
-    { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} },
-  ].map((message) => JSON.stringify(message)).join("\n") + "\n";
-  const negotiation = await run({ command: process.execPath, prefix: [] }, [join(dist, "adapters", "copilot-mcp.js")], {
-    cwd: project, input: negotiationInput, timeout: 10_000,
-  });
-  succeeded(negotiation);
-  const negotiated = new Map(negotiation.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)).map((message) => [message.id, message]));
-  assert.equal(negotiated.get(1).result.protocolVersion, "2025-11-25");
-  assert.equal(negotiated.get(2).error.code, -32002);
-  assert.deepEqual(negotiated.get(3).result.tools.map((tool: any) => tool.name), ["control"]);
-
-  const input = [
-    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } },
-    { jsonrpc: "2.0", method: "notifications/initialized" },
-    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
-    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "control", arguments: { command: "destroy", args: "{}" } } },
-    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "skill", arguments: { reference: "{}" } } },
-    { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "control", arguments: { command: "contract", args: JSON.stringify({
-      name: "mcp-contractor", description: "One disposable reviewer", prompt: "Review only", tools: ["read"], task: "Review this fixture",
-    }) } } },
-  ].map((message) => JSON.stringify(message)).join("\n") + "\n";
-  const result = await run({ command: process.execPath, prefix: [] }, [join(dist, "adapters", "copilot-mcp.js")], {
-    cwd: project,
-    env: { ...process.env, COPILOT_HOME: home, PATH: join(sandbox, "no-executables") },
-    input,
-    timeout: 10_000,
-  });
-  succeeded(result);
-  assert.equal(result.stderr, "");
-  const responses = new Map(result.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)).map((message) => [message.id, message]));
-  assert.equal(responses.get(1).result.serverInfo.name, "agent-harbor");
-  assert.equal(responses.get(1).result.protocolVersion, "2025-06-18");
-  assert.deepEqual(responses.get(2).result.tools.map((tool: any) => tool.name), ["control"]);
-  assert.equal(responses.get(3).result.isError, true);
-  assert.match(responses.get(3).result.content[0].text, /invalid Agent Harbor control input/);
-  assert.equal(responses.get(4).result.isError, true);
-  assert.match(responses.get(4).result.content[0].text, /unknown Agent Harbor tool: skill/);
-  const contractText = responses.get(5).result.content[0].text;
-  assert.deepEqual(Object.keys(JSON.parse(contractText)), ["agent_type", "description", "prompt"]);
-  assert.deepEqual(responses.get(5).result.structuredContent, JSON.parse(contractText));
-  assert.deepEqual(await readdir(project), []);
-  await assert.rejects(() => access(home), /ENOENT/);
-
-  const crafterScoped = await run({ command: process.execPath, prefix: [] }, [
-    join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-mcp.js"),
-    "--skills-player", "crafter",
-  ], {
-    cwd: project,
-    input: [
-      { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } },
-      { jsonrpc: "2.0", method: "notifications/initialized" },
-      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
-    ].map((message) => JSON.stringify(message)).join("\n") + "\n",
-    timeout: 10_000,
-  });
-  succeeded(crafterScoped);
-  const crafterResponses = new Map(crafterScoped.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)).map((message) => [message.id, message]));
-  assert.deepEqual(crafterResponses.get(2).result.tools.map((tool: any) => tool.name), ["skills"]);
-
-  const scoutInput = [
-    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } },
-    { jsonrpc: "2.0", method: "notifications/initialized" },
-    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
-    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "control", arguments: { command: "bench", args: "list" } } },
-    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "join_player", arguments: { definition: {
-      name: "scouted-worker", description: "Scouted worker", prompt: "Perform bounded work.", tools: ["read"],
-    } } } },
-  ].map((message) => JSON.stringify(message)).join("\n") + "\n";
-  const scoutServer = await run({ command: process.execPath, prefix: [] }, [join(dist, "adapters", "copilot-mcp.js"), "--scout"], {
-    cwd: project, env: { ...process.env, COPILOT_HOME: home, PATH: join(sandbox, "no-executables") }, input: scoutInput, timeout: 10_000,
-  });
-  succeeded(scoutServer);
-  const scoutResponses = new Map(scoutServer.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)).map((message) => [message.id, message]));
-  assert.deepEqual(scoutResponses.get(2).result.tools.map((tool: any) => tool.name), ["filter_skills", "join_player"]);
-  assert.equal(scoutResponses.get(3).result.isError, true);
-  assert.match(scoutResponses.get(3).result.content[0].text, /unknown Agent Harbor tool: control/);
-  assert.equal(scoutResponses.get(4).result.isError, false);
-  assert.match(scoutResponses.get(4).result.content[0].text, /joined scouted-worker/);
-
-  await Promise.all([
-    mkdir(join(project, "skills", "mcp-fixture"), { recursive: true }),
-    mkdir(join(project, "skills", "decoy"), { recursive: true }),
-  ]);
-  await Promise.all([
-    writeFile(join(project, "skills", "mcp-fixture", "SKILL.md"), "---\nname: mcp-fixture\n---\nUse the nominal fixture only.\n", "utf8"),
-    writeFile(join(project, "skills", "decoy", "SKILL.md"), "---\nname: decoy\n---\nNever load this decoy.\n", "utf8"),
-  ]);
+  await mkdir(join(project, "skills", "fixture"), { recursive: true });
+  await writeFile(
+    join(project, "skills", "fixture", "SKILL.md"),
+    "---\nname: fixture\n---\nUse the nominal fixture only.\n",
+    "utf8",
+  );
   const player = JSON.stringify({
-    name: "mcp-worker",
-    description: "MCP worker",
+    name: "custom-worker",
+    description: "Custom tool worker",
     prompt: "Read only",
     tools: ["read"],
-    skills: [{ kind: "repo", name: "mcp-fixture", path: "skills/mcp-fixture/SKILL.md" }],
+    skills: [{ kind: "repo", name: "fixture", path: "skills/fixture/SKILL.md" }],
   });
-  const joinInput = [
-    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } },
-    { jsonrpc: "2.0", method: "notifications/initialized" },
-    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "control", arguments: { command: "join", args: player } } },
-  ].map((message) => JSON.stringify(message)).join("\n") + "\n";
-  const joined = await run({ command: process.execPath, prefix: [] }, [join(dist, "adapters", "copilot-mcp.js")], {
+  const joined = await run({ command: process.execPath, prefix: [join(dist, "cli.js")] }, ["copilot", "join", player], {
     cwd: project,
-    env: { ...process.env, COPILOT_HOME: home, PATH: join(sandbox, "no-executables") },
-    input: joinInput,
-    timeout: 10_000,
+    env: { ...process.env, COPILOT_HOME: home },
+    timeout: 30_000,
   });
   succeeded(joined);
-  const joinResponses = new Map(joined.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)).map((message) => [message.id, message]));
-  assert.equal(joinResponses.get(2).result.isError, false);
-  assert.match(joinResponses.get(2).result.content[0].text, /joined mcp-worker/);
-  const registration = await readFile(join(home, "agent-foundry", "bench", "mcp-worker.agent.md"), "utf8");
-  const active = await readFile(join(project, ".github", "agents", "mcp-worker.agent.md"), "utf8");
-  assert.match(registration, /agent-foundry:profile id=mcp-worker revision=4/);
-  assert.match(registration, /"agent-harbor-skills-mcp-worker\/skills"/);
-  assert.match(registration, /"--skills-player","mcp-worker"/);
-  assert.match(registration, /mcp-servers:\n  "agent-harbor-skills-mcp-worker":/);
-  assert.doesNotMatch(registration, /"agent-harbor\/skill"/);
+  const registration = await readFile(join(home, "agent-foundry", "bench", "custom-worker.agent.md"), "utf8");
+  const active = await readFile(join(project, ".github", "agents", "custom-worker.agent.md"), "utf8");
+  assert.match(registration, /agent-foundry:profile id=custom-worker revision=5/);
+  assert.match(registration, /"harbor_skill_custom-worker"/);
+  assert.match(registration, /extension tool `harbor_skill_custom-worker` exactly once/);
+  assert.doesNotMatch(registration, /mcp|server|--skills-player/iu);
   assert.equal(active, registration);
-
-  const scopedInput = [
-    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } },
-    { jsonrpc: "2.0", method: "notifications/initialized" },
-    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
-    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "skills", arguments: {} } },
-    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "skills_crafter", arguments: {} } },
-  ].map((message) => JSON.stringify(message)).join("\n") + "\n";
-  const scoped = await run({ command: process.execPath, prefix: [] }, [join(dist, "adapters", "copilot-mcp.js"), "--skills-player", "mcp-worker"], {
-    cwd: project,
-    env: { ...process.env, COPILOT_HOME: home, PATH: join(sandbox, "no-executables") },
-    input: scopedInput,
-    timeout: 10_000,
-  });
-  succeeded(scoped);
-  const scopedResponses = new Map(scoped.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)).map((message) => [message.id, message]));
-  assert.deepEqual(scopedResponses.get(2).result.tools.map((tool: any) => tool.name), ["skills"]);
-  assert.equal(scopedResponses.get(3).result.isError, false);
-  assert.match(scopedResponses.get(3).result.content[0].text, /^HARBOR-SKILL mcp-fixture\b/m);
-  assert.match(scopedResponses.get(3).result.content[0].text, /Use the nominal fixture only/);
-  assert.doesNotMatch(scopedResponses.get(3).result.content[0].text, /decoy/i);
-  assert.equal(scopedResponses.get(4).result.isError, true);
-  assert.match(scopedResponses.get(4).result.content[0].text, /unknown Agent Harbor tool: skills_crafter/);
+  assert.equal(harborPlayerSkillToolName("custom-worker"), "harbor_skill_custom-worker");
+  assert.equal(harborCustomToolNames.contractPreflight, "harbor_contract");
 });
 
 test("installed CLIs discover the native packages", { concurrency: true }, async (t) => {
@@ -817,7 +700,10 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
       const sandbox = await mkdtemp(join(tmpdir(), "harbor-copilot-acp-"));
       try {
         const inspection = await inspectCopilotEnvironment(copilot!, sandbox);
-        assert.match(inspection.transcript, /agent-harbor\s+\(connected,\s*plugin\)/i);
+        assert.match(inspection.transcript, /agent-foundry/iu);
+        assert.match(inspection.transcript, /contract \(Plugin\)/u);
+        assert.doesNotMatch(inspection.transcript, /agent-harbor\s+\(connected/iu,
+          "Agent Harbor must not add an MCP server to the Copilot environment");
         const project = join(sandbox, "project");
         await mkdir(join(project, "skills", "native"), { recursive: true });
         await writeFile(join(project, "skills", "native", "SKILL.md"), "---\nname: native\n---\nScoped Copilot guidance.\n", "utf8");
@@ -838,10 +724,12 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
         assert.ok([...rolePlayers.keys(), ...bundledPlayers.keys()].every((id) =>
           direct.agents.some((agent) => agent.name === id || agent.id === id || agent.id.endsWith(`:${id}`))));
         const crafter = direct.agents.find((agent) => agent.id === "agent-foundry:crafter");
-        assert.deepEqual(crafter?.mcpServers?.["agent-harbor-skills-crafter"]?.tools, ["skills"]);
+        assert.ok(crafter?.tools?.includes("harbor_skill_crafter"));
+        assert.equal(crafter?.mcpServers === undefined || Object.keys(crafter.mcpServers).length === 0, true);
         const nativeWorker = direct.agents.find((agent) => agent.name === "native-worker" || agent.id === "native-worker");
-        assert.ok(nativeWorker, `Copilot must parse the player-scoped MCP profile: ${JSON.stringify(direct.agents)}`);
-        assert.ok(nativeWorker.mcpServers?.["agent-harbor-skills-native-worker"]);
+        assert.ok(nativeWorker, `Copilot must parse the player-bound custom-tool profile: ${JSON.stringify(direct.agents)}`);
+        assert.ok(nativeWorker.tools?.includes("harbor_skill_native-worker"));
+        assert.equal(nativeWorker.mcpServers === undefined || Object.keys(nativeWorker.mcpServers).length === 0, true);
       } finally {
         await rm(sandbox, { recursive: true, force: true });
       }
@@ -863,7 +751,7 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
       const layers: any[] = [];
       await installedTui.default.tui({ keymap: { registerLayer: (layer: unknown) => { layers.push(layer); return () => {}; } } } as any, undefined, {} as any);
       assert.deepEqual(layers[0].commands.map((command: any) => command.slashName), [
-        "bench-list", "bench-on", "bench-off", "harbor-join", "harbor-retire", "harbor-list-skills", "harbor-filter-skills",
+        "team", "bench-list", "bench-on", "bench-off", "harbor-join", "harbor-retire", "harbor-list-skills", "harbor-filter-skills",
       ]);
       const config = await run(opencode!, ["debug", "config"], { cwd: directory, timeout: 60_000 });
       succeeded(config);
