@@ -27,6 +27,8 @@ export declare class GhResolver implements GithubResolver {
     private readonly executable;
     /** Creates a resolver with a bounded command timeout and injectable runner for testing. */
     constructor(run?: GhCommand, timeoutMs?: number, executable?: string);
+    /** Validates a reference and resolves its mutable branch exactly once. */
+    private resolveCommit;
     /** Resolves the tracked branch to a commit, then resolves the skill blob at that exact commit. */
     resolve(skill: GithubSkill, signal?: AbortSignal): Promise<{
         commit: string;

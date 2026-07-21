@@ -8,7 +8,7 @@ import { mkdtemp, lstat, mkdir, readFile, realpath, rm, writeFile } from "node:f
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { loadTrustedGithubSkill, parseSkillBody, validateGithubSkill } from "./github.js";
-const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
+import { isHarborId } from "./identity.js";
 const segmentPattern = /^[A-Za-z0-9._-]+$/;
 const maximumCombinedBodyBytes = 30_000;
 function safeRepositoryPath(value) {
@@ -25,7 +25,7 @@ export function validateRepositorySkill(value) {
     const skill = value;
     const keys = Object.keys(skill);
     if (keys.length !== 3 || keys.some((key) => !["kind", "name", "path"].includes(key)) ||
-        skill.kind !== "repo" || typeof skill.name !== "string" || !idPattern.test(skill.name) ||
+        skill.kind !== "repo" || !isHarborId(skill.name) ||
         typeof skill.path !== "string" || !safeRepositoryPath(skill.path) ||
         !(skill.path === "SKILL.md" || skill.path.endsWith("/SKILL.md"))) {
         throw new Error("invalid repository skill reference");

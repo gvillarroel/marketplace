@@ -16,8 +16,8 @@ import type {
   SkillReference,
 } from "./types.js";
 import { loadTrustedGithubSkill, parseSkillBody, validateGithubSkill } from "./github.js";
+import { isHarborId } from "./identity.js";
 
-const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const segmentPattern = /^[A-Za-z0-9._-]+$/;
 const maximumCombinedBodyBytes = 30_000;
 
@@ -58,7 +58,7 @@ export function validateRepositorySkill(value: unknown): RepositorySkill {
   const skill = value as Record<string, unknown>;
   const keys = Object.keys(skill);
   if (keys.length !== 3 || keys.some((key) => !["kind", "name", "path"].includes(key)) ||
-      skill.kind !== "repo" || typeof skill.name !== "string" || !idPattern.test(skill.name) ||
+      skill.kind !== "repo" || !isHarborId(skill.name) ||
       typeof skill.path !== "string" || !safeRepositoryPath(skill.path) ||
       !(skill.path === "SKILL.md" || skill.path.endsWith("/SKILL.md"))) {
     throw new Error("invalid repository skill reference");

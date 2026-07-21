@@ -5,13 +5,12 @@ import { listInvocablePlayerIds, listManagedActiveIds, loadPiActivePlayer } from
 import { executeCommand } from "../core/commands.js";
 import { runDeterministicCommand } from "./direct.js";
 import { bundledPlayers, rolePlayers } from "../core/defaults.js";
+import { isHarborId } from "../core/identity.js";
 import { commandNames } from "../core/types.js";
 import type { PlayerDefinition } from "../core/types.js";
 import { normalizeDelegatedTaskPaths } from "../core/profiles.js";
 import { PiOrchestrator, type PiSessionOptions } from "../orchestrators/pi.js";
 import { harborContext } from "./shared.js";
-
-const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
 
 /**
  * Registers Agent Harbor's command and tool surface in the active Pi host.
@@ -65,7 +64,7 @@ export default function agentHarbor(pi: ExtensionAPI): void {
       },
       execute: async (_id, params: { agent: string; task: string }, signal, _update, context) => {
         const project = context?.cwd || cwd;
-        if (typeof params.agent !== "string" || !idPattern.test(params.agent) || params.agent === "team-lead") throw new Error("invalid or recursive delegation target");
+        if (!isHarborId(params.agent) || params.agent === "team-lead") throw new Error("invalid or recursive delegation target");
         if (typeof params.task !== "string" || !params.task.trim()) throw new Error("delegation requires a non-empty task");
         const player = rolePlayers.get(params.agent) ?? loadPiActivePlayer(project, params.agent);
         if (calls >= 6) throw new Error("delegation limit reached (6)");

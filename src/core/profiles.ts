@@ -8,6 +8,7 @@ import { Buffer } from "node:buffer";
 import { lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { harnessProfileLayout } from "./harnesses.js";
 import type { ContractDefinition, HarnessName, HarnessSpec, HarborTool, PlayerDefinition } from "./types.js";
 
 const toolMap: Record<HarnessName, Record<HarborTool, string[]>> = {
@@ -52,9 +53,13 @@ export function nativeTools(harness: HarnessName, tools: readonly HarborTool[]):
   return [...new Set(tools.flatMap((tool) => toolMap[harness][tool]))];
 }
 
+function openCodeAllowedTools(tools: readonly HarborTool[], additional: readonly string[]): ReadonlySet<string> {
+  return new Set([...nativeTools("opencode", tools), ...additional]);
+}
+
 /** Builds OpenCode's legacy boolean tool allowlist, explicitly disabling every known tool by default. */
 export function openCodeToolPolicy(tools: readonly HarborTool[], additional: readonly string[] = []): Record<string, boolean> {
-  const allowed = new Set([...nativeTools("opencode", tools), ...additional]);
+  const allowed = openCodeAllowedTools(tools, additional);
   return Object.fromEntries(openCodeToolNames.map((name) => [name, allowed.has(name)]));
 }
 
@@ -68,7 +73,7 @@ export function openCodePermissionPolicy(
   additional: readonly string[] = [],
   directory?: string,
 ): Record<string, OpenCodePermissionValue> {
-  const allowed = new Set([...nativeTools("opencode", tools), ...additional]);
+  const allowed = openCodeAllowedTools(tools, additional);
   return {
     "*": "deny",
     read: allowed.has("read") ? "allow" : "deny",
@@ -260,11 +265,7 @@ export function isCanonicalPlayerProfile(
 
 /** Creates the filesystem layout and bound canonical renderer for one harness/project pair. */
 export function harnessSpec(name: HarnessName, home: string, project: string): HarnessSpec {
-  const values = {
-    copilot: { activeDir: ".github/agents", extension: ".agent.md" },
-    opencode: { activeDir: ".opencode/agents", extension: ".md" },
-    pi: { activeDir: ".pi/agents", extension: ".md" },
-  }[name];
+  const values = harnessProfileLayout(name);
   return {
     name,
     home,

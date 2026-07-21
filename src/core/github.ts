@@ -7,10 +7,10 @@
 import { execFile } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { promisify } from "node:util";
+import { isHarborId } from "./identity.js";
 import type { GithubResolver, GithubSkill } from "./types.js";
 
 const execute = promisify(execFile);
-const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const segmentPattern = /^[A-Za-z0-9._-]+$/;
 
 function safeSegments(value: string, firstAlphanumeric: boolean): boolean {
@@ -27,7 +27,7 @@ export function validateGithubSkill(value: unknown): GithubSkill {
   const skill = value as Record<string, unknown>;
   const keys = Object.keys(skill);
   if (keys.length !== 5 || keys.some((key) => !["kind", "name", "repo", "path", "track"].includes(key)) ||
-      skill.kind !== "github" || typeof skill.name !== "string" || !idPattern.test(skill.name) ||
+      skill.kind !== "github" || !isHarborId(skill.name) ||
       typeof skill.repo !== "string" || skill.repo.length > 240 || !/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/.test(skill.repo) || skill.repo.includes("..") || skill.repo.toLowerCase().endsWith(".lock") ||
       typeof skill.path !== "string" || !safeSegments(skill.path, false) || !(skill.path === "SKILL.md" || skill.path.endsWith("/SKILL.md")) ||
       typeof skill.track !== "string" || skill.track.length > 240 || !skill.track.startsWith("refs/heads/") || !safeSegments(skill.track.slice("refs/heads/".length), true)) {
@@ -99,12 +99,21 @@ export class GhResolver implements GithubResolver {
     if (typeof executable !== "string" || !executable) throw new Error("invalid gh executable");
   }
 
-  /** Resolves the tracked branch to a commit, then resolves the skill blob at that exact commit. */
-  async resolve(skill: GithubSkill, signal?: AbortSignal): Promise<{ commit: string; blob: string }> {
+  /** Validates a reference and resolves its mutable branch exactly once. */
+  private async resolveCommit(skill: GithubSkill, signal?: AbortSignal): Promise<string> {
     validateGithubSkill(skill);
     const branch = skill.track.slice("refs/heads/".length);
-    const commit = text(await this.run(this.executable, ["api", "--hostname", "github.com", "--method", "GET", `repos/${skill.repo}/git/ref/heads/${branch}`, "--jq", ".object.sha"], signal, this.timeoutMs)).trim();
+    const commit = text(await this.run(this.executable, [
+      "api", "--hostname", "github.com", "--method", "GET",
+      `repos/${skill.repo}/git/ref/heads/${branch}`, "--jq", ".object.sha",
+    ], signal, this.timeoutMs)).trim();
     if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid commit SHA from gh");
+    return commit;
+  }
+
+  /** Resolves the tracked branch to a commit, then resolves the skill blob at that exact commit. */
+  async resolve(skill: GithubSkill, signal?: AbortSignal): Promise<{ commit: string; blob: string }> {
+    const commit = await this.resolveCommit(skill, signal);
     const blob = text(await this.run(this.executable, ["api", "--hostname", "github.com", "--method", "GET", `repos/${skill.repo}/contents/${skill.path}`, "-f", `ref=${commit}`, "--jq", ".sha"], signal, this.timeoutMs)).trim();
     if (!/^[a-f0-9]{40}$/.test(blob)) throw new Error("invalid blob SHA from gh");
     return { commit, blob };
@@ -112,10 +121,7 @@ export class GhResolver implements GithubResolver {
 
   /** Resolves the tracked branch once and loads the validated skill body from that immutable commit. */
   async load(skill: GithubSkill, signal?: AbortSignal): Promise<{ commit: string; body: string }> {
-    validateGithubSkill(skill);
-    const branch = skill.track.slice("refs/heads/".length);
-    const commit = text(await this.run(this.executable, ["api", "--hostname", "github.com", "--method", "GET", `repos/${skill.repo}/git/ref/heads/${branch}`, "--jq", ".object.sha"], signal, this.timeoutMs)).trim();
-    if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid commit SHA from gh");
+    const commit = await this.resolveCommit(skill, signal);
     const raw = await this.run(this.executable, [
       "api", "--hostname", "github.com", "--method", "GET", "-H", "Accept: application/vnd.github.raw+json",
       `repos/${skill.repo}/contents/${skill.path}`, "-f", `ref=${commit}`,

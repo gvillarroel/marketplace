@@ -7,18 +7,13 @@
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { bundledPlayers, rolePlayers } from "./defaults.js";
+import { harnessProfileLayout } from "./harnesses.js";
+import { isHarborId } from "./identity.js";
 import { isOwnedProfile, validatePlayer } from "./lifecycle.js";
 import { decodePlayer, isCanonicalPlayerProfile } from "./profiles.js";
 import type { HarnessName, PlayerDefinition } from "./types.js";
 
-const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const maxActiveProfiles = 200;
-
-const activeLocations: Record<HarnessName, { directory: string; extension: string }> = {
-  copilot: { directory: ".github/agents", extension: ".agent.md" },
-  opencode: { directory: ".opencode/agents", extension: ".md" },
-  pi: { directory: ".pi/agents", extension: ".md" },
-};
 
 /** Resolved player identity returned only after its definition is safe to invoke. */
 export interface InvocablePlayerIdentity {
@@ -30,14 +25,23 @@ export interface InvocablePlayerIdentity {
   definition: PlayerDefinition;
 }
 
+interface ManagedActiveProfile {
+  readonly id: string;
+  readonly definition: PlayerDefinition;
+}
+
+interface ActiveProfileScan {
+  readonly ownedIds: string[];
+  readonly managedProfiles: ManagedActiveProfile[];
+}
+
 function locationFor(harness: HarnessName): { directory: string; extension: string } {
-  const location = activeLocations[harness];
-  if (!location) throw new Error(`unsupported harness: ${String(harness)}`);
-  return location;
+  const { activeDir: directory, extension } = harnessProfileLayout(harness);
+  return { directory, extension };
 }
 
 function requireValidId(id: unknown): string {
-  if (typeof id !== "string" || !idPattern.test(id)) throw new Error(`invalid player: ${String(id)}`);
+  if (!isHarborId(id)) throw new Error(`invalid player: ${String(id)}`);
   return id;
 }
 
@@ -73,7 +77,7 @@ function expectedRoster(id: string): "personal" | "sdlc" {
 
 // Reading proves only ownership and basic filesystem safety. Canonicality is intentionally a
 // separate step so callers can distinguish stale Agent Harbor files from unmanaged collisions.
-function readManagedActiveProfile(harness: HarnessName, project: string, id: string): string | undefined {
+function readOwnedActiveProfile(harness: HarnessName, project: string, id: string): string | undefined {
   const projectRoot = resolve(project);
   const path = activePath(harness, projectRoot, id);
   try {
@@ -100,62 +104,69 @@ function validatedDefinition(content: string, id: string, harness: HarnessName, 
   return definition;
 }
 
-/**
- * Lists active files carrying a structurally valid Agent Harbor ownership marker.
- * The result may include stale revision-3 or modified revision-4 profiles; use
- * {@link listManagedActiveIds} when selecting an invocation target.
- */
-export function listOwnedActiveIds(harness: HarnessName, project: string): string[] {
+// Discovery reads each candidate at most once, then keeps both the broader ownership view and the
+// narrower canonical view. Retaining the definition here proves the managed projection came from
+// the same bytes as its ownership decision rather than from a second, potentially racy read.
+function scanActiveProfiles(harness: HarnessName, project: string): ActiveProfileScan {
   const projectRoot = resolve(project);
   const { directory, extension } = locationFor(harness);
   const activeRoot = contained(projectRoot, join(projectRoot, directory));
   try {
     rejectSymlinkTraversal(projectRoot, activeRoot);
     const rootStat = lstatSync(activeRoot);
-    if (!rootStat.isDirectory()) return [];
+    if (!rootStat.isDirectory()) return { ownedIds: [], managedProfiles: [] };
     const candidates = readdirSync(activeRoot, { withFileTypes: true })
       .filter((entry) => entry.name.endsWith(extension))
       .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
     if (candidates.length > maxActiveProfiles) throw new Error(`too many active profiles: ${candidates.length}`);
-    const ids: string[] = [];
+    const ownedIds: string[] = [];
+    const managedProfiles: ManagedActiveProfile[] = [];
     for (const entry of candidates) {
       if (entry.isSymbolicLink()) throw new Error(`symlink traversal refused: ${join(activeRoot, entry.name)}`);
       const id = entry.name.slice(0, -extension.length);
-      if (!idPattern.test(id)) continue;
+      if (!isHarborId(id)) continue;
       if (!entry.isFile()) continue;
-      const content = readManagedActiveProfile(harness, projectRoot, id);
+      const content = readOwnedActiveProfile(harness, projectRoot, id);
       if (!content) continue;
-      ids.push(id);
+      ownedIds.push(id);
+      try {
+        managedProfiles.push({ id, definition: validatedDefinition(content, id, harness, projectRoot) });
+      } catch {
+        // Owned but stale or malformed profiles remain visible only through the ownership view.
+      }
     }
-    return ids;
+    return { ownedIds, managedProfiles };
   } catch (error: any) {
-    if (["ENOENT", "ENOTDIR"].includes(error?.code)) return [];
+    if (["ENOENT", "ENOTDIR"].includes(error?.code)) return { ownedIds: [], managedProfiles: [] };
     throw error;
   }
 }
 
+/**
+ * Lists active files carrying a structurally valid Agent Harbor ownership marker.
+ * The result may include stale revision-3 or modified revision-4 profiles; use
+ * {@link listManagedActiveIds} when selecting an invocation target.
+ */
+export function listOwnedActiveIds(harness: HarnessName, project: string): string[] {
+  return scanActiveProfiles(harness, project).ownedIds;
+}
+
 /** Lists owned revision-4 profiles whose complete executable representation is canonical. */
 export function listManagedActiveIds(harness: HarnessName, project: string): string[] {
-  const projectRoot = resolve(project);
-  return listOwnedActiveIds(harness, projectRoot).filter((id) => {
-    const content = readManagedActiveProfile(harness, projectRoot, id);
-    if (!content) return false;
-    try { validatedDefinition(content, id, harness, projectRoot); return true; }
-    catch { return false; }
-  });
+  return scanActiveProfiles(harness, project).managedProfiles.map(({ id }) => id);
 }
 
 /** Lists fixed roles first, followed by canonical project profiles that are safe to invoke. */
 export function listInvocablePlayerIds(harness: HarnessName, project: string): string[] {
   const ids = new Set(rolePlayers.keys());
-  for (const id of listManagedActiveIds(harness, project)) ids.add(id);
+  for (const { id } of scanActiveProfiles(harness, project).managedProfiles) ids.add(id);
   return [...ids];
 }
 
 /** Loads one active player only if it is owned, revision-4, validated, and canonical. */
 export function loadManagedActivePlayer(harness: HarnessName, project: string, id: unknown): PlayerDefinition {
   const validId = requireValidId(id);
-  const content = readManagedActiveProfile(harness, project, validId);
+  const content = readOwnedActiveProfile(harness, project, validId);
   if (!content) throw new Error(`active managed player not found: ${validId}`);
   return validatedDefinition(content, validId, harness, resolve(project));
 }

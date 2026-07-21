@@ -39,6 +39,16 @@ export declare class Roster {
      * and both files either verify successfully or are restored to their prior exact bytes.
      */
     join(input: unknown): Promise<string>;
+    private bundledBenchInventory;
+    private legacyBenchInventory;
+    private registrationEntries;
+    private personalBenchState;
+    private personalBenchInventory;
+    private listBench;
+    private planBenchPlayer;
+    private planLegacyCleanup;
+    /** Completes every collision/read/render preflight before returning transaction input. */
+    private planBenchMutation;
     /**
      * Lists roster state or deterministically turns bundled/personal players on and off.
      * Turning a personal player off removes only its owned active copy; its registration remains the

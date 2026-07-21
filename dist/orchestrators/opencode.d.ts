@@ -21,5 +21,7 @@ export declare class OpenCodeOrchestrator implements Orchestrator {
     runAgent(agent: string, task: string, parentID: string | undefined, model: OpenCodeModel, signal?: AbortSignal): Promise<string>;
     /** Runs one portable contract using a closed OpenCode tool policy. */
     run(definition: ContractDefinition, signal?: AbortSignal): Promise<string>;
+    /** Owns the complete create/prompt/evidence/cleanup lifecycle for one disposable child. */
+    private runChildLifecycle;
 }
 export {};

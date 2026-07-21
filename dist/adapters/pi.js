@@ -4,11 +4,11 @@ import { listInvocablePlayerIds, listManagedActiveIds, loadPiActivePlayer } from
 import { executeCommand } from "../core/commands.js";
 import { runDeterministicCommand } from "./direct.js";
 import { bundledPlayers, rolePlayers } from "../core/defaults.js";
+import { isHarborId } from "../core/identity.js";
 import { commandNames } from "../core/types.js";
 import { normalizeDelegatedTaskPaths } from "../core/profiles.js";
 import { PiOrchestrator } from "../orchestrators/pi.js";
 import { harborContext } from "./shared.js";
-const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
 /**
  * Registers Agent Harbor's command and tool surface in the active Pi host.
  * Active profiles are read from private Harbor storage and invoked through a
@@ -48,7 +48,7 @@ export default function agentHarbor(pi) {
             },
             execute: async (_id, params, signal, _update, context) => {
                 const project = context?.cwd || cwd;
-                if (typeof params.agent !== "string" || !idPattern.test(params.agent) || params.agent === "team-lead")
+                if (!isHarborId(params.agent) || params.agent === "team-lead")
                     throw new Error("invalid or recursive delegation target");
                 if (typeof params.task !== "string" || !params.task.trim())
                     throw new Error("delegation requires a non-empty task");

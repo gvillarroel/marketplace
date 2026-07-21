@@ -11,6 +11,7 @@ import { runCopilotControl } from "./copilot.js";
 import { requireInvocablePlayer } from "../core/active.js";
 import { trustedSkills } from "../core/defaults.js";
 import { GhResolver } from "../core/github.js";
+import { isHarborId } from "../core/identity.js";
 import { formatLoadedSkillGroup, loadConfiguredSkills } from "../core/skills.js";
 import { commandNames } from "../core/types.js";
 const maximumMessageBytes = 1_000_000;
@@ -20,11 +21,10 @@ const supportedProtocolVersions = ["2025-11-25", "2025-06-18", "2025-03-26", "20
 const activeRequests = new Map();
 let initializeSeen = false;
 let initialized = false;
-const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
 function scopedPlayerArgument(args) {
     if (!args.length)
         return undefined;
-    if (args.length !== 2 || args[0] !== "--skills-player" || !idPattern.test(args[1])) {
+    if (args.length !== 2 || args[0] !== "--skills-player" || !isHarborId(args[1])) {
         throw new Error("usage: copilot-mcp.js [--skills-player <player-id>]");
     }
     return args[1];

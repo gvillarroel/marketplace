@@ -5,6 +5,7 @@
 import { resolve } from "node:path";
 import { listManagedActiveIds } from "../core/active.js";
 import { emitHarborEvidence, fingerprintHarborEvidence, type HarborEvidenceHook } from "../core/evidence.js";
+import { harnessProfileLayout } from "../core/harnesses.js";
 
 /** Minimal host identity needed to resolve a logical Harbor player. */
 export interface CopilotAgentIdentity {
@@ -73,7 +74,8 @@ function samePath(left: string, right: string): boolean {
 }
 
 function activePath(project: string, id: string): string {
-  return resolve(project, ".github", "agents", `${id}.agent.md`);
+  const { activeDir, extension } = harnessProfileLayout("copilot");
+  return resolve(project, activeDir, `${id}${extension}`);
 }
 
 /** Lists canonical active project profile IDs without trusting arbitrary files. */

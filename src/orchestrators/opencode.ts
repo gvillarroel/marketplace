@@ -8,6 +8,22 @@ import { composeContractPrompt, openCodeToolPolicy } from "../core/profiles.js";
 import { loadConfiguredSkills, withLoadedSkillGuidance } from "../core/skills.js";
 
 type Client = PluginInput["client"];
+type PromptBody = NonNullable<Parameters<Client["session"]["prompt"]>[0]["body"]> & {
+  readonly variant?: string;
+};
+
+interface ChildLifecycle {
+  readonly evidenceBase: {
+    readonly harness: "opencode";
+    readonly agent: string;
+    readonly runtimeAgent: string;
+    readonly parentSessionId?: string | undefined;
+  };
+  readonly title: string;
+  readonly task: string;
+  readonly buildPromptBody: () => PromptBody;
+  readonly signal?: AbortSignal;
+}
 
 /** Explicit OpenCode model identity inherited from the originating user turn. */
 export interface OpenCodeModel {
@@ -38,7 +54,48 @@ export class OpenCodeOrchestrator implements Orchestrator {
     if (!agent.trim()) throw new Error("OpenCode agent id is required");
     if (!task.trim()) throw new Error(`OpenCode agent ${agent} requires a non-empty task`);
     if (!model?.providerID.trim() || !model.modelID.trim()) throw new Error(`OpenCode agent ${agent} requires an explicit model`);
-    const evidenceBase = { harness: this.harness, agent, runtimeAgent: agent, parentSessionId: parentID } as const;
+    return this.runChildLifecycle({
+      evidenceBase: { harness: this.harness, agent, runtimeAgent: agent, parentSessionId: parentID },
+      title: `Harbor agent: ${agent}`,
+      task,
+      buildPromptBody: () => ({
+        agent,
+        model: { providerID: model.providerID, modelID: model.modelID },
+        ...(model.variant === undefined ? {} : { variant: model.variant }),
+        parts: [{ type: "text", text: task }],
+      }),
+      signal,
+    });
+  }
+
+  /** Runs one portable contract using a closed OpenCode tool policy. */
+  async run(definition: ContractDefinition, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
+    const loaded = await loadConfiguredSkills(definition, this.directory, this.github, trustedSkills, signal);
+    definition = withLoadedSkillGuidance(definition, loaded);
+    signal?.throwIfAborted();
+    const agent = definition.tools.some((tool) => tool === "edit" || tool === "execute") ? "general" : "explore";
+    return this.runChildLifecycle({
+      evidenceBase: { harness: this.harness, agent: definition.name, runtimeAgent: agent },
+      title: `Harbor contract: ${definition.name}`,
+      task: definition.task,
+      buildPromptBody: () => ({
+        agent,
+        tools: openCodeToolPolicy(definition.tools),
+        parts: [{ type: "text", text: composeContractPrompt(definition) }],
+      }),
+      signal,
+    });
+  }
+
+  /** Owns the complete create/prompt/evidence/cleanup lifecycle for one disposable child. */
+  private async runChildLifecycle({
+    evidenceBase,
+    title,
+    task,
+    buildPromptBody,
+    signal,
+  }: ChildLifecycle): Promise<string> {
     emitHarborEvidence(this.evidenceHook, {
       ...evidenceBase,
       phase: "target.resolved",
@@ -50,7 +107,7 @@ export class OpenCodeOrchestrator implements Orchestrator {
       const created = await this.client.session.create({
         // OpenAI Codex OAuth rejects the `metadata` OpenCode derives from parented sessions.
         // The synchronous tool call and evidence hook already provide exact correlation.
-        body: { title: `Harbor agent: ${agent}` },
+        body: { title },
         query: { directory: this.directory },
         signal,
         throwOnError: true,
@@ -74,15 +131,10 @@ export class OpenCodeOrchestrator implements Orchestrator {
       emitHarborEvidence(this.evidenceHook, { ...evidenceBase, phase: "prompt.attempted", outcome: "ok", childId: id });
       const result = await this.client.session.prompt({
         path: { id }, query: { directory: this.directory }, signal, throwOnError: true,
-        body: {
-          agent,
-          model: { providerID: model.providerID, modelID: model.modelID },
-          ...(model.variant === undefined ? {} : { variant: model.variant }),
-          parts: [{ type: "text", text: task }],
-        },
+        body: buildPromptBody(),
       });
       output = result.data.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-      if (!output.trim()) throw new Error(`OpenCode child ${agent} returned empty evidence`);
+      if (!output.trim()) throw new Error(`OpenCode child ${evidenceBase.agent} returned empty evidence`);
       emitHarborEvidence(this.evidenceHook, {
         ...evidenceBase,
         phase: "evidence.returned",
@@ -104,97 +156,6 @@ export class OpenCodeOrchestrator implements Orchestrator {
     } finally {
       // Deleting the child is part of correctness, not best-effort telemetry;
       // execution and cleanup failures are therefore reported together.
-      let cleanupError: unknown;
-      try {
-        const removed = await this.client.session.delete({ path: { id }, query: { directory: this.directory }, throwOnError: true });
-        if (removed.data !== true) throw new Error(`OpenCode SDK did not delete child session ${id}`);
-      } catch (error) {
-        cleanupError = error;
-      }
-      emitHarborEvidence(this.evidenceHook, {
-        ...evidenceBase,
-        phase: "child.cleaned",
-        outcome: cleanupError === undefined ? "ok" : "error",
-        childId: id,
-        ...(cleanupError === undefined ? {} : { error: fingerprintHarborEvidence(String(cleanupError)) }),
-      });
-      if (cleanupError !== undefined) {
-        if (failed) throw new AggregateError([failure, cleanupError], `OpenCode child execution and cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`);
-        throw cleanupError;
-      }
-    }
-    if (failed) throw failure;
-    return output;
-  }
-
-  /** Runs one portable contract using a closed OpenCode tool policy. */
-  async run(definition: ContractDefinition, signal?: AbortSignal): Promise<string> {
-    signal?.throwIfAborted();
-    const loaded = await loadConfiguredSkills(definition, this.directory, this.github, trustedSkills, signal);
-    definition = withLoadedSkillGuidance(definition, loaded);
-    signal?.throwIfAborted();
-    const agent = definition.tools.some((tool) => tool === "edit" || tool === "execute") ? "general" : "explore";
-    const evidenceBase = { harness: this.harness, agent: definition.name, runtimeAgent: agent } as const;
-    emitHarborEvidence(this.evidenceHook, {
-      ...evidenceBase,
-      phase: "target.resolved",
-      outcome: "ok",
-      task: fingerprintHarborEvidence(definition.task),
-    });
-    let id: string;
-    try {
-      const created = await this.client.session.create({
-        body: { title: `Harbor contract: ${definition.name}` },
-        query: { directory: this.directory },
-        signal,
-        throwOnError: true,
-      });
-      if (!created.data?.id) throw new Error("OpenCode SDK did not create a child session");
-      id = created.data.id;
-    } catch (error) {
-      emitHarborEvidence(this.evidenceHook, {
-        ...evidenceBase,
-        phase: "child.failed",
-        outcome: "error",
-        error: fingerprintHarborEvidence(String(error)),
-      });
-      throw error;
-    }
-    emitHarborEvidence(this.evidenceHook, { ...evidenceBase, phase: "child.started", outcome: "ok", childId: id });
-    let failed = false;
-    let failure: unknown;
-    let output = "";
-    try {
-      emitHarborEvidence(this.evidenceHook, { ...evidenceBase, phase: "prompt.attempted", outcome: "ok", childId: id });
-      const result = await this.client.session.prompt({
-        path: { id }, query: { directory: this.directory }, signal, throwOnError: true,
-        body: {
-          agent,
-          tools: openCodeToolPolicy(definition.tools),
-          parts: [{ type: "text", text: composeContractPrompt(definition) }],
-        },
-      });
-      output = result.data.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-      if (!output.trim()) throw new Error(`OpenCode child ${definition.name} returned empty evidence`);
-      emitHarborEvidence(this.evidenceHook, {
-        ...evidenceBase,
-        phase: "evidence.returned",
-        outcome: "ok",
-        childId: id,
-        evidence: fingerprintHarborEvidence(output),
-      });
-      emitHarborEvidence(this.evidenceHook, { ...evidenceBase, phase: "child.completed", outcome: "ok", childId: id });
-    } catch (error) {
-      failed = true;
-      failure = error;
-      emitHarborEvidence(this.evidenceHook, {
-        ...evidenceBase,
-        phase: "child.failed",
-        outcome: "error",
-        childId: id,
-        error: fingerprintHarborEvidence(String(error)),
-      });
-    } finally {
       let cleanupError: unknown;
       try {
         const removed = await this.client.session.delete({ path: { id }, query: { directory: this.directory }, throwOnError: true });

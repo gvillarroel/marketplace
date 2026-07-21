@@ -5,6 +5,7 @@
 import { resolve } from "node:path";
 import { listManagedActiveIds } from "../core/active.js";
 import { emitHarborEvidence, fingerprintHarborEvidence } from "../core/evidence.js";
+import { harnessProfileLayout } from "../core/harnesses.js";
 /** Maps stable Harbor role IDs to Copilot's plugin-qualified runtime IDs. */
 export const copilotFixedAgentIds = new Map([
     ["team-lead", "agent-foundry:team-lead"],
@@ -16,7 +17,8 @@ function samePath(left, right) {
     return normalize(left) === normalize(right);
 }
 function activePath(project, id) {
-    return resolve(project, ".github", "agents", `${id}.agent.md`);
+    const { activeDir, extension } = harnessProfileLayout("copilot");
+    return resolve(project, activeDir, `${id}${extension}`);
 }
 /** Lists canonical active project profile IDs without trusting arbitrary files. */
 export function listCopilotActiveProfileIds(project) {
