@@ -51,6 +51,17 @@ export interface GithubSkill {
     path: string;
     track: string;
 }
+/** A whole GitHub repository whose exact `SKILL.md` files are trusted. */
+export interface GithubSkillRepositoryTrust {
+    kind: "github";
+    scope: "repository";
+    repo: string;
+    track: string;
+}
+/** Exact built-in references plus optional repository-wide trust roots. */
+export type TrustedGithubSkills = readonly GithubSkill[] & {
+    readonly repositories?: readonly GithubSkillRepositoryTrust[];
+};
 /** Read-only GitHub scope whose `SKILL.md` entries may appear in the visible catalog. */
 export interface GithubSkillCatalogSource {
     kind: "github";
@@ -79,6 +90,11 @@ export interface GithubSkillDescription {
     commit: string;
     description: string;
 }
+/** Canonical public frontmatter loaded from one pinned catalog row. */
+export interface GithubSkillCatalogDescription {
+    name: string;
+    description: string;
+}
 /** Reference to one exact, project-root-relative `SKILL.md` file. */
 export interface RepositorySkill {
     kind: "repo";
@@ -100,5 +116,6 @@ export interface GithubResolver {
     }>;
     describe?(skill: GithubSkill, signal?: AbortSignal): Promise<GithubSkillDescription>;
     listCatalog?(source: GithubSkillCatalogSource, signal?: AbortSignal): Promise<readonly GithubSkillCatalogEntry[]>;
+    inspectCatalog?(entry: GithubSkillCatalogEntry, signal?: AbortSignal): Promise<GithubSkillCatalogDescription>;
     describeCatalog?(entry: GithubSkillCatalogEntry, signal?: AbortSignal): Promise<string>;
 }

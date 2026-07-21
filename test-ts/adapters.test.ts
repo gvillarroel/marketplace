@@ -13,6 +13,7 @@ import { GhResolver } from "../src/core/github.js";
 import type { HarborEvidenceEvent } from "../src/core/evidence.js";
 import { Roster } from "../src/core/lifecycle.js";
 import { harnessSpec, normalizeDelegatedTaskPaths } from "../src/core/profiles.js";
+import { visibleTextWidth } from "../src/core/text-layout.js";
 import { CopilotOrchestrator } from "../src/orchestrators/copilot.js";
 import { OpenCodeOrchestrator } from "../src/orchestrators/opencode.js";
 import { PiOrchestrator } from "../src/orchestrators/pi.js";
@@ -109,7 +110,8 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   });
   const reset = (prompt: string) => hooks.onUserPromptSubmitted({ sessionId: "parent", workingDirectory: project, prompt }, invocation);
   const finish = (value: ReturnType<typeof input>, evidence: string) => hooks.onPostToolUse({ ...value, toolResult: evidence }, invocation);
-  assert.match((await hooks.onPreToolUse(input("portfolio-management", "before snapshot"), invocation))?.permissionDecisionReason ?? "", /snapshot is unavailable/);
+  const endTurn = (id: string) => coordinator.observeEvent({ type: "session.idle", id, data: { aborted: false } });
+  assert.match((await hooks.onPreToolUse(input("totally-unmanaged", "authoritative first snapshot"), invocation))?.permissionDecisionReason ?? "", /not active/);
   await coordinator.refresh();
 
   await reset("use the default specialists");
@@ -122,6 +124,7 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
     priorEvidence = `evidence:${step.agent}`;
   }
 
+  endTurn("default-cycle-idle");
   await reset("run the SDLC stages");
   priorEvidence = undefined;
   for (const [index, step] of fullCycle.steps.entries()) {
@@ -175,13 +178,17 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
       ...fullCycle.steps.map((step) => step.agent),
     ],
   );
-  assert.equal(reloads, 1, "preToolUse must use the verified snapshot without reentrant host RPC");
+  const reloadsAfterCycles = reloads;
+  assert.ok(reloadsAfterCycles >= expectedCycleAgents.length + 2,
+    "team-lead preToolUse did not authoritatively refresh the native registry");
 
+  endTurn("sdlc-cycle-idle");
   await reset("reject invalid delegations");
   const serialized = input("portfolio-management", "serialized host arguments");
   serialized.toolArgs = JSON.stringify(serialized.toolArgs) as any;
   assert.equal((await hooks.onPreToolUse(serialized, invocation))?.permissionDecision, "allow");
   await finish(serialized as any, "serialized evidence");
+  endTurn("serialized-cycle-idle");
   await reset("reject malformed serialized delegations");
   assert.match((await hooks.onPreToolUse({ ...input("portfolio-management", "work"), toolArgs: "not-json" }, invocation))?.permissionDecisionReason ?? "", /bounded object/);
   assert.match((await hooks.onPreToolUse({ ...input("portfolio-management", "work"), toolArgs: "[]" }, invocation))?.permissionDecisionReason ?? "", /bounded object/);
@@ -198,7 +205,7 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
 
   failCurrent = true;
   await assert.rejects(() => coordinator.refresh(), /current unavailable/);
-  assert.match((await hooks.onPreToolUse(input("portfolio-management", "work"), invocation))?.permissionDecisionReason ?? "", /snapshot is unavailable/);
+  assert.match((await hooks.onPreToolUse(input("portfolio-management", "work"), invocation))?.permissionDecisionReason ?? "", /fails closed/);
   failCurrent = false; await coordinator.refresh(); failReload = true;
   await assert.rejects(() => coordinator.refresh(), /reload unavailable/);
   assert.match((await hooks.onPreToolUse(input("portfolio-management", "work"), invocation))?.permissionDecisionReason ?? "", /snapshot is unavailable/);
@@ -207,27 +214,32 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   current = copilotFixedAgentIds.get("crafter")!;
   await coordinator.refresh();
   assert.equal(await hooks.onPreToolUse(input("portfolio-management", "unrelated agent task"), invocation), undefined);
+  current = copilotFixedAgentIds.get("team-lead")!;
   coordinator.observeEvent({ type: "subagent.selected", data: { agentName: "team-lead" } });
+  endTurn("invalid-cycle-idle");
   await reset("selection event normalizes the logical lead ID");
   const selectedCall = input("portfolio-management", "selected lead task");
   assert.equal((await hooks.onPreToolUse(selectedCall, invocation))?.permissionDecision, "allow");
   await finish(selectedCall, "selected lead evidence");
+  endTurn("selected-cycle-idle");
   coordinator.observeEvent({ type: "subagent.selected", agentId: "nested", data: { agentName: "crafter" } });
   await reset("nested selection events cannot replace the root selection");
   const afterNestedSelection = input("portfolio-management", "root lead remains selected");
   assert.equal((await hooks.onPreToolUse(afterNestedSelection, invocation))?.permissionDecision, "allow");
   await finish(afterNestedSelection, "nested selection ignored");
+  current = copilotFixedAgentIds.get("crafter")!;
   coordinator.observeEvent({ type: "subagent.deselected", data: {} });
   assert.equal(await hooks.onPreToolUse(input("portfolio-management", "deselected task"), invocation), undefined);
-  assert.equal(reloads, 4, "snapshot refreshes are explicit and bounded");
+  assert.ok(reloads > reloadsAfterCycles, "later team-lead preflights did not refresh the registry");
 
   let markReloadStarted!: () => void;
   const reloadStarted = new Promise<void>((resolve) => { markReloadStarted = resolve; });
   let releaseReload!: () => void;
   const reloadGate = new Promise<void>((resolve) => { releaseReload = resolve; });
   const racingEvidence: HarborEvidenceEvent[] = [];
+  let racingCurrent = copilotFixedAgentIds.get("crafter")!;
   const racingCoordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: copilotFixedAgentIds.get("crafter")! } }),
+    getCurrent: async () => ({ agent: { id: racingCurrent } }),
     reload: async () => {
       markReloadStarted();
       await reloadGate;
@@ -236,6 +248,7 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   } } }), (event) => racingEvidence.push(event));
   const racingRefresh = racingCoordinator.refresh();
   await reloadStarted;
+  racingCurrent = copilotFixedAgentIds.get("team-lead")!;
   racingCoordinator.observeEvent({ type: "subagent.selected", data: { agentName: "team-lead" } });
   releaseReload();
   await racingRefresh;
@@ -253,8 +266,9 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   const deselectReloadStarted = new Promise<void>((resolve) => { markDeselectReloadStarted = resolve; });
   let releaseDeselectReload!: () => void;
   const deselectReloadGate = new Promise<void>((resolve) => { releaseDeselectReload = resolve; });
+  let deselectCurrent: string | undefined = copilotFixedAgentIds.get("team-lead")!;
   const deselectCoordinator = createCopilotCoordinatorGuard(() => ({ rpc: { agent: {
-    getCurrent: async () => ({ agent: { id: copilotFixedAgentIds.get("team-lead")! } }),
+    getCurrent: async () => ({ agent: deselectCurrent ? { id: deselectCurrent } : undefined }),
     reload: async () => {
       markDeselectReloadStarted();
       await deselectReloadGate;
@@ -263,6 +277,7 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   } } }));
   const deselectRefresh = deselectCoordinator.refresh();
   await deselectReloadStarted;
+  deselectCurrent = undefined;
   deselectCoordinator.observeEvent({ type: "subagent.deselected", data: {} });
   releaseDeselectReload();
   await deselectRefresh;
@@ -365,6 +380,31 @@ test("Pi orchestrator uses one in-memory SDK session", async () => {
   assert.equal(createOptions.model, model);
   assert.equal(createOptions.thinkingLevel, "minimal");
   assert.equal(createOptions.resourceLoader instanceof sdk.DefaultResourceLoader, true);
+});
+
+test("Pi orchestrator recovers evidence from the settled child transcript when streaming emits no deltas", async () => {
+  const session = {
+    messages: [
+      { role: "user", content: [{ type: "text", text: "request" }] },
+      { role: "assistant", content: [{ type: "thinking", thinking: "private" }, { type: "text", text: "settled evidence" }] },
+    ],
+    subscribe: () => () => {},
+    prompt: async () => {},
+    abort: async () => {},
+    dispose: () => {},
+  };
+  const sdk = {
+    DefaultResourceLoader: class {
+      private readonly options: any;
+      constructor(options: any) { this.options = options; }
+      async reload() { this.options.skillsOverride({ skills: [], diagnostics: [] }); }
+      getSkills() { return { skills: [], diagnostics: [] }; }
+    },
+    getAgentDir: () => "pi-agent-home",
+    SessionManager: { inMemory: () => ({}) },
+    createAgentSession: async () => ({ session }),
+  };
+  assert.equal(await new PiOrchestrator(process.cwd(), async () => sdk as any).run(definition as any), "settled evidence");
 });
 
 test("Pi gives a child exactly its invocation-scoped skill allowlist", async () => {
@@ -760,8 +800,14 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
     { directory: current, agent: "team-lead", abort: new AbortController().signal } as any,
   ), /no configured skills/);
   const originalDescribe = GhResolver.prototype.describe;
+  const originalListCatalog = GhResolver.prototype.listCatalog;
+  const originalInspectCatalog = GhResolver.prototype.inspectCatalog;
   try {
     GhResolver.prototype.describe = async () => ({ commit: "e".repeat(40), description: "Author zx automation scripts." });
+    GhResolver.prototype.listCatalog = async (source) => [{
+      repo: source.repo, path: "skills/zx-example-author/SKILL.md", name: "zx-example-author", track: source.track, commit: "f".repeat(40),
+    }];
+    GhResolver.prototype.inspectCatalog = async (entry) => ({ name: entry.name, description: "Author zx automation scripts." });
     await assert.rejects(() => plugin.tool!.harbor_filter_skills.execute(
       { query: "zx scripts" }, { directory: current, agent: "team-lead", abort: new AbortController().signal } as any,
     ), /only to talent-scout/);
@@ -777,7 +823,11 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
       { directory: current, agent: "talent-scout", abort: new AbortController().signal } as any,
     );
     assert.match(String(scouted), /joined open-scouted/);
-  } finally { GhResolver.prototype.describe = originalDescribe; }
+  } finally {
+    GhResolver.prototype.describe = originalDescribe;
+    GhResolver.prototype.listCatalog = originalListCatalog;
+    GhResolver.prototype.inspectCatalog = originalInspectCatalog;
+  }
   if (previous === undefined) delete process.env.OPENCODE_CONFIG_DIR; else process.env.OPENCODE_CONFIG_DIR = previous;
 });
 
@@ -1012,7 +1062,7 @@ test("Pi extension registers lifecycle and fixed roles through ExtensionAPI", ()
     registerTool: (tool: any) => tools.push(tool),
     getThinkingLevel: () => "minimal",
   } as any);
-  assert.deepEqual(names, [...commandNames, ...rolePlayers.keys(), "scout"]);
+  assert.deepEqual(names, ["team", ...commandNames, ...rolePlayers.keys(), "scout"]);
   assert.deepEqual(tools.map((tool) => tool.name), ["harbor_contract"]);
   assert.equal(tools[0].executionMode, "sequential");
 });
@@ -1030,6 +1080,8 @@ test("Pi /scout receives only filtering and one deterministic join tool", async 
   } as any);
   const originalRun = PiOrchestrator.prototype.run;
   const originalDescribe = GhResolver.prototype.describe;
+  const originalListCatalog = GhResolver.prototype.listCatalog;
+  const originalInspectCatalog = GhResolver.prototype.inspectCatalog;
   let captured: any;
   try {
     PiOrchestrator.prototype.run = async function (definition: any) {
@@ -1039,6 +1091,10 @@ test("Pi /scout receives only filtering and one deterministic join tool", async 
     GhResolver.prototype.describe = async () => ({
       commit: "d".repeat(40), description: "Author zx automation scripts.",
     });
+    GhResolver.prototype.listCatalog = async (source) => [{
+      repo: source.repo, path: "skills/zx-example-author/SKILL.md", name: "zx-example-author", track: source.track, commit: "e".repeat(40),
+    }];
+    GhResolver.prototype.inspectCatalog = async (entry) => ({ name: entry.name, description: "Author zx automation scripts." });
     await commands.get("scout").handler("alguien que escriba scripts en zx", {
       cwd: project, model: undefined, ui: { notify: (message: string) => notices.push(message) },
     });
@@ -1049,19 +1105,79 @@ test("Pi /scout receives only filtering and one deterministic join tool", async 
       "filter", { query: "zx scripts" }, new AbortController().signal, undefined, { cwd: project },
     );
     assert.match(filtered.content[0].text, /zx-example-author/);
+    await captured.customTools[0].execute("filter-2", { query: "zx" }, new AbortController().signal, undefined, { cwd: project });
+    await captured.customTools[0].execute("filter-3", { query: "automation" }, new AbortController().signal, undefined, { cwd: project });
+    await assert.rejects(() => captured.customTools[0].execute(
+      "filter-4", { query: "more" }, new AbortController().signal, undefined, { cwd: project },
+    ), /filter limit reached \(3\)/u);
     const joined = await captured.customTools[1].execute(
       "join", { definition: JSON.stringify({
         name: "zx-automator", description: "Writes zx automation", prompt: "Write bounded zx automation scripts.",
         tools: ["read", "edit", "execute"], skills: [trustedSkills[0]],
       }) }, new AbortController().signal, undefined, { cwd: project },
     );
-    assert.match(joined.content[0].text, /joined zx-automator/);
+    assert.match(joined.content[0].text, /zx-automator joined/u);
+    assert.doesNotMatch(joined.content[0].text, /registration:|active:|\\home\\|\/home\//u);
+    await assert.rejects(() => captured.customTools[1].execute(
+      "join-again", { definition: JSON.stringify({ name: "second", description: "Second", prompt: "Work", tools: ["read"] }) },
+      new AbortController().signal, undefined, { cwd: project },
+    ), /at most one player/u);
     assert.match(await readFile(join(project, ".pi", "agents", "zx-automator.md"), "utf8"), /zx-example-author/);
-    assert.equal(notices.at(-1), "scout-complete");
+    assert.match(notices.at(-1)!, /^scout-complete\nTEAM RUN \(native Pi telemetry\)/u);
   } finally {
     PiOrchestrator.prototype.run = originalRun;
     GhResolver.prototype.describe = originalDescribe;
+    GhResolver.prototype.listCatalog = originalListCatalog;
+    GhResolver.prototype.inspectCatalog = originalInspectCatalog;
     if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
+});
+
+test("Pi /scout preserves and reconciles a committed join after failure or cancellation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-scout-post-commit-"));
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, "home");
+  const project = join(root, "project");
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  piExtension({
+    registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerTool: () => {},
+    getThinkingLevel: () => "minimal",
+  } as any);
+  const originalRun = PiOrchestrator.prototype.run;
+  let attempt = 0;
+  try {
+    PiOrchestrator.prototype.run = async function () {
+      const id = attempt++ === 0 ? "joined-before-failure" : "joined-before-cancel";
+      const joinTool = (this as any).customTools.find((tool: any) => tool.name === "harbor_join_player");
+      await joinTool.execute("join", { definition: JSON.stringify({
+        name: id, description: `Committed ${id}`, prompt: "Work narrowly.", tools: ["read"],
+      }) }, new AbortController().signal, undefined, { cwd: project });
+      if (id === "joined-before-failure") throw new Error("provider failed after join commit");
+      throw new DOMException("provider cancelled after join commit", "AbortError");
+    };
+
+    await commands.get("scout").handler("find a failure specialist", {
+      cwd: project, model: undefined, ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+    });
+    assert.ok(commands.has("joined-before-failure"), "committed alias was not reconciled after failure");
+    assert.equal(notices.at(-1)!.level, "error");
+    assert.match(notices.at(-1)!.message, /Roster commit preserved: joined-before-failure is joined and active/u);
+    assert.match(notices.at(-1)!.message, /recruiter child ended after that commit/u);
+
+    await commands.get("scout").handler("find a cancellable specialist", {
+      cwd: project, model: undefined, ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+    });
+    assert.ok(commands.has("joined-before-cancel"), "committed alias was not reconciled after cancellation");
+    assert.equal(notices.at(-1)!.level, "warning");
+    assert.match(notices.at(-1)!.message, /Cancelled\.[\s\S]*Roster commit preserved: joined-before-cancel is joined and active/u);
+    await access(join(project, ".pi", "agents", "joined-before-failure.md"));
+    await access(join(project, ".pi", "agents", "joined-before-cancel.md"));
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
   }
 });
 
@@ -1071,6 +1187,7 @@ test("Pi contract entrypoints inherit the host SDK model and thinking level", as
   const tools = new Map<string, any>();
   const notices: string[] = [];
   const hostModel = { provider: "openai-codex", id: "gpt-5.3-codex-spark" };
+  const configuredModel = { provider: "router", id: "special", marker: "resolved" };
   piExtension({
     registerCommand: (name: string, options: any) => commands.set(name, options),
     registerTool: (tool: any) => tools.set(tool.name, tool),
@@ -1090,27 +1207,102 @@ test("Pi contract entrypoints inherit the host SDK model and thinking level", as
       return "contract-evidence";
     };
     const contract = JSON.stringify(definition);
-    const context = { cwd: root, model: hostModel, ui: { notify: (message: string) => notices.push(message) } };
+    const context = {
+      cwd: root,
+      model: hostModel,
+      modelRegistry: { find: (provider: string, id: string) => provider === "router" && id === "special" ? configuredModel : undefined },
+      ui: { notify: (message: string) => notices.push(message) },
+    };
     await commands.get("contract").handler(contract, context);
     const toolResult = await tools.get("harbor_contract").execute(
       "contract-tool", { definition: contract }, new AbortController().signal, undefined, context,
     );
     assert.equal(toolResult.content[0].text, "contract-evidence");
+    await commands.get("contract").handler(JSON.stringify({ ...definition, model: "router/special" }), context);
   } finally {
     PiOrchestrator.prototype.run = originalRun;
   }
 
-  assert.equal(notices.at(-1), "contract-evidence");
-  assert.equal(observed.length, 2);
+  assert.match(notices.at(-1)!, /^contract-evidence\nTEAM RUN \(native Pi telemetry\)/u);
+  assert.equal(observed.length, 3);
   assert.ok(observed.every((entry) => entry.hostMarker === "host-sdk-static-import"));
-  assert.ok(observed.every((entry) => entry.sessionOptions.model === hostModel));
+  assert.ok(observed.slice(0, 2).every((entry) => entry.sessionOptions.model === hostModel));
+  assert.equal(observed[2].sessionOptions.model, configuredModel);
   assert.ok(observed.every((entry) => entry.sessionOptions.thinkingLevel === "minimal"));
+});
+
+test("Pi configured personal models fail closed before a child and resolve when authenticated", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-personal-model-preflight-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = home;
+  const roster = new Roster(harnessSpec("pi", home, project));
+  for (const [name, model] of [
+    ["model-malformed", "router"],
+    ["model-missing", "router/missing"],
+    ["model-unauth", "router/no-auth"],
+    ["model-ready", "router/ready"],
+  ] as const) {
+    await roster.join({ name, description: name, prompt: "Work", tools: ["read"], model });
+  }
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(project);
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => "low",
+    } as any);
+  } finally { process.chdir(previousCwd); }
+  const readyModel = { provider: "router", id: "ready" };
+  const unauthModel = { provider: "router", id: "no-auth" };
+  const context = {
+    cwd: project,
+    model: undefined,
+    modelRegistry: {
+      find: (provider: string, id: string) => provider !== "router" ? undefined
+        : id === "ready" ? readyModel : id === "no-auth" ? unauthModel : undefined,
+      hasConfiguredAuth: (model: any) => model !== unauthModel,
+    },
+    ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+  } as any;
+  const originalRun = PiOrchestrator.prototype.run;
+  const started: any[] = [];
+  try {
+    PiOrchestrator.prototype.run = async function (definition: any) {
+      started.push({ definition, model: (this as any).sessionOptions.model });
+      return "configured model evidence";
+    };
+    await commands.get("model-malformed").handler("work", context);
+    assert.match(notices.at(-1)!.message, /must use provider\/model syntax/u);
+    assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
+    await commands.get("model-missing").handler("work", context);
+    assert.match(notices.at(-1)!.message, /configured Pi model is unavailable/u);
+    await commands.get("model-unauth").handler("work", context);
+    assert.match(notices.at(-1)!.message, /configured Pi model has no available authentication/u);
+    assert.equal(started.length, 0);
+    assert.ok(notices.slice(-3).every(({ message }) => !message.includes("TEAM RUN")));
+
+    await commands.get("model-ready").handler("work", context);
+    assert.equal(started.length, 1);
+    assert.equal(started[0].definition.name, "model-ready");
+    assert.equal(started[0].model, readyModel);
+    assert.match(notices.at(-1)!.message, /configured model evidence[\s\S]*TEAM RUN/u);
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
 });
 
 test("Pi deterministic command handlers never enter the SDK orchestrator", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-pi-direct-"));
   const previousHome = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = join(root, "home");
+  const project = join(root, "project");
   const commands = new Map<string, any>(); const notices: string[] = [];
   const originalRun = PiOrchestrator.prototype.run;
   const originalListCatalog = GhResolver.prototype.listCatalog;
@@ -1122,18 +1314,33 @@ test("Pi deterministic command handlers never enter the SDK orchestrator", async
       registerTool: () => {},
       getThinkingLevel: () => { throw new Error("deterministic commands requested model state"); },
     } as any);
-    await commands.get("bench").handler("list", { cwd: join(root, "project"), ui: { notify: (value: string) => notices.push(value) } });
-    assert.match(notices.at(-1)!, /portfolio-management \| bundled \| bench/);
+    const context = { cwd: project, ui: { notify: (value: string) => notices.push(value) } };
+    await commands.get("bench").handler("list", context);
+    assert.match(notices.at(-1)!, /portfolio-management · bundled · bench/);
+    assert.match(notices.at(-1)!, /0 model tokens/);
     await commands.get("join").handler(JSON.stringify({ name: "native", description: "Native", prompt: "Work", tools: ["read"] }), {
-      cwd: join(root, "project"), ui: { notify: (value: string) => notices.push(value) },
+      ...context,
     });
-    assert.match(notices.at(-1)!, /joined native/);
+    assert.match(notices.at(-1)!, /native joined · personal · ready/u);
     assert.ok(commands.has("native"), "join must register /native in the current Pi session");
-    await commands.get("retire").handler("native", { cwd: join(root, "project"), ui: { notify: (value: string) => notices.push(value) } });
-    assert.match(notices.at(-1)!, /retired native/);
-    await commands.get("list-skills").handler("zx", { cwd: join(root, "project"), ui: { notify: (value: string) => notices.push(value) } });
+    await commands.get("retire").handler("native", context);
+    assert.match(notices.at(-1)!, /native unregistered and deactivated here/u);
+    await commands.get("list-skills").handler("zx", context);
     assert.match(notices.at(-1)!, /REPOSITORY.*PATH.*SKILL/);
     assert.match(notices.at(-1)!, /\x1b\[/);
+
+    await mkdir(join(project, ".agent-harbor"), { recursive: true });
+    await writeFile(join(project, ".agent-harbor", "skill-sources.json"), "{broken", "utf8");
+    await commands.get("bench").handler("list", context);
+    assert.match(notices.at(-1)!, /portfolio-management · bundled · bench/u);
+    await commands.get("team").handler("", context);
+    assert.match(notices.at(-1)!, /team-lead · manager · ready/u);
+    await commands.get("join").handler(JSON.stringify({ name: "catalog-independent", description: "Independent", prompt: "Work", tools: ["read"] }), context);
+    assert.match(notices.at(-1)!, /catalog-independent joined/u);
+    await commands.get("retire").handler("catalog-independent", context);
+    assert.match(notices.at(-1)!, /catalog-independent unregistered/u);
+    await commands.get("list-skills").handler("zx", context);
+    assert.match(notices.at(-1)!, /invalid JSON in skill catalog config/u);
     assert.ok(notices.every((value) => !value.includes("model orchestrator was invoked")));
   } finally {
     PiOrchestrator.prototype.run = originalRun;
@@ -1142,11 +1349,217 @@ test("Pi deterministic command handlers never enter the SDK orchestrator", async
   }
 });
 
+test("Pi /team and enriched /bench are searchable zero-model controls with completions and human errors", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-team-control-"));
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, "home");
+  const project = join(root, "project");
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  const originalRun = PiOrchestrator.prototype.run;
+  try {
+    PiOrchestrator.prototype.run = async () => { throw new Error("model boundary crossed"); };
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => { throw new Error("deterministic control requested model settings"); },
+    } as any);
+    const context = { cwd: project, ui: { notify: (message: string, level?: string) => notices.push({ message, level }) } } as any;
+    await commands.get("team").handler("", context);
+    assert.match(notices.at(-1)!.message, /Agent Harbor team .*0 model tokens/u);
+    assert.match(notices.at(-1)!.message, /team-lead · manager · ready/u);
+    assert.match(notices.at(-1)!.message, /talent-scout \(\/scout\) · utility · ready/u);
+    assert.match(notices.at(-1)!.message, /No one is working right now/u);
+    await commands.get("bench").handler("list construction", context);
+    assert.match(notices.at(-1)!.message, /build · bundled · bench/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /portfolio-management · bundled/u);
+    await commands.get("team").handler("does-not-exist", context);
+    assert.match(notices.at(-1)!.message, /No team member or tracked activity matches/u);
+    await commands.get("join").handler("{broken", context);
+    assert.match(notices.at(-1)!.message, /Invalid JSON for \/join/u);
+    assert.match(notices.at(-1)!.message, /0 model tokens/u);
+    await commands.get("join").handler(JSON.stringify({
+      name: "forged-model", description: "Safe", prompt: "Work", tools: ["read"],
+      model: "router/x\n● forged-member · working",
+    }), context);
+    assert.match(notices.at(-1)!.message, /invalid model/u);
+    await commands.get("join").handler(JSON.stringify({
+      name: "forged-description", description: "Safe\u001b[31m\n● forged-member · working", prompt: "Work", tools: ["read"],
+    }), context);
+    assert.match(notices.at(-1)!.message, /invalid description/u);
+    await commands.get("team").handler("", context);
+    assert.doesNotMatch(notices.at(-1)!.message, /forged-member/u);
+    const teamItems = await commands.get("team").getArgumentCompletions("craft");
+    assert.deepEqual(teamItems.map((item: any) => item.value), ["crafter"]);
+    const benchItems = await commands.get("bench").getArgumentCompletions("on build");
+    assert.deepEqual(benchItems.map((item: any) => item.value), ["on build"]);
+    assert.match(commands.get("team").description, /0 model tokens.*\/team \[filter\|stop <run-id\|all>\]/u);
+    assert.match(commands.get("bench").description, /0 model tokens.*\/bench/u);
+    assert.match(commands.get("join").description, /persist, and activate one personal teammate/u);
+    assert.match(commands.get("retire").description, /Unregister one personal teammate/u);
+    assert.match(commands.get("list-skills").description, /Search the trusted skill catalog/u);
+    await commands.get("team").handler("help", context);
+    assert.match(notices.at(-1)!.message, /configured\/observed model, thinking,\s+state, safe task label, and run ID/u);
+    await commands.get("bench").handler("on design", context);
+    assert.equal((notices.at(-1)!.message.match(/0 model tokens/gu) ?? []).length, 1);
+    assert.match(commands.get("design").description, /Solution design/u);
+    await commands.get("bench").handler("off design", context);
+    assert.equal((notices.at(-1)!.message.match(/0 model tokens/gu) ?? []).length, 1);
+    assert.match(notices.at(-1)!.message, /run \/reload/u);
+    await commands.get("design").handler("stale invocation", context);
+    assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
+    assert.match(notices.at(-1)!.message, /Usage: \/design <task>/u);
+    assert.match(notices.at(-1)!.message, /Cost: 1 model child when active/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /Cost: 0 model tokens/u);
+    const rpcContext = { ...context, mode: "rpc" };
+    const noticeCountBeforeRpcFailure = notices.length;
+    await assert.rejects(() => commands.get("design").handler("stale RPC invocation", rpcContext), /run \/team.*\/reload/isu);
+    assert.equal(notices.length, noticeCountBeforeRpcFailure, "RPC duplicated the structured failure through notify");
+    await commands.get("contract").handler("{broken", context);
+    assert.equal((notices.at(-1)!.message.match(/Preflight stopped · no model was called · 0 model tokens/gu) ?? []).length, 1);
+    await commands.get("scout").handler("", context);
+    assert.equal((notices.at(-1)!.message.match(/Preflight stopped · no model was called · 0 model tokens/gu) ?? []).length, 1);
+    await commands.get("crafter").handler("", context);
+    assert.equal((notices.at(-1)!.message.match(/Preflight stopped · no model was called · 0 model tokens/gu) ?? []).length, 1);
+    await commands.get("bench").handler("help", context);
+    assert.match(notices.at(-1)!.message, /all means the six bundled SDLC specialists only; personal members are unchanged/u);
+    await commands.get("retire").handler("", context);
+    assert.match(notices.at(-1)!.message, /Usage: \/retire <personal-id>/u);
+    assert.equal((notices.at(-1)!.message.match(/0 model tokens/gu) ?? []).length, 1);
+    const joinedInput = JSON.stringify({ name: "concise", description: "Concise reviewer", prompt: "Review", tools: ["read"] });
+    await commands.get("join").handler(joinedInput, context);
+    assert.match(notices.at(-1)!.message, /concise joined · personal · ready/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /registration:|active:|\\home\\|\/home\//u);
+    await commands.get("join").handler(JSON.stringify({
+      name: "concise", description: "Updated concise reviewer", prompt: "Review", tools: ["read"], replace: true,
+    }), context);
+    assert.match(commands.get("concise").description, /Updated concise reviewer/u);
+    assert.ok(notices.every(({ message }) => !message.includes("model boundary crossed")));
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
+});
+
+test("Pi exposes a live safe team run, native usage, propagated signal, and always-cleared status/widget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-live-status-"));
+  const project = join(root, "project");
+  const commands = new Map<string, any>();
+  const notices: string[] = [];
+  const statuses: Array<{ key: string; value?: string }> = [];
+  const widgets: Array<{ key: string; value?: string[] }> = [];
+  const controller = new AbortController();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let receivedSignal: AbortSignal | undefined;
+  piExtension({
+    registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerTool: () => {},
+    getThinkingLevel: () => "low",
+  } as any);
+  const originalRun = PiOrchestrator.prototype.run;
+  try {
+    PiOrchestrator.prototype.run = async function (_definition: any, signal?: AbortSignal) {
+      receivedSignal = signal;
+      const observer = (this as any).runObserver;
+      observer.sessionStarted({ model: { provider: "effective", id: "model" }, thinking: "low" });
+      observer.messageEnd({
+        role: "assistant", responseId: "live-1", provider: "effective", model: "model",
+        usage: { input: 10, output: 4, reasoning: 2, cacheRead: 3, cacheWrite: 1, totalTokens: 18 },
+      });
+      await gate;
+      observer.state("cleaning");
+      return "verified evidence";
+    };
+    const ui = {
+      notify: (message: string) => notices.push(message),
+      setStatus: (key: string, value?: string) => statuses.push({ key, value }),
+      setWidget: (key: string, value?: string[]) => widgets.push({ key, value }),
+    };
+    const invocation = commands.get("crafter").handler("Review C:\\private\\customer.txt without exposing it", {
+      cwd: project, model: { provider: "requested", id: "alias" }, signal: controller.signal, ui,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await commands.get("team").handler("crafter", { cwd: project, ui: { notify: (message: string) => notices.push(message) } });
+    const live = notices.at(-1)!;
+    assert.match(live, /crafter · fixed · working/u);
+    assert.match(live, /Task: “Review \[path\] without exposing it”/u);
+    assert.match(live, /effective\/model \(observed\) · thinking setting low · model turns 1 · 18 native tokens/u);
+    assert.doesNotMatch(live, /private|customer\.txt/u);
+    assert.notEqual(receivedSignal, controller.signal, "root control should compose its own stop signal with the caller signal");
+    assert.equal(receivedSignal?.aborted, false);
+    release();
+    await invocation;
+    assert.match(notices.at(-1)!, /^verified evidence\nTEAM RUN/u);
+    assert.match(notices.at(-1)!, /in 10 · out 4 · reason 2 · cache r\/w 3\/1 · total 18/u);
+    assert.ok(statuses.some(({ value }) => value?.includes("working")));
+    assert.ok(statuses.some(({ value }) => value?.includes("cleaning")));
+    assert.equal(statuses.at(-1)!.value, undefined);
+    assert.equal(widgets.at(-1)!.value, undefined);
+    assert.doesNotMatch(JSON.stringify(widgets), /private|customer\.txt/u);
+    assert.ok(statuses.flatMap(({ value }) => value?.split("\n") ?? []).every((line) => visibleTextWidth(line) <= 96));
+    assert.ok(widgets.flatMap(({ value }) => value ?? []).every((line) => visibleTextWidth(line) <= 96));
+    assert.ok(notices.flatMap((value) => value.split("\n")).every((line) => visibleTextWidth(line) <= 96));
+  } finally { PiOrchestrator.prototype.run = originalRun; }
+});
+
+test("Pi Alt+H cancels an idle slash child without a caller signal and clears live UI", async () => {
+  const commands = new Map<string, any>();
+  const shortcuts = new Map<string, any>();
+  const shutdownHandlers: any[] = [];
+  const notices: Array<{ message: string; level?: string }> = [];
+  const statuses: Array<string | undefined> = [];
+  const widgets: Array<string[] | undefined> = [];
+  piExtension({
+    registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerTool: () => {},
+    registerShortcut: (key: string, options: any) => shortcuts.set(key, options),
+    on: (event: string, handler: any) => { if (event === "session_shutdown") shutdownHandlers.push(handler); },
+    getThinkingLevel: () => "minimal",
+  } as any);
+  const originalRun = PiOrchestrator.prototype.run;
+  let childSignal: AbortSignal | undefined;
+  try {
+    PiOrchestrator.prototype.run = async function (_definition: any, signal?: AbortSignal) {
+      childSignal = signal;
+      (this as any).runObserver.sessionStarted();
+      return new Promise<string>((_resolve, reject) => signal!.addEventListener("abort", () => {
+        (this as any).runObserver.state("cancelled");
+        reject(new DOMException("cancelled", "AbortError"));
+      }, { once: true }));
+    };
+    const invocation = commands.get("crafter").handler("cancel me", {
+      cwd: process.cwd(), model: undefined, signal: undefined,
+      ui: {
+        notify: (message: string, level?: string) => notices.push({ message, level }),
+        setStatus: (_key: string, value?: string) => statuses.push(value),
+        setWidget: (_key: string, value?: string[]) => widgets.push(value),
+      },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(childSignal?.aborted, false);
+    shortcuts.get("alt+h").handler({
+      cwd: process.cwd(), ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+    });
+    await invocation;
+    assert.equal(childSignal?.aborted, true);
+    assert.match(notices[0].message, /^Agent Harbor stop · 0 model tokens/u);
+    assert.equal(notices[0].level, "warning");
+    assert.match(notices.at(-1)!.message, /Cancelled.*TEAM RUN .*crafter · run pi-run-1 · fixed · cancelled/su);
+    assert.equal(notices.at(-1)!.level, "warning");
+    assert.equal(statuses.at(-1), undefined);
+    assert.equal(widgets.at(-1), undefined);
+    assert.equal(shutdownHandlers.length, 1);
+  } finally { PiOrchestrator.prototype.run = originalRun; }
+});
+
 test("Pi extension invokes every fixed and activated agent and equips the team lead for named delegation", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-pi-player-"));
   const project = join(root, "project");
   const roster = new Roster(harnessSpec("pi", join(root, "home"), project));
   await roster.join({ name: "reviewer", description: "Review", prompt: "Review only", tools: ["read", "search"] });
+  await roster.join({ name: "verbose-reviewer", description: "x".repeat(500), prompt: "Review only", tools: ["read"] });
   await roster.bench("on all", bundledPlayers);
   const previous = process.cwd(); const commands = new Map<string, any>();
   const hostModel = { provider: "openai-codex", id: "gpt-5.3-codex-spark" };
@@ -1191,9 +1604,16 @@ test("Pi extension invokes every fixed and activated agent and equips the team l
   assert.deepEqual(received[0].additionalTools, []);
   assert.deepEqual(received.slice(1).map((entry) => entry.definition.name), [...rolePlayers.keys(), ...bundledPlayers.keys()]);
   const lead = received.find((entry) => entry.definition.name === "team-lead")!;
-  assert.deepEqual(lead.additionalTools, ["harbor_delegate"]);
-  assert.deepEqual(lead.customTools.map((tool) => tool.name), ["harbor_delegate"]);
+  assert.deepEqual(lead.additionalTools, ["harbor_delegate", "harbor_team_roster"]);
+  assert.deepEqual(lead.customTools.map((tool) => tool.name), ["harbor_delegate", "harbor_team_roster"]);
   assert.equal(lead.customTools[0].executionMode, "sequential");
+  assert.ok([...lead.customTools[0].description].length < 7_000, "lead roster metadata was not context-bounded");
+  assert.doesNotMatch(lead.customTools[0].description, /x{500}/u, "personal description was not truncated");
+  const rosterResult = await lead.customTools[1].execute(
+    "roster-build", { query: "construction" }, undefined, undefined, { cwd: project },
+  );
+  assert.match(rosterResult.content[0].text, /"id":"build".*"tools":\["read","edit"\].*"skills":\[\]/u);
+  assert.equal(rosterResult.details.childCreated, false);
   for (const entry of received.filter((item) => item.definition.name !== "team-lead")) {
     assert.deepEqual(entry.additionalTools, []);
     assert.deepEqual(entry.customTools, []);
@@ -1201,7 +1621,11 @@ test("Pi extension invokes every fixed and activated agent and equips the team l
   assert.ok(received.every((entry) => entry.hostMarker === "host-sdk-static-import"));
   assert.ok(received.every((entry) => entry.sessionOptions.model === hostModel));
   assert.ok(received.every((entry) => entry.sessionOptions.thinkingLevel === "minimal"));
-  assert.deepEqual(notices, ["completed:reviewer", ...[...rolePlayers.keys(), ...bundledPlayers.keys()].map((name) => `completed:${name}`)]);
+  assert.deepEqual(
+    notices.map((notice) => notice.split("\n", 1)[0]),
+    ["completed:reviewer", ...[...rolePlayers.keys(), ...bundledPlayers.keys()].map((name) => `completed:${name}`)],
+  );
+  assert.ok(notices.every((notice) => notice.includes("TEAM RUN (native Pi telemetry)")));
 });
 
 test("Pi team lead delegates sequentially to different active agents with bounds and preflight", async () => {
@@ -1274,7 +1698,7 @@ test("Pi team lead delegates sequentially to different active agents with bounds
 
     const beforeInvalid = calls.length;
     await assert.rejects(() => delegate.execute("bad", { agent: "team-lead", task: "recurse" }, new AbortController().signal, undefined, context), /recursive/);
-    await assert.rejects(() => delegate.execute("bad", { agent: "unknown", task: "work" }, new AbortController().signal, undefined, context), /ENOENT|not found/);
+    await assert.rejects(() => delegate.execute("bad", { agent: "unknown", task: "work" }, new AbortController().signal, undefined, context), /not in this team-lead roster snapshot/);
     await assert.rejects(() => delegate.execute("bad", { agent: "manage", task: "   " }, new AbortController().signal, undefined, context), /non-empty/);
     assert.equal(calls.length, beforeInvalid, "invalid delegation must not create a child");
 
@@ -1295,5 +1719,141 @@ test("Pi team lead delegates sequentially to different active agents with bounds
     assert.ok(runtimes.every((runtime) => runtime.sessionOptions.model === hostModel));
     assert.ok(runtimes.every((runtime) => runtime.sessionOptions.thinkingLevel === "minimal"));
   } finally { PiOrchestrator.prototype.run = originalRun; }
-  assert.deepEqual(notices, ["evidence:team-lead", "evidence:team-lead"]);
+  assert.deepEqual(notices.map((notice) => notice.split("\n", 1)[0]), ["evidence:team-lead", "evidence:team-lead"]);
+  assert.ok(notices.every((notice) => notice.includes("Mission total")));
+});
+
+test("Pi team lead rejects more than 32 active specialists before creating a ghost run", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-lead-cap-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = home;
+  const roster = new Roster(harnessSpec("pi", home, project));
+  try {
+    for (let index = 0; index < 26; index += 1) {
+      await roster.join({ name: `member-${index}`, description: `Member ${index}`, prompt: "Work", tools: ["read"] });
+    }
+    await roster.bench("on all", bundledPlayers);
+    const commands = new Map<string, any>();
+    const notices: Array<{ message: string; level?: string }> = [];
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => "low",
+    } as any);
+    const context = { cwd: project, model: undefined, ui: { notify: (message: string, level?: string) => notices.push({ message, level }) } } as any;
+    await commands.get("team-lead").handler("coordinate", context);
+    assert.match(notices.at(-1)!.message, /at most 32 active specialists; found 33/u);
+    assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /TEAM RUN/u);
+    await commands.get("team").handler("", context);
+    assert.match(notices.at(-1)!.message, /Lead capacity exceeded: 33\/32/u);
+    assert.match(notices.at(-1)!.message, /No one is working right now/u);
+  } finally {
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
+});
+
+test("Pi team-lead preparation failure creates no ghost root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-lead-preparation-failure-"));
+  const project = join(root, "project");
+  const active = join(project, ".pi", "agents");
+  await mkdir(active, { recursive: true });
+  await Promise.all(Array.from({ length: 201 }, (_, index) =>
+    writeFile(join(active, `noise-${index.toString().padStart(3, "0")}.md`), "unmanaged", "utf8")));
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  let modelCalls = 0;
+  const originalRun = PiOrchestrator.prototype.run;
+  try {
+    PiOrchestrator.prototype.run = async () => { modelCalls += 1; return "must not run"; };
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => "low",
+    } as any);
+    const context = { cwd: project, model: undefined, ui: { notify: (message: string, level?: string) => notices.push({ message, level }) } } as any;
+    await commands.get("team-lead").handler("coordinate", context);
+    assert.match(notices.at(-1)!.message, /too many active profiles: 201/u);
+    assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /TEAM RUN/u);
+    assert.equal(modelCalls, 0);
+    await commands.get("team").handler("", context);
+    assert.match(notices.at(-1)!.message, /No one is working right now/u);
+  } finally { PiOrchestrator.prototype.run = originalRun; }
+});
+
+test("Pi blocks direct double-booking, caps concurrent roots at 32, and stops accepted work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-concurrent-roots-"));
+  const project = join(root, "project");
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  piExtension({
+    registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerTool: () => {},
+    getThinkingLevel: () => "minimal",
+  } as any);
+  const originalRun = PiOrchestrator.prototype.run;
+  try {
+    PiOrchestrator.prototype.run = async function (_definition: any, signal?: AbortSignal) {
+      (this as any).runObserver.sessionStarted();
+      return new Promise<string>((_resolve, reject) => signal!.addEventListener("abort", () => {
+        (this as any).runObserver.state("cancelled");
+        reject(new DOMException("stopped", "AbortError"));
+      }, { once: true }));
+    };
+    const context = {
+      cwd: project, model: undefined, signal: undefined,
+      ui: {
+        notify: (message: string, level?: string) => notices.push({ message, level }),
+        setStatus: () => {}, setWidget: () => {},
+      },
+    } as any;
+    const firstCrafter = commands.get("crafter").handler("first direct run", context);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await commands.get("crafter").handler("must not double-book", context);
+    assert.match(notices.at(-1)!.message, /crafter is already working in pi-run-1/u);
+    assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
+    await commands.get("team").handler("", context);
+    const live = notices.at(-1)!.message;
+    assert.match(live, /Team: .*1 working/u);
+    assert.equal((live.match(/· run pi-run-/gu) ?? []).length, 1);
+    await commands.get("team").handler("stop all", context);
+    await firstCrafter;
+
+    const contract = (index: number) => JSON.stringify({
+      name: `contractor-${index.toString().padStart(2, "0")}`,
+      description: `Contractor ${index}`,
+      prompt: "Work until stopped.",
+      tools: ["read"],
+      task: `Concurrent contract ${index}`,
+    });
+    const invocations = Array.from({ length: 32 }, (_, index) =>
+      commands.get("contract").handler(contract(index), context));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await commands.get("team").handler("", context);
+    assert.match(notices.at(-1)!.message, /Team: .*32 working/u);
+    assert.equal((notices.at(-1)!.message.match(/· run pi-run-/gu) ?? []).length, 32);
+
+    await commands.get("contract").handler(contract(32), context);
+    assert.match(notices.at(-1)!.message, /at most 32 concurrent root runs per project/u);
+    assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /TEAM RUN/u);
+    const stopCompletions = await commands.get("team").getArgumentCompletions("stop");
+    assert.equal(stopCompletions.filter((item: any) => item.value.startsWith("stop pi-run-")).length, 32);
+    await commands.get("team").handler("stop all", context);
+    assert.match(notices.at(-1)!.message, /^Agent Harbor stop · 0 model tokens\nStopping 32 root run/u);
+    const settled = await Promise.allSettled(invocations);
+    assert.ok(settled.every(({ status }) => status === "fulfilled"));
+    await commands.get("team").handler("", context);
+    assert.match(notices.at(-1)!.message, /0 working/u);
+    await commands.get("team").handler("stop all", context);
+    assert.equal(notices.at(-1)!.level, "info");
+    assert.match(notices.at(-1)!.message, /No Agent Harbor work is active in this project/u);
+    await commands.get("team").handler("stop pi-run-999999", context);
+    assert.equal(notices.at(-1)!.level, "error");
+    assert.match(notices.at(-1)!.message, /no active Harbor root matches pi-run-999999/u);
+  } finally { PiOrchestrator.prototype.run = originalRun; }
 });

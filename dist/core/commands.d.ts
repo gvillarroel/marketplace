@@ -4,15 +4,16 @@
  */
 import { Roster } from "./lifecycle.js";
 import { type SkillCatalogStyle } from "./catalog.js";
-import type { CommandName, ContractDefinition, GithubResolver, GithubSkill, GithubSkillCatalogSource, Orchestrator, PlayerDefinition } from "./types.js";
+import type { CommandName, ContractDefinition, GithubResolver, GithubSkillCatalogSource, Orchestrator, PlayerDefinition, TrustedGithubSkills } from "./types.js";
 /** Dependencies required to dispatch every public Agent Harbor command. */
 export interface HarborContext {
     roster: Roster;
     bundled: ReadonlyMap<string, PlayerDefinition>;
     orchestrator: Orchestrator;
     github: GithubResolver;
-    trustedSkills: readonly GithubSkill[];
+    trustedSkills: TrustedGithubSkills;
     catalogSources?: readonly GithubSkillCatalogSource[];
+    loadCatalogSources?: () => Promise<readonly GithubSkillCatalogSource[]>;
     catalogStyle?: SkillCatalogStyle;
 }
 /** Parses and validates the single JSON object accepted by `/contract`. */

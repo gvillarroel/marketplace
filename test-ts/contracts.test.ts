@@ -6,14 +6,15 @@ import test from "node:test";
 import { listManagedActiveIds, requireInvocablePlayer } from "../src/core/active.js";
 import { executeCommand } from "../src/core/commands.js";
 import { formatSkillCatalog, loadSkillCatalogSources, skillCatalogConfigPath } from "../src/core/catalog.js";
-import { bundledPlayers, skillCatalogSources, trustedSkills } from "../src/core/defaults.js";
-import { GhResolver, validateGithubSkill, validateGithubSkillCatalogSource } from "../src/core/github.js";
+import { bundledPlayers, skillCatalogSources, trustedSkillRepositories, trustedSkills } from "../src/core/defaults.js";
+import { GhResolver, InvalidSkillDocumentError, validateGithubSkill, validateGithubSkillCatalogSource } from "../src/core/github.js";
 import { Roster } from "../src/core/lifecycle.js";
 import { validatePlayer } from "../src/core/lifecycle.js";
 import { harnessSpec } from "../src/core/profiles.js";
+import { visibleTextWidth, wrapPlainText } from "../src/core/text-layout.js";
 import { createSkillCapsule, loadConfiguredSkills, validateRepositorySkill } from "../src/core/skills.js";
 import { filterTrustedSkills, formatScoutSkillMatches } from "../src/core/scout.js";
-import type { GithubResolver, HarnessName, Orchestrator } from "../src/core/types.js";
+import type { GithubResolver, GithubSkill, HarnessName, Orchestrator, TrustedGithubSkills } from "../src/core/types.js";
 
 for (const harness of ["copilot", "opencode", "pi"] as const) {
   test(`${harness}: all five commands share the executable contract`, async () => {
@@ -160,6 +161,9 @@ test("configured GitHub references are bounded, trusted, and require read", asyn
   const skill = { kind: "github", name: "zx-example-author", repo: "gvillarroel/zx-harness", path: "skills/zx-example-author/SKILL.md", track: "refs/heads/main" };
   await assert.rejects(() => roster.join({ name: "maker", description: "x", prompt: "x", tools: ["execute"], skills: [skill] }), /require read/);
   await assert.rejects(() => roster.join({ name: "maker", description: "x", prompt: "x", tools: ["read"], skills: [{ ...skill, repo: "someone/else" }] }), /untrusted/);
+  const repositoryTrusted = { ...skill, name: "another-skill", repo: "gvillarroel/knowledge", path: "skills/another-skill/SKILL.md" };
+  assert.doesNotThrow(() => validatePlayer({ name: "repository-maker", description: "x", prompt: "x", tools: ["read"], skills: [repositoryTrusted] }));
+  assert.throws(() => validatePlayer({ name: "wrong-branch", description: "x", prompt: "x", tools: ["read"], skills: [{ ...repositoryTrusted, track: "refs/heads/release" }] }), /untrusted/);
   const { kind: _kind, ...withoutKind } = skill;
   await assert.rejects(() => roster.join({ name: "maker", description: "x", prompt: "x", tools: ["read"], skills: [withoutKind] }), /invalid GitHub/);
   await assert.rejects(() => roster.join({ name: "maker", description: "x", prompt: "x", tools: ["read"], skills: [{ ...skill, track: "refs/heads/a//b" }] }), /invalid GitHub/);
@@ -317,6 +321,7 @@ test("skill catalog enumerates repository, folder, and exact-skill scopes withou
   assert.equal(observed.length, 6);
   assert.equal(observed.filter((args) => args.some((arg) => arg.includes("/git/trees/"))).length, 2);
   assert.equal(observed.filter((args) => args.some((arg) => arg.includes("/contents/"))).length, 1);
+  assert.ok(observed.filter((args) => args.some((arg) => arg.includes("/git/trees/"))).every((args) => args.some((arg) => arg.includes('endswith("/SKILL.md")'))));
   assert.ok(observed.every((args) => !args.some((arg) => arg.includes("Accept: application/vnd.github.raw"))), "catalog listing must not download skill bodies");
 });
 
@@ -338,10 +343,59 @@ test("description view is explicit, searchable, and still omits skill bodies and
   };
   const output = (await executeCommand("list-skills", "--descriptions automation", context)).replace(/\x1b\[[0-9;]*m/gu, "");
   assert.match(output, /REPOSITORY.*PATH.*SKILL.*DESCRIPTION/u);
-  assert.match(output, /Author small zx scripts for automation\./u);
+  assert.match(output, /Author small zx scripts[\s\S]*for automation\./u);
+  assert.ok(output.split("\n").every((line) => visibleTextWidth(line) <= 96));
   assert.doesNotMatch(output, /a{40}|b{40}|instruction body/u);
   assert.equal((await executeCommand("list-skills", "--descriptions kubernetes", context)).split("\n").length, 4);
   await assert.rejects(() => executeCommand("list-skills", "--unknown", context), /usage/);
+});
+
+test("description view filters catalogs larger than 64 before its bounded metadata lookup", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-large-catalog-description-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const described: string[] = [];
+  let modelCalls = 0;
+  const source = { kind: "github", scope: "repository", repo: "owner/large-catalog", track: "refs/heads/main" } as const;
+  const entries = Array.from({ length: 70 }, (_, index) => ({
+    name: `skill-${index.toString().padStart(3, "0")}`,
+    repo: source.repo,
+    path: `skills/skill-${index.toString().padStart(3, "0")}/SKILL.md`,
+    track: source.track,
+  }));
+  const github: GithubResolver = {
+    resolve: async () => ({ commit: "a".repeat(40), blob: "b".repeat(40) }),
+    load: async () => { throw new Error("skill bodies must not be loaded for catalog descriptions"); },
+    listCatalog: async () => entries,
+    describeCatalog: async (entry) => {
+      described.push(entry.name);
+      return `Public description for ${entry.name}.`;
+    },
+  };
+  const context = {
+    roster: new Roster(harnessSpec("pi", join(root, "home"), join(root, "project"))),
+    bundled: bundledPlayers,
+    orchestrator: {
+      harness: "pi",
+      run: async () => { modelCalls += 1; throw new Error("model must not be called"); },
+    } as Orchestrator,
+    github,
+    trustedSkills,
+    catalogSources: [source],
+  };
+
+  const output = await executeCommand("list-skills", "--descriptions skill-069", context);
+  assert.match(output, /skill-069[\s\S]*Public description for[\s\S]*skill-069\./u);
+  assert.doesNotMatch(output, /skill-000/u);
+  assert.ok(output.split("\n").every((line) => visibleTextWidth(line) <= 96));
+  assert.deepEqual(described, ["skill-069"]);
+  assert.equal(modelCalls, 0);
+
+  await assert.rejects(
+    () => executeCommand("list-skills", "--descriptions skill-", context),
+    /matches 70 skills.*at most 64.*skill name, repository, or path/u,
+  );
+  assert.deepEqual(described, ["skill-069"], "over-broad filters must fail before description requests");
+  assert.equal(modelCalls, 0);
 });
 
 test("talent scout filters only exact trusted skills by bounded public descriptions", async () => {
@@ -354,20 +408,60 @@ test("talent scout filters only exact trusted skills by bounded public descripti
       return { commit: "c".repeat(40), description: "Author small zx examples and automation scripts." };
     },
   };
-  const matches = await filterTrustedSkills("scripts zx automatizar", trustedSkills, resolver);
+  const exactOnly: TrustedGithubSkills = [trustedSkills[0]];
+  const matches = await filterTrustedSkills("scripts zx automatizar", exactOnly, resolver);
   assert.deepEqual(matches.map((match) => match.name), ["zx-example-author"]);
   assert.deepEqual(loaded, ["gvillarroel/zx-harness/skills/zx-example-author/SKILL.md"]);
   const serialized = formatScoutSkillMatches(matches);
   assert.match(serialized, /"description":"Author small zx examples/);
   assert.doesNotMatch(serialized, /c{40}|instruction/);
-  assert.deepEqual(await filterTrustedSkills("kubernetes", trustedSkills, resolver), []);
-  await assert.rejects(() => filterTrustedSkills("", trustedSkills, resolver), /1\.\.500/);
+  assert.deepEqual(await filterTrustedSkills("kubernetes", exactOnly, resolver), []);
+  await assert.rejects(() => filterTrustedSkills("", exactOnly, resolver), /1\.\.500/);
+});
+
+test("talent scout discovers exact skill references across trusted repositories", async () => {
+  const listed: string[] = [];
+  const described: string[] = [];
+  const repositories = trustedSkillRepositories.slice(0, 2);
+  const trust: TrustedGithubSkills = Object.assign([] as GithubSkill[], { repositories });
+  const resolver: GithubResolver = {
+    resolve: async () => { throw new Error("resolve is not used"); },
+    load: async () => { throw new Error("instruction bodies must remain private"); },
+    listCatalog: async (source) => {
+      listed.push(source.repo);
+      const name = source.repo.endsWith("/knowledge") ? "semantic-search" : "contract";
+      return [{ name, repo: source.repo, path: `skills/${name}/SKILL.md`, track: source.track, commit: "a".repeat(40) }];
+    },
+    describe: async (skill) => {
+      described.push(`${skill.repo}/${skill.path}`);
+      return { commit: "b".repeat(40), description: skill.name === "semantic-search" ? "Search semantic knowledge." : "Create one contractor." };
+    },
+    inspectCatalog: async (entry) => {
+      if (entry.name === "contract") throw new InvalidSkillDocumentError("oversized fixture skill");
+      return { name: entry.name, description: "Search semantic knowledge." };
+    },
+  };
+
+  const matches = await filterTrustedSkills("semantic knowledge", trust, resolver);
+  assert.deepEqual(matches.map(({ name, repo }) => [name, repo]), [["semantic-search", "gvillarroel/knowledge"]]);
+  assert.deepEqual(listed, repositories.map(({ repo }) => repo));
+  assert.deepEqual(described, []);
 });
 
 test("project skill catalog config replaces defaults with a closed schema", async (t) => {
   const project = await mkdtemp(join(tmpdir(), "harbor-catalog-config-"));
   t.after(() => rm(project, { recursive: true, force: true }));
   assert.deepEqual(await loadSkillCatalogSources(project, skillCatalogSources), skillCatalogSources);
+  assert.deepEqual(skillCatalogSources, trustedSkillRepositories);
+  assert.deepEqual(skillCatalogSources.map(({ repo }) => repo), [
+    "gvillarroel/knowledge",
+    "gvillarroel/marketplace",
+    "gvillarroel/pi-menton",
+    "gvillarroel/sdlc",
+    "gvillarroel/skills",
+    "gvillarroel/slidev-manim",
+    "gvillarroel/zx-harness",
+  ]);
   const config = skillCatalogConfigPath(project);
   await mkdir(join(project, ".agent-harbor"), { recursive: true });
   const sources = [
@@ -392,6 +486,26 @@ test("Copilot skill catalog uses a bordered three-column terminal view", () => {
   assert.match(plain, /│ owner\/repo\s+│ skills\/example\/SKILL\.md\s+│ example\s+│/u);
   assert.match(plain, /^╰─+┴─+┴─+╯$/mu);
   assert.doesNotMatch(plain, /COMMIT|BLOB|TRACK/u);
+  assert.ok(output.split("\n").every((line) => visibleTextWidth(line) <= 96));
+});
+
+test("catalog wrapping respects wide terminal cells when Pi wraps the formatted table again", () => {
+  const table = formatSkillCatalog([{
+    repo: "组织/仓库",
+    path: `skills/${"界".repeat(80)}/SKILL.md`,
+    name: "🙂".repeat(30),
+  }], "plain");
+  const output = wrapPlainText(`Agent Harbor /list-skills · 0 model tokens\n${table}`);
+  const fixtureColumns = (line: string): number => [...line].reduce((sum, point) => {
+    if (/\p{Mark}/u.test(point)) return sum;
+    if (/\p{Extended_Pictographic}/u.test(point)) return sum + 2;
+    const code = point.codePointAt(0)!;
+    return sum + (code >= 0x2e80 && code <= 0x9fff ? 2 : 1);
+  }, 0);
+  assert.ok(output.split("\n").every((line) => fixtureColumns(line) <= 96), output);
+  assert.match(output, /组织\/仓库/u);
+  assert.match(output, /界{10,}/u);
+  assert.match(output, /🙂{10,}/u);
 });
 
 test("GitHub skill loading stops after one invalid branch SHA without fetching content", async () => {
@@ -460,17 +574,35 @@ test("validation rejects every non-canonical player shape before mutation", () =
     { ...base, name: "portfolio-management" },
     { ...base, name: "scout" },
     { ...base, name: "talent-scout" },
+    { ...base, name: "reload" },
+    { ...base, name: "model" },
+    { ...base, name: "player" },
     { ...base, description: "two\nlines" },
+    { ...base, description: "unsafe\u001b[31m" },
+    { ...base, description: "unsafe\u0085next" },
+    { ...base, description: "unsafe\u202eforged" },
+    { ...base, description: "x".repeat(501) },
     { ...base, prompt: "  " },
+    { ...base, prompt: "x".repeat(18_001) },
     { ...base, tools: [] },
     { ...base, tools: ["read", "read"] },
     { ...base, tools: ["network"] },
     { ...base, model: 1 },
+    { ...base, model: "   " },
+    { ...base, model: "router/x\n● forged-member · working" },
+    { ...base, model: "router/x\u001b[31m" },
+    { ...base, model: "router/x\u2066forged" },
+    { ...base, model: "x".repeat(201) },
     { ...base, replace: "yes" },
     { ...base, skills: ["zx-example-author"] },
     { ...base, unknown: true },
   ];
   for (const value of invalid) assert.throws(() => validatePlayer(value));
+  assert.deepEqual(
+    validatePlayer({ ...base, description: " Worker ", prompt: " Work ", model: " model-alias " }),
+    { ...base, description: "Worker", prompt: "Work", model: "model-alias" },
+  );
+  assert.equal(validatePlayer({ ...base, prompt: "First line\nSecond line" }).prompt, "First line\nSecond line");
 });
 
 test("player and skill validators share the canonical identifier boundaries", () => {
@@ -487,14 +619,42 @@ test("player and skill validators share the canonical identifier boundaries", ()
   }
 });
 
-test("join rejects an oversized rendered profile before writing", async () => {
+test("join rejects an oversized prompt before writing", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-profile-size-"));
   const spec = harnessSpec("pi", join(root, "home"), join(root, "project"));
   await assert.rejects(
     () => new Roster(spec).join({ name: "worker", description: "Worker", prompt: "x".repeat(30_001), tools: ["read"] }),
-    /profile exceeds 30000/,
+    /invalid prompt/,
   );
   await assert.rejects(() => readFile(join(spec.home, spec.registrationDir, `worker${spec.extension}`)), /ENOENT/);
+  await assert.rejects(
+    () => new Roster(spec).join({ name: "unicode-worker", description: "Worker", prompt: "é".repeat(17_000), tools: ["read"] }),
+    /profile exceeds 30000 bytes/,
+  );
+});
+
+test("personal roster limits are explicit and replacement does not consume another slot", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-roster-limit-"));
+  const spec = harnessSpec("pi", join(root, "home"), join(root, "project"));
+  const registrationRoot = join(spec.home, spec.registrationDir);
+  await mkdir(registrationRoot, { recursive: true });
+  await Promise.all(Array.from({ length: 200 }, (_, index) =>
+    writeFile(join(registrationRoot, `slot-${index}${spec.extension}`), "unmanaged", "utf8")));
+  await assert.rejects(
+    () => new Roster(spec).join({ name: "new-member", description: "New", prompt: "Work", tools: ["read"] }),
+    /roster limit reached \(200\)/u,
+  );
+  await writeFile(join(registrationRoot, `overflow${spec.extension}`), "unmanaged", "utf8");
+  await assert.rejects(() => new Roster(spec).bench("list", bundledPlayers), /201 registrations/u);
+
+  const replaceRoot = await mkdtemp(join(tmpdir(), "harbor-roster-replace-"));
+  const replaceSpec = harnessSpec("pi", join(replaceRoot, "home"), join(replaceRoot, "project"));
+  const roster = new Roster(replaceSpec);
+  await roster.join({ name: "member", description: "Old", prompt: "Work", tools: ["read"] });
+  const replaceRegistrationRoot = join(replaceSpec.home, replaceSpec.registrationDir);
+  await Promise.all(Array.from({ length: 199 }, (_, index) =>
+    writeFile(join(replaceRegistrationRoot, `occupied-${index}${replaceSpec.extension}`), "unmanaged", "utf8")));
+  assert.match(await roster.join({ name: "member", description: "New", prompt: "Work", tools: ["read"], replace: true }), /joined member/u);
 });
 
 test("contract rejects invalid input before creating any child", async () => {
@@ -535,6 +695,21 @@ test("ownership metadata must remain complete before cleanup", async () => {
     await assert.rejects(() => roster.retire("worker"), /owned registration not found/);
     assert.match(await readFile(join(spec.project, spec.activeDir, `worker${spec.extension}`), "utf8"), /agent-foundry:profile/);
   }
+});
+
+test("retire cleans a verified legacy personal profile whose name is now reserved", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-retire-reserved-"));
+  const spec = harnessSpec("pi", join(root, "home"), join(root, "project"));
+  const roster = new Roster(spec);
+  const legacy = { name: "reload", description: "Legacy", prompt: "Legacy", tools: ["read"] as const };
+  const content = spec.renderPlayer(legacy, "personal");
+  const registration = join(spec.home, spec.registrationDir, `reload${spec.extension}`);
+  const active = join(spec.project, spec.activeDir, `reload${spec.extension}`);
+  await Promise.all([mkdir(join(spec.home, spec.registrationDir), { recursive: true }), mkdir(join(spec.project, spec.activeDir), { recursive: true })]);
+  await Promise.all([writeFile(registration, content, "utf8"), writeFile(active, content, "utf8")]);
+  await assert.rejects(() => roster.join(legacy), /invalid or reserved name/);
+  assert.match(await roster.retire("reload"), /retired reload/u);
+  await Promise.all([assert.rejects(() => readFile(registration), /ENOENT/u), assert.rejects(() => readFile(active), /ENOENT/u)]);
 });
 
 test("leaf symlinks are rejected before reads or writes", async (t) => {

@@ -5,6 +5,7 @@ import type { ContractDefinition, GithubResolver, Orchestrator } from "../core/t
 import { GhResolver } from "../core/github.js";
 import { trustedSkills } from "../core/defaults.js";
 import { emitHarborEvidence, fingerprintHarborEvidence, type HarborEvidenceHook } from "../core/evidence.js";
+import type { PiRunObserver, PiTeamRunState } from "../core/pi-observability.js";
 import { composeContractPrompt, nativeTools } from "../core/profiles.js";
 import { createSkillCapsule, type MaterializedConfiguredSkill, type SkillCapsule } from "../core/skills.js";
 
@@ -25,6 +26,36 @@ export interface PiSessionOptions {
 function pathKey(path: string): string {
   const absolute = resolve(path);
   return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+}
+
+function latestAssistantText(messages: readonly unknown[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || typeof message !== "object" || (message as any).role !== "assistant") continue;
+    const content = (message as any).content;
+    if (!Array.isArray(content)) continue;
+    const text = content
+      .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+      .map((part: any) => part.text)
+      .join("");
+    if (text.trim()) return text;
+  }
+  return "";
+}
+
+function emptyEvidenceDiagnostic(messages: readonly unknown[]): string {
+  const assistants = messages.filter((message: any) => message?.role === "assistant");
+  const last = assistants.at(-1) as any;
+  const contentTypes = Array.isArray(last?.content)
+    ? last.content.map((part: any) => typeof part?.type === "string" ? part.type : "unknown")
+    : [];
+  return JSON.stringify({
+    messages: messages.length,
+    assistants: assistants.length,
+    stopReason: typeof last?.stopReason === "string" ? last.stopReason : undefined,
+    error: typeof last?.errorMessage === "string" ? last.errorMessage.slice(0, 500) : undefined,
+    contentTypes,
+  });
 }
 
 function assertIsolatedSkills(
@@ -65,6 +96,15 @@ async function cleanupCapsuleAfterPreparationFailure(capsule: SkillCapsule, fail
   throw failure;
 }
 
+function isCancellation(error: unknown, signal?: AbortSignal): boolean {
+  return signal?.aborted === true || (error instanceof Error && error.name === "AbortError");
+}
+
+function observe(observer: PiRunObserver | undefined, action: (observer: PiRunObserver) => void): void {
+  if (!observer) return;
+  try { action(observer); } catch { /* Telemetry must never alter child execution. */ }
+}
+
 /** Executes each contract in one isolated, in-memory Pi SDK session. */
 export class PiOrchestrator implements Orchestrator {
   readonly harness = "pi" as const;
@@ -76,14 +116,21 @@ export class PiOrchestrator implements Orchestrator {
     private readonly customTools: readonly PiToolDefinition[] = [],
     private readonly evidenceHook?: HarborEvidenceHook,
     private readonly sessionOptions: PiSessionOptions = {},
+    private readonly runObserver?: PiRunObserver,
   ) {}
   /**
    * Loads only the invocation capsule, creates one child, captures text
    * evidence, and disposes every session/capsule resource on all exit paths.
    */
   async run(definition: ContractDefinition, signal?: AbortSignal): Promise<string> {
-    signal?.throwIfAborted();
-    const capsule = await createSkillCapsule(definition, this.directory, this.github, trustedSkills, signal);
+    let capsule: SkillCapsule;
+    try {
+      signal?.throwIfAborted();
+      capsule = await createSkillCapsule(definition, this.directory, this.github, trustedSkills, signal);
+    } catch (error) {
+      observe(this.runObserver, (observer) => observer.state(isCancellation(error, signal) ? "cancelled" : "failed"));
+      throw error;
+    }
     const evidenceBase = { harness: this.harness, agent: definition.name, runtimeAgent: definition.name } as const;
     emitHarborEvidence(this.evidenceHook, {
       ...evidenceBase,
@@ -132,30 +179,60 @@ export class PiOrchestrator implements Orchestrator {
         outcome: "error",
         error: fingerprintHarborEvidence(String(error)),
       });
-      return await cleanupCapsuleAfterPreparationFailure(capsule, error);
+      observe(this.runObserver, (observer) => observer.state("cleaning"));
+      try { return await cleanupCapsuleAfterPreparationFailure(capsule, error); }
+      catch (finalError) {
+        const cleanupFailed = finalError instanceof AggregateError && finalError.message.startsWith("Pi child preparation and skill capsule cleanup failed:");
+        observe(this.runObserver, (observer) => observer.state(cleanupFailed ? "cleanup-error" : isCancellation(error, signal) ? "cancelled" : "failed"));
+        throw finalError;
+      }
     }
     const sessionIdentity = session as unknown as { sessionId?: unknown };
     const childId = typeof sessionIdentity.sessionId === "string"
       ? sessionIdentity.sessionId
       : this.evidenceHook ? `pi-hook:${randomUUID()}` : undefined;
+    const effectiveSessionModel = session.model ?? this.sessionOptions.model;
+    const effectiveThinking = session.thinkingLevel ?? this.sessionOptions.thinkingLevel;
+    observe(this.runObserver, (observer) => observer.sessionStarted({
+      ...(childId === undefined ? {} : { sessionId: childId }),
+      ...(effectiveSessionModel === undefined ? {} : {
+        model: { provider: effectiveSessionModel.provider, id: effectiveSessionModel.id },
+      }),
+      ...(effectiveThinking === undefined ? {} : { thinking: effectiveThinking }),
+    }));
     emitHarborEvidence(this.evidenceHook, { ...evidenceBase, phase: "child.started", outcome: "ok", childId });
     let output = "";
     let unsubscribe: (() => void) | undefined;
     let abortPromise: Promise<void> | undefined;
     let failed = false;
     let failure: unknown;
+    let executionState: Extract<PiTeamRunState, "completed" | "failed" | "cancelled"> = "completed";
     const abort = () => { abortPromise ??= session.abort(); };
     signal?.addEventListener("abort", abort, { once: true });
     try {
       unsubscribe = session.subscribe((event: any) => {
         if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") output += event.assistantMessageEvent.delta;
+        if (event.type === "message_end" && event.message?.role === "assistant") {
+          observe(this.runObserver, (observer) => observer.messageEnd(event.message));
+        }
       });
       if (signal?.aborted) await session.abort();
       signal?.throwIfAborted();
       emitHarborEvidence(this.evidenceHook, { ...evidenceBase, phase: "prompt.attempted", outcome: "ok", childId });
       await session.prompt(composeContractPrompt(definition, this.additionalTools));
       signal?.throwIfAborted();
-      if (!output.trim()) throw new Error(`Pi child ${definition.name} returned empty evidence`);
+      // A few providers settle the transcript without emitting a complete
+      // message_end stream. Observe the authoritative transcript as a fallback;
+      // PiTeamRuntime deduplicates messages already seen through subscribe().
+      for (const message of Array.isArray(session.messages) ? session.messages : []) {
+        if (message?.role === "assistant") observe(this.runObserver, (observer) => observer.messageEnd(message));
+      }
+      // Some Pi providers deliver the completed assistant message without
+      // emitting text_delta updates. The settled in-memory transcript is the
+      // authoritative fallback and remains inside this disposable child.
+      const settledEvidence = latestAssistantText(Array.isArray(session.messages) ? session.messages : []);
+      if (settledEvidence.trim()) output = settledEvidence;
+      if (!output.trim()) throw new Error(`Pi child ${definition.name} returned empty evidence: ${emptyEvidenceDiagnostic(session.messages)}`);
       emitHarborEvidence(this.evidenceHook, {
         ...evidenceBase,
         phase: "evidence.returned",
@@ -167,6 +244,7 @@ export class PiOrchestrator implements Orchestrator {
     } catch (error) {
       failed = true;
       failure = error;
+      executionState = isCancellation(error, signal) ? "cancelled" : "failed";
       emitHarborEvidence(this.evidenceHook, {
         ...evidenceBase,
         phase: "child.failed",
@@ -177,6 +255,12 @@ export class PiOrchestrator implements Orchestrator {
     } finally {
       // Preserve all cleanup failures, and combine them with a prompt failure
       // when both occur so callers never receive a misleading single cause.
+      // Failure and cancellation paths may still have settled native telemetry
+      // even when the provider omitted message_end; capture it before dispose.
+      for (const message of Array.isArray(session.messages) ? session.messages : []) {
+        if (message?.role === "assistant") observe(this.runObserver, (observer) => observer.messageEnd(message));
+      }
+      observe(this.runObserver, (observer) => observer.state("cleaning"));
       const cleanupErrors: unknown[] = [];
       signal?.removeEventListener("abort", abort);
       if (abortPromise) {
@@ -195,6 +279,7 @@ export class PiOrchestrator implements Orchestrator {
         childId,
         ...(cleanupError === undefined ? {} : { error: fingerprintHarborEvidence(String(cleanupError)) }),
       });
+      observe(this.runObserver, (observer) => observer.state(cleanupError === undefined ? executionState : "cleanup-error"));
       if (failed && cleanupErrors.length) {
         throw new AggregateError([failure, ...cleanupErrors], `Pi child execution and cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`);
       }

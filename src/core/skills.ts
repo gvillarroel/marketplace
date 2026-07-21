@@ -14,6 +14,7 @@ import type {
   PlayerDefinition,
   RepositorySkill,
   SkillReference,
+  TrustedGithubSkills,
 } from "./types.js";
 import { isTrustedGithubSkill, loadTrustedGithubSkill, parseSkillBody, validateGithubSkill } from "./github.js";
 import { isHarborId } from "./identity.js";
@@ -81,7 +82,7 @@ export function validateSkillReference(value: unknown): SkillReference {
 export function validateConfiguredSkillReferences(
   value: unknown,
   tools: readonly unknown[],
-  trusted: readonly GithubSkill[],
+  trusted: TrustedGithubSkills,
 ): SkillReference[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > 3) {
@@ -148,7 +149,7 @@ export async function loadConfiguredSkills(
   definition: PlayerDefinition,
   project: string,
   github: GithubResolver,
-  trusted: readonly GithubSkill[],
+  trusted: TrustedGithubSkills,
   signal?: AbortSignal,
 ): Promise<readonly LoadedConfiguredSkill[]> {
   if (!definition.skills?.length) return [];
@@ -208,7 +209,7 @@ export async function createSkillCapsule(
   definition: PlayerDefinition,
   project: string,
   github: GithubResolver,
-  trusted: readonly GithubSkill[],
+  trusted: TrustedGithubSkills,
   signal?: AbortSignal,
 ): Promise<SkillCapsule> {
   const loaded = await loadConfiguredSkills(definition, project, github, trusted, signal);

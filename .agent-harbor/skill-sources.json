@@ -1,13 +1,12 @@
 {
   "version": 1,
   "sources": [
-    {
-      "kind": "github",
-      "scope": "skill",
-      "repo": "gvillarroel/zx-harness",
-      "path": "skills/zx-example-author/SKILL.md",
-      "name": "zx-example-author",
-      "track": "refs/heads/main"
-    }
+    { "kind": "github", "scope": "repository", "repo": "gvillarroel/knowledge", "track": "refs/heads/main" },
+    { "kind": "github", "scope": "repository", "repo": "gvillarroel/marketplace", "track": "refs/heads/main" },
+    { "kind": "github", "scope": "repository", "repo": "gvillarroel/pi-menton", "track": "refs/heads/main" },
+    { "kind": "github", "scope": "repository", "repo": "gvillarroel/sdlc", "track": "refs/heads/main" },
+    { "kind": "github", "scope": "repository", "repo": "gvillarroel/skills", "track": "refs/heads/main" },
+    { "kind": "github", "scope": "repository", "repo": "gvillarroel/slidev-manim", "track": "refs/heads/main" },
+    { "kind": "github", "scope": "repository", "repo": "gvillarroel/zx-harness", "track": "refs/heads/main" }
   ]
 }

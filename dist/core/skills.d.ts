@@ -3,7 +3,7 @@
  * Only each referenced `SKILL.md` body crosses the boundary: sibling files and ambient skills are
  * deliberately excluded, and remote content is loaded from an allowlisted pinned commit.
  */
-import type { GithubResolver, GithubSkill, PlayerDefinition, RepositorySkill, SkillReference } from "./types.js";
+import type { GithubResolver, PlayerDefinition, RepositorySkill, SkillReference, TrustedGithubSkills } from "./types.js";
 /** Validated skill guidance loaded from its configured source. */
 export interface LoadedConfiguredSkill {
     /** Canonical source coordinates supplied by the player definition. */
@@ -33,20 +33,20 @@ export declare function validateSkillReference(value: unknown): SkillReference;
  * Validates the canonical player skill array used by JSON commands and Markdown definitions.
  * Local references are project-relative; GitHub references must match the execution allowlist.
  */
-export declare function validateConfiguredSkillReferences(value: unknown, tools: readonly unknown[], trusted: readonly GithubSkill[]): SkillReference[];
+export declare function validateConfiguredSkillReferences(value: unknown, tools: readonly unknown[], trusted: TrustedGithubSkills): SkillReference[];
 /**
  * Loads every explicitly configured skill after validating unique names and source trust.
  * Repository sources are confined to the project, GitHub sources are pinned by the resolver, and
  * the combined instruction bodies are capped before being exposed to a child.
  */
-export declare function loadConfiguredSkills(definition: PlayerDefinition, project: string, github: GithubResolver, trusted: readonly GithubSkill[], signal?: AbortSignal): Promise<readonly LoadedConfiguredSkill[]>;
+export declare function loadConfiguredSkills(definition: PlayerDefinition, project: string, github: GithubResolver, trusted: TrustedGithubSkills, signal?: AbortSignal): Promise<readonly LoadedConfiguredSkill[]>;
 /**
  * Materializes configured skills into a private, uniquely named temporary capsule.
  * Each skill receives only its canonical `SKILL.md`; no source siblings are copied. Preparation is
  * all-or-cleaned-up, and the returned cleanup is idempotent and refuses paths outside the expected
  * operating-system temporary-root prefix.
  */
-export declare function createSkillCapsule(definition: PlayerDefinition, project: string, github: GithubResolver, trusted: readonly GithubSkill[], signal?: AbortSignal): Promise<SkillCapsule>;
+export declare function createSkillCapsule(definition: PlayerDefinition, project: string, github: GithubResolver, trusted: TrustedGithubSkills, signal?: AbortSignal): Promise<SkillCapsule>;
 /**
  * Inlines already validated skill guidance into a player prompt for runtimes without capsules.
  * The original `skills` references are removed from the returned executable definition so loaders

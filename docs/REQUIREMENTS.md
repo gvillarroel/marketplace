@@ -29,8 +29,9 @@ load from `src/core/bundled/*.md`. Both directories **MUST** use the same
 closed-frontmatter loader: matching filename and `name`, unique `order`, known
 tools, a non-empty Markdown body as the prompt, and the same structured skill
 references accepted by `/join`. A `repo` reference **MUST** be relative to the
-current project; a `github` reference **MUST** match the exact trusted execution
-allowlist. The build **MUST** copy both definition directories into the package
+current project; a `github` reference **MUST** match an exact trusted reference
+or an exact `SKILL.md` path under a trusted repository root. The build **MUST**
+copy both definition directories into the package
 and the Copilot runtime.
 
 Cuando se requiere el ciclo completo, esos compañeros representan, en orden:
@@ -101,6 +102,9 @@ ruta cero modelo.
   cero modelo que **NO DEBE** crear sesiones SDK ni children. La consulta de la
   banca (`/bench` vacío o `bench list`) además **NO DEBE** usar red y **DEBE**
   tener una entrada cero modelo en las tres distribuciones.
+- `/team` en Copilot y Pi **DEBE** ser un control nativo cero modelo. Consultar,
+  filtrar o detener trabajo **NO DEBE** enviar un prompt ni crear una sesión o
+  child para producir la vista.
 - El paquete **DEBE** ofrecer
   `agent-harbor <copilot|opencode|pi> <bench|join|retire|list-skills>` como ruta
   directa portable. Los adapters **DEBEN** preferir además la superficie nativa
@@ -108,9 +112,9 @@ ruta cero modelo.
 
   | Harness | Superficie directa preferida | Fallback |
   | --- | --- | --- |
-  | Copilot CLI | comandos de extensión `client` para `/bench`, `/join`, `/retire` y `/list-skills` | CLI directo; no existe fallback skill mediado por modelo para estos controles |
+  | Copilot CLI | comandos de extensión `client` para `/team`, `/bench`, `/join`, `/retire` y `/list-skills` | CLI directo para los cuatro controles de lifecycle; no existe fallback skill mediado por modelo |
   | OpenCode | comandos TUI inequívocos y diálogos para los cuatro controles | CLI directo; comandos con argumentos mediados por modelo |
-  | Pi | handlers `registerCommand` para los cuatro nombres canónicos | CLI directo |
+  | Pi | handlers `registerCommand` para los cuatro nombres canónicos y `/team` | CLI directo |
 
 - `/contract` válido **NO ES** cero modelo: su preflight **DEBE** ser
   determinista y después **DEBE** crear exactamente un child. Un fallo de
@@ -121,6 +125,13 @@ ruta cero modelo.
   Pi **PUEDE** crear una sesión en memoria. Una tarea vacía, un ID desconocido,
   un bundled apagado o un perfil sin ownership **DEBEN** fallar antes de enviar
   el prompt.
+- En Pi, todo fallo de preflight de un comando que normalmente usaría modelo
+  **DEBE** ocurrir antes de crear la sesión, el child o un root de actividad y
+  **DEBE** declarar `Preflight stopped · no model was called · 0 model tokens.`
+  Esto incluye JSON inválido, tarea vacía, alias inactivo, modelo no disponible,
+  miembro persistente ocupado y exceso de capacidad del lead o de roots. Un
+  rechazo dentro de un lead ya iniciado **NO DEBE** presentar como cero el uso
+  real que esa misión ya haya consumido.
 - Una misión coordinada **PUEDE** usar de uno a seis especialistas nominales,
   sólo de forma secuencial y opt-in. Cada delegación **DEBE** crear exactamente
   un child aislado, validar nuevamente que el destino siga activo, bloquear la
@@ -198,12 +209,127 @@ ruta cero modelo.
 - Ver la banca **DEBE** completar con cero tokens de modelo en Copilot, OpenCode
   y Pi mediante su superficie directa documentada.
 
+### `/team` (Pi)
+
+- Pi **DEBE** registrar `/team [filter|stop <run-id|all>]` como comando nativo.
+  Consultar, filtrar o detener **NO DEBE** usar red, mutar el roster, crear una
+  sesión SDK o un child ni enviar un prompt; cada resultado **DEBE** declarar
+  `0 model tokens`.
+- La vista sin filtro **DEBE** mostrar roles fijos, bundled, personales,
+  contractors y utilities; disponibilidad y capacidad; acceso del lead y
+  cobertura SDLC; roots y children activos agrupados por misión; y la última
+  misión terminal. Cada run **DEBE** exponer ID, parent cuando exista, agente,
+  clase, estado, duración, etiqueta segura, modelo, thinking setting, turnos de
+  modelo y usage nativo.
+- El filtro **DEBE** buscar sobre IDs, estado, rol y metadata pública, modelo y
+  etiqueta segura. El historial filtrado sólo muestra miembros coincidentes y
+  **NO DEBE** presentar su suma parcial como total de misión; la vista sin
+  filtro conserva el árbol y la contabilidad completos.
+- Pi **DEBE** aceptar como máximo 32 roots concurrentes por proyecto. Un intento
+  adicional **DEBE** fallar antes de crear actividad, sesión o child, indicar
+  cómo esperar o detener y declarar el preflight cero modelo. Los roots ya
+  admitidos **NO DEBEN** podarse y todos permanecen visibles y detenibles.
+- El runtime **PUEDE** conservar como máximo 32 misiones root terminales y sólo
+  puede podar una cuando su root y todos sus children sean terminales. Este
+  límite de historial es independiente del límite de concurrencia.
+- `team-lead` **DEBE** aceptar como máximo 32 especialistas activos en su schema.
+  Un roster mayor **DEBE** fallar antes de crear el root, con el preflight cero
+  modelo, y `/team` **DEBE** mostrar el exceso y una reparación accionable.
+- Antes de iniciar un root o una delegación, Pi **DEBE** bloquear double-booking
+  de un miembro persistente activo en el mismo proyecto. Un contractor efímero
+  con el mismo nombre no ocupa al miembro, aunque sigue sujeto al cap de roots;
+  el rechazo nunca crea otro run o child y no altera la telemetría ya observada.
+- Cada root **DEBE** tener un `AbortController` propio combinado con la señal del
+  caller. `/team stop <run-id>` detiene un root activo del proyecto y `all`
+  detiene todos; `Alt+H` **DEBE** ofrecer el mismo stop-all en TUI incluso si Pi
+  no entregó señal al slash original.
+- `/team stop all` sin roots activos **DEBE** ser un éxito informativo e
+  idempotente. Un run ID desconocido **DEBE** seguir siendo error.
+- En `session_shutdown`, la extensión **DEBE** abortar todos los roots que aún
+  controla y esperar su cleanup de forma best-effort durante como máximo cinco
+  segundos; un provider que no termina no puede prolongar esa espera. Status y
+  widget **DEBEN** limpiarse en `finally` cuando el handler se asienta, incluso
+  ante fallo, cancelación o error de cleanup.
+- La telemetría **DEBE** leer el modelo y thinking setting efectivos de la sesión
+  Pi. El modelo es `inherited` hasta observar una respuesta nativa; después usa
+  `provider` y `responseModel ?? model` como `observed`. Múltiples modelos se
+  muestran como `mixed observed`, sin atribuir una respuesta a un modelo no
+  observado.
+- Usage **DEBE** acumular una sola vez `input`, `output`, `reasoning`, cache
+  read/write y `totalTokens` de mensajes assistant nativos. Un campo ausente y
+  el sentinel all-zero de Pi significan desconocido, no cero. Si un agregado
+  combina una contribución conocida con otra desconocida **DEBE** mostrar
+  `≥N`; sin contribución conocida muestra `—`. `reasoning` **NO DEBE** sumarse
+  otra vez al total del provider. La deduplicación evento/transcript **DEBE**
+  distinguir respuestas distintas aun si carecen de `responseId` y comparten
+  timestamp, forma, longitud y usage; cualquier huella de contenido **DEBE** ser
+  opaca, efímera y no reversible, y el contenido nunca se retiene.
+- El registro de observabilidad **DEBE** vivir sólo en memoria del proceso Pi y
+  separar proyectos. **NO DEBE** retener prompts, respuestas ni contenido de
+  thinking. Sólo **PUEDE** conservar una etiqueta heurística de hasta 72
+  caracteres que normaliza controles y oculta patrones comunes de paths, URLs,
+  bearer/JWT, credenciales y prefijos de secretos. Esta heurística **NO DEBE**
+  presentarse como detector universal de secretos.
+- La metadata ofrecida al lead **DEBE** limitarse a ID, rol público de hasta 120
+  caracteres, tools, hasta 12 nombres de skills y estado busy. El snapshot
+  compacto inyectado **NO DEBE** superar 6.000 caracteres; su consulta
+  determinista acepta hasta 80 caracteres y devuelve como máximo 24 filas. No
+  incluye prompts, respuestas, paths ni contenido de skills.
+- Cada línea humana de `/team`, reportes, status, widget y tablas de skills
+  **DEBE** ocupar como máximo 96 celdas de terminal: ANSI cuenta como ancho
+  cero, una secuencia ANSI nunca se parte, los grafemas combinados permanecen
+  unidos y los caracteres CJK/emoji anchos ocupan dos celdas. La indentación
+  excesiva **DEBE** acotarse con progreso garantizado y un introducer ANSI sin
+  terminador **DEBE** eliminarse antes de renderizar su payload como texto.
+
+### `/team` y `/player` (Copilot)
+
+- Copilot **DEBE** registrar `/team [filter|stop <run-id|all>]` y
+  `/player <id> <task>` como comandos `client`. `/team` y el preflight inválido
+  de `/player` **DEBEN** conservar idénticos los contadores nativos de uso antes
+  y después de la invocación.
+- La vista **DEBE** mostrar manager, roles fijos, bundled, personales y utility;
+  disponibilidad, descripción pública, capacidad y modelo configurado; acceso
+  del lead, cobertura SDLC y reparación de estados stale/conflict; roots y
+  children activos; y la última misión cuando no haya trabajo activo.
+- Cada run **DEBE** mostrar ID process-local, parent, miembro, clase, estado,
+  duración, etiqueta segura, modelo y reasoning heredado/observado, llamadas
+  nativas y usage. Campos nativos ausentes son desconocidos y agregados
+  parciales son límites inferiores, nunca ceros o totales inventados.
+- El registro **DEBE** vivir sólo en memoria, separar proyectos y no persistir
+  prompts, respuestas, resultados, errores ni reasoning. Sólo conserva la
+  misma etiqueta heurística acotada y redactada descrita para Pi; identificadores
+  nativos usados para deduplicar se transforman con una clave efímera privada.
+- El runner directo **DEBE** validar actividad y ownership, bloquear roots por
+  encima de 32 y double-booking de miembros persistentes, conservar el orden de
+  selección con un lock, suscribirse a eventos antes de enviar, seleccionar el
+  agente exacto y ejecutar exactamente un `session.send` por tarea admitida.
+- `session.idle`, idle abortado y `session.error` son terminales. Tras terminal,
+  el runner **DEBE** desuscribirse y restaurar la selección previa. Si ejecución
+  y restore fallan, **DEBE** conservar ambos fallos en un `AggregateError`.
+- Al expirar el timeout, el runner **DEBE** pedir abort y esperar settlement de
+  forma acotada. Si no llega terminal, **NO DEBE** restaurar ni permitir otra
+  selección; conserva la selección hasta que el evento tardío termine el run.
+- `/team stop <run-id|all>` **DEBE** limitarse a roots activos controlados en el
+  proyecto actual. `all` sin trabajo es éxito informativo; un ID desconocido es
+  error. Detener no implica que el run sea terminal hasta observar settlement.
+- El lifecycle de `team-lead` **DEBE** correlacionar root/child con IDs nativos
+  sin contenido. Antes de permitir el `task`, un admission hook síncrono **DEBE**
+  comprobar parent, proyecto, capacidad y double-booking; un rechazo no consume
+  el contador ni deja la sesión marcada in-flight.
+- Los aliases `/<id>` cubren fixed, bundled y personales activos al arrancar.
+  `/player` **DEBE** resolver el roster actual, de modo que un `/join` exitoso
+  sea invocable en la misma sesión sin esperar a que el host registre otro alias.
+
 ### `/join`
 
 - Recibe exactamente un objeto JSON con `name`, `description`, `prompt` y una
   lista no vacía de `tools`; sólo admite además `model`, `replace` y `skills`.
 - Rechaza claves desconocidas, valores inseguros, tools desconocidas o
-  duplicadas, descripción multilínea y perfiles mayores de 30.000 caracteres.
+  duplicadas, descripción multilínea y perfiles mayores de 30.000 bytes UTF-8.
+- Toda metadata pública persistida o renderizada, incluidas `description` y
+  `model`, **DEBE** rechazar controles C0/C1/Cf y ANSI. `prompt` **PUEDE** ser
+  multilínea porque no se muestra en el roster ni en la telemetría.
 - Escribe registro y copia activa byte-idénticos y los verifica.
 - Devuelve el alias nominal `/<name> <request>`. El host **DEBE** registrar ese
   alias automáticamente desde la copia activa: Pi en la sesión actual y
@@ -211,7 +337,8 @@ ruta cero modelo.
   requiere crear manualmente otro archivo ni editar configuración.
 - `skills` admite como máximo tres referencias con nombres únicos. Cada entrada
   es exactamente una referencia `repo` al `SKILL.md` relativo al proyecto o
-  una referencia GitHub cubierta por la allowlist exacta. Una lista no vacía
+  una referencia GitHub exacta cubierta por una referencia o root de la
+  allowlist incorporada. Una lista no vacía
   requiere `read`, no concede ni requiere `execute`, y no descarga cuerpos
   durante `join`. Campo omitido y lista vacía significan cero skills.
 
@@ -252,7 +379,9 @@ ruta cero modelo.
   dos roles fijos, los seis compañeros bundled y los perfiles activos conocidos al
   iniciar. El handler **DEBE** recargar discovery, resolver el ID estable o el
   path exacto administrado, seleccionar el agente, enviar el task una sola vez
-  y restaurar la selección. Un bundled apagado falla sin inferencia.
+  y restaurar la selección después de un terminal nativo. Un bundled apagado
+  falla sin inferencia. `/player <id> <task>` **DEBE** ofrecer la misma ruta
+  segura para cualquier perfil activo al momento de invocar.
 - El `task` nativo de `team-lead` en Copilot **DEBE** pasar por un hook de código
   que sólo permita el `agent_type` exacto de un player Agent Harbor activo,
   rechace nested delegation y recursión, impida dos llamadas simultáneas y
@@ -274,8 +403,12 @@ ruta cero modelo.
   `team-lead` **DEBE** recibir un `harbor_delegate` custom y acotado cuyo schema
   enumera el roster activo al crear esa sesión; el loader desactiva extensiones
   descubiertas para impedir herramientas implícitas o carga recursiva, y el
-  host **DEBE** serializar ese tool. Cada target Pi se reconstruye desde el rol
-  fijo o la definición activa embebida y ownership-verified.
+  host **DEBE** serializar ese tool. Antes de crear el root, Pi **DEBE** capturar
+  en una sola lectura un snapshot de cada rol fijo o definición activa embebida
+  y ownership-verified; un fallo de preparación produce cero roots. El mismo
+  conjunto acotado de IDs y definiciones **DEBE** alimentar la consulta
+  determinista
+  `harbor_team_roster`; esa consulta no crea un child.
 - El coordinador **DEBE** preferir un solo especialista y detenerse cuando la
   tarea esté completa o bloqueada. Una secuencia posterior recibe sólo la
   tarea acotada y la evidencia verificada necesaria de etapas anteriores.
@@ -437,17 +570,24 @@ ruta cero modelo.
 
 - Lee opcionalmente `.agent-harbor/skill-sources.json` del proyecto. El archivo
   cerrado versión 1 reemplaza los defaults y acepta hasta 32 fuentes GitHub de
-  scope `repository`, `folder` o `skill`.
+  scope `repository`, `folder` o `skill`. Esa configuración **DEBE** cargarse
+  de forma perezosa sólo al ejecutar `/list-skills`; un archivo inválido o
+  sobredimensionado **NO DEBE** bloquear `/team`, `/bench`, `/join`, `/retire`
+  ni `/contract`.
 - Resuelve cada rama mediante el `gh` autenticado del usuario y enumera como
   máximo 500 `SKILL.md` por scope desde ese snapshot.
 - Reporta por defecto una tabla compacta con sólo `REPOSITORY`, `PATH` y
   `SKILL`. `--descriptions`/`-d` **DEBE** añadir `DESCRIPTION` usando sólo el
-  frontmatter acotado, permitir filtrar también por esa descripción y no
-  mostrar el body, commit ni blob; las
+  frontmatter acotado y no mostrar el body, commit ni blob. La carga acepta como
+  máximo 64 descripciones: en un catálogo mayor **DEBE** aplicar primero un
+  filtro por nombre, repositorio o ruta y fallar antes de pedir metadata si aún
+  quedan más de 64 filas. Tras esa carga, el filtro final **PUEDE** coincidir
+  también con la descripción. Las
   superficies terminales **DEBEN** solicitar color ANSI cuando lo soporten y
   Copilot **DEBE** añadir bordes Unicode y una cabecera explícita de cero tokens.
-- La visibilidad **NO DEBE** ampliar `trustedSkills`: repositorios y folders son
-  discovery read-only; la ejecución conserva referencias exactas.
+- La visibilidad configurada por el proyecto **NO DEBE** ampliar
+  `trustedSkills` ni `trustedSkillRepositories`; la ejecución conserva una
+  referencia exacta por player aunque el root incorporado sea un repositorio.
 - No clona, instala, cachea, escribe, ejecuta ni muestra el cuerpo remoto.
 
 ### `/scout`
@@ -457,7 +597,8 @@ ruta cero modelo.
 - El agente **DEBE** recibir sólo dos tools scoped: un filtro read-only de
   metadata y un `join` cerrado. No recibe filesystem, shell, delegación,
   `/contract`, skills ambientales ni el control lifecycle general.
-- El filtro **DEBE** consultar sólo referencias exactas de `trustedSkills`, no
+- El filtro **DEBE** consultar sólo referencias exactas de `trustedSkills` y
+  referencias descubiertas en `trustedSkillRepositories`, nunca
   `.agent-harbor/skill-sources.json`; devuelve nombre, repo, path, track y
   descripción, nunca body ni commit. Admite como máximo tres consultas por la
   instrucción del agente.
@@ -465,6 +606,9 @@ ruta cero modelo.
   sus coordenadas, **DEBE** incluir `read` si selecciona una skill y **DEBE**
   llamar `join` exactamente una vez. La mutación conserva toda la validación,
   ownership, locking, colisiones y rollback de `/join`.
+- Si el `join` ya hizo commit y el recruiter Pi falla o se cancela después, Pi
+  **DEBE** reconciliar el alias en `finally` e informar que el roster cambió; no
+  puede presentar la mutación confirmada como rollback.
 - Copilot lo publica como `/scout` mediante extensión y MCP por agente; Pi usa
   tools custom de la invocación; OpenCode aplica `execution.agent ===
   "talent-scout"`. El recruiter no entra en el roster delegable del
@@ -541,8 +685,9 @@ capacidades ordinarias que el usuario le declaró.
 - No se duplican comandos como `toggle`, `lineup` o `leave`.
 - No se heredan skills instaladas, personales o ambientales. Para ejecución
   sólo se soportan archivos repo exactos y referencias GitHub exactas declaradas
-  en el player. Los scopes de carpeta o repositorio existen únicamente en el
-  catálogo visible y nunca otorgan confianza de ejecución.
+  en el player. Los scopes configurados por el proyecto son sólo visibles; los
+  únicos repositorios que otorgan confianza de ejecución son los roots
+  incorporados explícitamente en `trustedSkillRepositories`.
 - No se promete aislamiento de sistema operativo.
 - Copilot CLI 1.0.71 requiere modo experimental para sus comandos de extensión.
   Con él, los cuatro controles deterministas **DEBEN** resolverse como comandos
@@ -567,7 +712,7 @@ capacidades ordinarias que el usuario le declaró.
 | --- | --- | --- |
 | NAT-01 | Entrypoints, roles y loader nativos | `distribution declares native TypeScript entrypoints`, `Copilot plugins expose canonical commands and one plugin-provided MCP server` y `installed CLIs discover the native packages` |
 | EFF-01 | Core único, un build y mínimo trabajo por comando | `Copilot runtime is generated byte-for-byte from shared core`, matriz de cinco comandos, smokes concurrentes y contenido de `npm pack --dry-run --json` |
-| TOK-01 | Ruta cero modelo para controles deterministas y para ver la banca en cada distribución | `every distribution has a direct zero-model bench entrypoint`, `OpenCode TUI exposes direct controls that bypass sessions and models`, `Pi deterministic command handlers never enter the SDK orchestrator`, aserción de orquestador vacío en la matriz de contratos y smoke Copilot de comando `client` sin eventos `assistant.usage` ni `assistant.message` |
+| TOK-01 | Ruta cero modelo para controles deterministas y para ver la banca en cada distribución | `every distribution has a direct zero-model bench entrypoint`, `OpenCode TUI exposes direct controls that bypass sessions and models`, `Pi deterministic command handlers never enter the SDK orchestrator`, `Pi /team and enriched /bench are searchable zero-model controls with completions and human errors`, `Pi team lead rejects more than 32 active specialists before creating a ghost run`, aserción de orquestador vacío en la matriz de contratos y smoke Copilot de comando `client` sin eventos `assistant.usage` ni `assistant.message` |
 | CMD-01 | Cinco comandos con semántica común | matriz `*: all five commands share the executable contract` para los tres harnesses |
 | VAL-01 | Schema cerrado, límites y cero children ante error | `validation rejects every non-canonical player shape`, `join rejects an oversized rendered profile` y `contract rejects invalid input before creating any child` |
 | OWN-01 | Ownership completo, colisiones, traversal y symlinks | `ownership metadata must remain complete`, `ownership rejects duplicate metadata and the wrong roster class`, `all harnesses reject unknown fields and unmanaged collisions`, `leaf symlinks are rejected` y `ancestor symlinks and traversal-shaped IDs are rejected` |
@@ -575,12 +720,13 @@ capacidades ordinarias que el usuario le declaró.
 | CON-01 | Un child, allowlist cerrada y cleanup sin pérdida de errores | pruebas de los tres orquestadores, `SDK orchestrators clean up child sessions when prompting fails`, `SDK orchestrators preserve execution and cleanup failures together` y aserciones `"*": false`/`executionMode: "sequential"` |
 | SKL-01 | Grupo propio por player, fuentes repo/GitHub y cero discovery ambiental | `repository skill references reject traversal, absolute paths, mismatched names, and cross-source duplicate names`, `skill capsules contain only the configured file and clean up their invocation root`, `compiled Copilot MCP servers are bounded and scope every player skill group to its own process`, `OpenCode removes an owned stale profile from host discovery instead of inheriting expanded tools`, `managed dispatch rejects owned profiles whose executable frontmatter differs from the encoded definition`, `contract skills are validated and materialized before any SDK child is created`, `Pi gives a child exactly its invocation-scoped skill allowlist`, `Pi fails closed on ambient, malformed, or post-reload skill discovery and cleans the capsule` y `Pi cancellation during skill reload creates no child and cleans the capsule` |
 | AGT-01 | Dos roles activos por defecto y seis compañeros SDLC bundled opt-in, invocables sin router | `the factory roster has exactly two active roles and six opt-in SDLC players`, `all harness rosters expose only fixed roles until owned SDLC profiles are activated`, `installed CLIs discover the native packages` y pruebas de comandos exactos por adapter |
-| ORC-01 | Despacho secuencial nominal, evidencia entre etapas, límite, no recursión y cleanup | `Copilot team-lead hooks enforce exact active sequential delegation across user turns`, `OpenCode named runner dispatches every fixed and activated ID exactly`, `OpenCode team lead dispatches exact active agents sequentially without a router` y `Pi team lead delegates sequentially to different active agents with bounds and preflight` |
+| ORC-01 | Despacho secuencial nominal, evidencia entre etapas, límite, no recursión y cleanup | `Copilot team-lead hooks enforce exact active sequential delegation across user turns`, `OpenCode named runner dispatches every fixed and activated ID exactly`, `OpenCode team lead dispatches exact active agents sequentially without a router`, `Pi team lead delegates sequentially to different active agents with bounds and preflight` y `Pi team lead rejects more than 32 active specialists before creating a ghost run` |
 | EVD-01 | Dataset literal común, identidades runtime y traza correlacionada sin contenido sensible | `the Harbor cycle dataset is literal, closed, and independent from runtime catalogs`, `the full Harbor dataset cycle activates, dispatches, hands off evidence, and cleans every SDK child`, `the default Harbor cycle dispatches crafter with evidence and cleanup`, `evidence hooks retain only hashes and byte lengths`, `a failing async evidence collector cannot alter child execution or cleanup`, `creation, prompt, and cleanup failures produce bounded truthful evidence traces` y las tres pruebas ORC-01 alimentadas por el mismo dataset |
 | LIV-01 | Selección semántica y comunicación eficiente con inferencia real en Copilot, OpenCode y Pi | smoke Copilot opt-in `live Copilot team-lead selects and orchestrates the Harbor SDLC cycle efficiently` y smokes `live opencode|pi team-lead selects and orchestrates the Harbor SDLC cycle with Codex`: candidatos desordenados, nonce oculto acotado, seis children nativos correlacionados, secuencia exacta, concurrencia máxima uno, identidad/terminación nativas, ausencia de marcadores stale/duplicados, presupuestos raíz/child/total, fixture verificada, tokens positivos, cleanup y reportes sanitizados. La evidencia autenticada anterior al cambio de roster **NO** satisface esta secuencia canónica y **DEBE** regenerarse con los seis compañeros vigentes antes de afirmar LIV-01 cumplido. |
 | COP-01 | MCP estructurado, preflight compartido y runtime generado | `Copilot native control performs deterministic shared contract preflight`, `compiled Copilot MCP servers are bounded and scope every player skill group to its own process`, `Copilot runtime is generated byte-for-byte from shared core`, `generated native runtime retains gh timeout and MCP cancellation guards` y smoke ACP `agent-harbor (connected, plugin)` |
+| COP-TEAM-01 | Roster y actividad Copilot cero modelo, lifecycle privado, accounting nativo y restore seguro | `Copilot runtime redacts tasks, privately deduplicates native usage, and preserves lower bounds`, `Copilot runtime preserves hierarchy, terminal facts, project isolation, cap32, and double-booking`, `Copilot team view shows deterministic roster, live hierarchy, filters, and last mission within 96 columns`, `Copilot coordinator emits correlated content-minimized root and child lifecycle events`, `Copilot child admission denies before native work without poisoning the next delegation`, pruebas de contrato de extensión, runtime byte-idéntico y smoke real `--plugin-dir` con usage inalterado |
 | GH-01 | Referencias canónicas, snapshot read-only y body invocation-local | `GitHub references are bounded...`, `GitHub resolver pins one branch and one exact blob with two read-only cancellable gh calls`, `default gh runner enforces its process timeout`, `GitHub skill bodies are snapshot-loaded...` y `contract skills are validated and materialized before any SDK child...`; POC manual autenticado con `gh` |
-| PI-01 | API real de Pi, skills aisladas, comandos de roles, delegación nominal y sesión en memoria | smoke de `createAgentSession`, RPC `get_commands`, `Pi gives a child exactly its invocation-scoped skill allowlist`, `Pi extension invokes every fixed and activated agent and equips the team lead for named delegation` y `Pi team lead delegates sequentially to different active agents with bounds and preflight` |
+| PI-01 | API real de Pi, skills aisladas, delegación nominal, `/team` y cancelación acotada | smoke de `createAgentSession`, RPC `get_commands`, `Pi gives a child exactly its invocation-scoped skill allowlist`, `Pi extension invokes every fixed and activated agent and equips the team lead for named delegation`, `Pi /team and enriched /bench are searchable zero-model controls with completions and human errors`, `Pi exposes a live safe team run, native usage, propagated signal, and always-cleared status/widget`, `Pi Alt+H cancels an idle slash child without a caller signal and clears live UI`, casos de root cap, double-booking y `/team stop` en `test-ts/adapters.test.ts`, y todas las pruebas de `test-ts/pi-team.test.ts` |
 | PKG-01 | Paquete publicable | `npm pack --dry-run --json` |
 | DEP-01 | Dependencias seguras | `npm audit --audit-level=high` sin hallazgos |
 
@@ -603,6 +749,13 @@ La ausencia de un CLI sólo PUEDE omitir su test de descubrimiento. El contrato
 base y las rutas TOK-01 no requieren modelo, API key, Docker ni red. Una
 modificación de lifecycle, ownership, adapter, superficie directa u orquestador
 **DEBE** incluir una regresión proporcional.
+
+La comparación con una instalación Copilot existente es opt-in porque lee un
+estado externo que puede estar deliberadamente atrasado. Antes de usar esa
+instalación como evidencia de entrega **DEBEN** pasar `npm run
+test:installed:copilot` y, para discovery nativo sin inferencia, `npm run
+test:installed:copilot:smoke`. Un drift detectado es fallo informativo hasta
+actualizar la copia instalada; no se incorpora silenciosamente a `npm test`.
 
 Las aceptaciones live del coordinador se ejecutan por separado, requieren el
 harness autenticado correspondiente y consumen tokens intencionalmente:

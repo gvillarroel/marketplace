@@ -3,7 +3,10 @@
  * Mutable branch references are resolved first and every subsequent content lookup uses the resulting
  * immutable commit SHA, preventing a branch movement from changing the loaded snapshot mid-operation.
  */
-import type { GithubResolver, GithubSkill, GithubSkillCatalogEntry, GithubSkillCatalogSource } from "./types.js";
+import type { GithubResolver, GithubSkill, GithubSkillCatalogEntry, GithubSkillCatalogSource, TrustedGithubSkills } from "./types.js";
+/** A remote `SKILL.md` that cannot safely participate in execution trust. */
+export declare class InvalidSkillDocumentError extends Error {
+}
 /** Validates the exact schema and traversal-safe coordinates of a GitHub skill reference. */
 export declare function validateGithubSkill(value: unknown): GithubSkill;
 /** Validates one repository, folder, or exact-skill scope used only for visible discovery. */
@@ -17,9 +20,9 @@ export declare function parseSkillDocument(raw: string | Uint8Array, expectedNam
 };
 export declare function parseSkillBody(raw: string | Uint8Array, expectedName: string, sourceLabel?: string): string;
 /** Returns whether all security-relevant coordinates exactly match an allowlisted skill reference. */
-export declare function isTrustedGithubSkill(skill: GithubSkill, trusted: readonly GithubSkill[]): boolean;
+export declare function isTrustedGithubSkill(skill: GithubSkill, trusted: TrustedGithubSkills): boolean;
 /** Validates, allowlists, pins, and loads one GitHub skill through the supplied resolver. */
-export declare function loadTrustedGithubSkill(value: unknown, trusted: readonly GithubSkill[], resolver: GithubResolver, signal?: AbortSignal): Promise<{
+export declare function loadTrustedGithubSkill(value: unknown, trusted: TrustedGithubSkills, resolver: GithubResolver, signal?: AbortSignal): Promise<{
     skill: GithubSkill;
     commit: string;
     body: string;
@@ -52,6 +55,11 @@ export declare class GhResolver implements GithubResolver {
     /** Enumerates only `SKILL.md` blobs within one validated catalog scope. */
     listCatalog(value: GithubSkillCatalogSource, signal?: AbortSignal): Promise<readonly GithubSkillCatalogEntry[]>;
     /** Loads a catalog row's description from the immutable commit that produced it. */
+    inspectCatalog(entry: GithubSkillCatalogEntry, signal?: AbortSignal): Promise<{
+        name: string;
+        description: string;
+    }>;
+    /** Loads only the public description while preserving an optional catalog display name. */
     describeCatalog(entry: GithubSkillCatalogEntry, signal?: AbortSignal): Promise<string>;
 }
 export {};

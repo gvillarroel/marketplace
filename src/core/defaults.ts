@@ -3,29 +3,46 @@
  * These definitions are policy-bearing defaults consumed by every harness renderer.
  */
 
-import { exactCatalogSources } from "./catalog.js";
 import { loadFixedPlayers } from "./player-files.js";
-import type { GithubSkill, GithubSkillCatalogSource, PlayerDefinition } from "./types.js";
+import type { GithubSkill, GithubSkillCatalogSource, GithubSkillRepositoryTrust, PlayerDefinition, TrustedGithubSkills } from "./types.js";
 
-/** Exact GitHub skill references permitted in player definitions; branch heads are pinned when loaded. */
-export const trustedSkills: readonly GithubSkill[] = [{
+/** Every gvillarroel repository currently containing at least one `SKILL.md`. */
+export const trustedSkillRepositories: readonly GithubSkillRepositoryTrust[] = [
+  "knowledge",
+  "marketplace",
+  "pi-menton",
+  "sdlc",
+  "skills",
+  "slidev-manim",
+  "zx-harness",
+].map((repository) => ({
+  kind: "github" as const,
+  scope: "repository" as const,
+  repo: `gvillarroel/${repository}`,
+  track: "refs/heads/main",
+}));
+
+/** Compatibility references decorated with the repository trust roots used by every validator. */
+const exactTrustedSkills: GithubSkill[] = [{
   kind: "github",
   name: "zx-example-author",
   repo: "gvillarroel/zx-harness",
   path: "skills/zx-example-author/SKILL.md",
   track: "refs/heads/main",
 }];
+Object.defineProperty(exactTrustedSkills, "repositories", { value: trustedSkillRepositories });
+export const trustedSkills = exactTrustedSkills as TrustedGithubSkills;
 
 /** Ordered lifecycle peers loaded from editable Markdown definitions. */
 export const bundledPlayers = loadFixedPlayers(new URL("./bundled/", import.meta.url), trustedSkills);
 
 /** Default visible catalog; a project's `.agent-harbor/skill-sources.json` replaces it. */
-export const skillCatalogSources: readonly GithubSkillCatalogSource[] = exactCatalogSources(trustedSkills);
+export const skillCatalogSources: readonly GithubSkillCatalogSource[] = trustedSkillRepositories;
 
 /** Fixed recruiter behind `/scout`; host adapters supply only its two scoped tools. */
 export const scoutPlayer: PlayerDefinition = {
   name: "talent-scout",
-  description: "Recruit one persistent player from the limited trusted skill group.",
+  description: "Recruit one persistent player from gvillarroel's trusted skill repositories.",
   prompt: "Act only as the Agent Harbor talent scout. Convert the user's need into one narrowly scoped persistent player. First call the scoped skill-filter tool with concise capability keywords; you may refine the query at most twice. Select skills only from exact references returned by that tool and never invent or alter kind, name, repo, path, or track. Use the smallest sufficient tool set, include read whenever a skill is selected, choose a unique lowercase hyphenated player name that is not a command or fixed role, and write a bounded description and prompt. Then call the scoped join-player tool exactly once with the complete definition. Do not call any other lifecycle command, create a contractor, delegate, or return an unregistered definition. Report the join result and selected skill names.",
   tools: [],
 };

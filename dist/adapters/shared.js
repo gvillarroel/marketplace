@@ -14,7 +14,7 @@ export function defaultHome(harness) {
         return resolve(process.env.OPENCODE_CONFIG_DIR || join(homedir(), ".config", "opencode"));
     return resolve(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"));
 }
-/** Builds the shared command context while keeping the SDK orchestrator injectable. */
+/** Builds the shared command context while keeping catalog I/O lazy and the SDK orchestrator injectable. */
 export async function harborContext(harness, project, orchestrator, catalogStyle = "plain") {
     const absoluteProject = resolve(project);
     return {
@@ -23,7 +23,7 @@ export async function harborContext(harness, project, orchestrator, catalogStyle
         orchestrator,
         github: new GhResolver(),
         trustedSkills,
-        catalogSources: await loadSkillCatalogSources(absoluteProject, skillCatalogSources),
+        loadCatalogSources: () => loadSkillCatalogSources(absoluteProject, skillCatalogSources),
         catalogStyle,
     };
 }

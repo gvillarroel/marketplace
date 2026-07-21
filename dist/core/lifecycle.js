@@ -12,8 +12,20 @@ import { bundledPlayers, trustedSkills } from "./defaults.js";
 import { isHarborId } from "./identity.js";
 import { decodePlayer, isCanonicalPlayerProfile } from "./profiles.js";
 import { validateConfiguredSkillReferences } from "./skills.js";
-const reserved = new Set([...bundledPlayers.keys(), "team-lead", "crafter", "talent-scout", "bench", "join", "retire", "contract", "list-skills", "scout"]);
+const piBuiltInCommands = [
+    "settings", "model", "scoped-models", "export", "import", "share", "copy", "name", "session", "changelog",
+    "hotkeys", "fork", "clone", "tree", "trust", "login", "logout", "new", "compact", "resume", "reload", "quit",
+];
+const reserved = new Set([
+    ...bundledPlayers.keys(),
+    "team-lead", "crafter", "talent-scout", "team", "bench", "join", "retire", "contract", "list-skills", "scout",
+    "player",
+    ...piBuiltInCommands,
+]);
 const allowedTools = new Set(["read", "search", "edit", "execute"]);
+// Public roster metadata is rendered in terminal/UI surfaces. Cc includes C0,
+// C1, DEL, newlines, and ESC; Cf includes bidi/zero-width format controls.
+const publicMetadataControl = /[\p{Cc}\p{Cf}]/u;
 /** Parses bench syntax without touching roster state or the filesystem. */
 function parseBenchCommand(args, bundled) {
     const value = args.trim();
@@ -128,21 +140,26 @@ export function validatePlayer(value, allowReserved = false) {
             throw new Error(`unknown key: ${key}`);
     if (!isHarborId(input.name) || (!allowReserved && reserved.has(input.name)))
         throw new Error("invalid or reserved name");
-    if (typeof input.description !== "string" || !input.description || /[\r\n]/.test(input.description))
+    if (typeof input.description !== "string" || !input.description.trim() || input.description.length > 500 || publicMetadataControl.test(input.description))
         throw new Error("invalid description");
-    if (typeof input.prompt !== "string" || !input.prompt.trim())
+    if (typeof input.prompt !== "string" || !input.prompt.trim() || input.prompt.length > 18_000)
         throw new Error("invalid prompt");
     if (!Array.isArray(input.tools) || (!allowReserved && input.tools.length === 0) || input.tools.some((tool) => typeof tool !== "string" || !allowedTools.has(tool)))
         throw new Error("invalid tools");
     if (new Set(input.tools).size !== input.tools.length)
         throw new Error("duplicate tools");
-    if (input.model !== undefined && typeof input.model !== "string")
+    if (input.model !== undefined && (typeof input.model !== "string" || !input.model.trim() || input.model.length > 200 || publicMetadataControl.test(input.model)))
         throw new Error("invalid model");
     if (input.replace !== undefined && typeof input.replace !== "boolean")
         throw new Error("invalid replace");
     if (input.skills !== undefined)
         validateConfiguredSkillReferences(input.skills, input.tools, trustedSkills);
-    return input;
+    return {
+        ...input,
+        description: input.description.trim(),
+        prompt: input.prompt.trim(),
+        ...(typeof input.model === "string" ? { model: input.model.trim() } : {}),
+    };
 }
 /**
  * Owns deterministic join, bench, and retire operations for one harness/project pair.
@@ -323,8 +340,8 @@ export class Roster {
     async join(input) {
         const player = validatePlayer(input);
         const content = this.spec.renderPlayer(player, "personal");
-        if (content.length > 30_000)
-            throw new Error("profile exceeds 30000 characters");
+        if (Buffer.byteLength(content, "utf8") > 30_000)
+            throw new Error("profile exceeds 30000 bytes");
         return this.withMutationLock(async () => {
             const paths = this.paths(player.name);
             await Promise.all([rejectSymlinkTraversal(this.spec.home, paths.registration), rejectSymlinkTraversal(this.spec.project, paths.active)]);
@@ -332,6 +349,9 @@ export class Roster {
             for (const collision of current)
                 if (collision !== undefined && !isOwnedProfile(collision, player.name, "personal"))
                     throw new Error("unmanaged collision");
+            if (current[0] === undefined && (await this.registrationEntries()).length >= 200) {
+                throw new Error("personal roster limit reached (200); retire an existing personal member before joining another");
+            }
             if (!player.replace && current.some((value) => value !== undefined &&
                 !isCanonicalPlayerProfile(value, this.spec.name, player, "personal", this.spec.project))) {
                 throw new Error("replace:true required");
@@ -359,10 +379,13 @@ export class Roster {
         const registrationRoot = contained(this.spec.home, join(this.spec.home, this.spec.registrationDir));
         try {
             await rejectSymlinkTraversal(this.spec.home, join(registrationRoot, "placeholder"));
-            return (await readdir(registrationRoot))
+            const entries = (await readdir(registrationRoot))
                 .filter((filename) => filename.endsWith(this.spec.extension))
-                .sort()
-                .slice(0, 200);
+                .sort();
+            if (entries.length > 200) {
+                throw new Error(`personal roster has ${entries.length} registrations; retire members until at most 200 remain`);
+            }
+            return entries;
         }
         catch (error) {
             if (error?.code === "ENOENT")
@@ -370,10 +393,10 @@ export class Roster {
             throw error;
         }
     }
-    personalBenchState(active, activeOwned, definition) {
+    personalBenchState(active, activeOwned, definition, registrationCanonical) {
         if (active !== undefined && !activeOwned)
             return "conflict";
-        if (!definition)
+        if (!definition || !registrationCanonical)
             return "stale";
         if (active !== undefined && !isCanonicalPlayerProfile(active, this.spec.name, definition, "personal", this.spec.project))
             return "stale";
@@ -403,7 +426,13 @@ export class Roster {
             catch {
                 definition = undefined;
             }
-            rows.push({ id, roster: "personal", state: this.personalBenchState(active, isOwnedProfile(active, id, "personal"), definition) });
+            const registrationCanonical = definition !== undefined &&
+                isCanonicalPlayerProfile(registration, this.spec.name, definition, "personal", this.spec.project);
+            rows.push({
+                id,
+                roster: "personal",
+                state: this.personalBenchState(active, isOwnedProfile(active, id, "personal"), definition, registrationCanonical),
+            });
         }
         return rows;
     }
@@ -472,7 +501,9 @@ export class Roster {
      * Active copies in other projects are intentionally outside the transaction and remain untouched.
      */
     async retire(id) {
-        if (!isHarborId(id) || reserved.has(id))
+        // Names newly reserved by a host must remain removable when an older
+        // Agent Harbor version already created a verified personal profile.
+        if (!isHarborId(id))
             throw new Error("invalid personal player");
         return this.withMutationLock(async () => {
             const paths = this.paths(id);

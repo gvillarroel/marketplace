@@ -10,7 +10,15 @@ const dist = new URL("../dist/", import.meta.url);
 const runtimeTargets = [
   {
     root: new URL("../plugins/agent-foundry/runtime/dist/", import.meta.url),
-    adapters: ["shared.js", "copilot.js", "copilot-mcp.js", "direct.js", "copilot-coordinator.js"],
+    adapters: [
+      "shared.js",
+      "copilot.js",
+      "copilot-mcp.js",
+      "direct.js",
+      "copilot-coordinator.js",
+      "copilot-team-runtime.js",
+      "copilot-team-view.js",
+    ],
   },
 ];
 

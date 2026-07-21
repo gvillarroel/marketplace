@@ -5,7 +5,19 @@
 
 import { Roster, validatePlayer } from "./lifecycle.js";
 import { exactCatalogSources, formatSkillCatalog, type SkillCatalogStyle } from "./catalog.js";
-import type { CommandName, ContractDefinition, GithubResolver, GithubSkill, GithubSkillCatalogEntry, GithubSkillCatalogSource, Orchestrator, PlayerDefinition } from "./types.js";
+import type { CommandName, ContractDefinition, GithubResolver, GithubSkillCatalogEntry, GithubSkillCatalogSource, Orchestrator, PlayerDefinition, TrustedGithubSkills } from "./types.js";
+
+// Description lookup may require one authenticated GitHub request per row. Keep
+// the work bounded, while still allowing large catalogs to be narrowed using
+// metadata that was already returned by catalog enumeration.
+const maximumDescribedCatalogEntries = 64;
+
+function catalogEntryMatches(entry: GithubSkillCatalogEntry, filter: string, includeDescription: boolean): boolean {
+  if (!filter) return true;
+  const values = [entry.name, entry.repo, entry.path];
+  if (includeDescription) values.push(entry.description ?? "");
+  return values.some((value) => value.toLowerCase().includes(filter));
+}
 
 /** Dependencies required to dispatch every public Agent Harbor command. */
 export interface HarborContext {
@@ -13,8 +25,9 @@ export interface HarborContext {
   bundled: ReadonlyMap<string, PlayerDefinition>;
   orchestrator: Orchestrator;
   github: GithubResolver;
-  trustedSkills: readonly GithubSkill[];
+  trustedSkills: TrustedGithubSkills;
   catalogSources?: readonly GithubSkillCatalogSource[];
+  loadCatalogSources?: () => Promise<readonly GithubSkillCatalogSource[]>;
   catalogStyle?: SkillCatalogStyle;
 }
 
@@ -45,7 +58,8 @@ export async function executeCommand(name: CommandName, args: string, context: H
         throw new Error("usage: /list-skills [--descriptions|-d] [filter]");
       }
       const filter = tokens.filter((token) => token !== "--descriptions" && token !== "-d").join(" ").toLowerCase();
-      const sources = context.catalogSources ?? exactCatalogSources(context.trustedSkills);
+      const loadedSources = context.catalogSources ?? await context.loadCatalogSources?.();
+      const sources = loadedSources ?? exactCatalogSources(context.trustedSkills);
       const groups = await Promise.all(sources.map(async (source): Promise<readonly GithubSkillCatalogEntry[]> => {
         if (context.github.listCatalog) return context.github.listCatalog(source, signal);
         if (source.scope !== "skill" || !source.path || !source.name) throw new Error("GitHub resolver cannot enumerate catalog scopes");
@@ -60,13 +74,21 @@ export async function executeCommand(name: CommandName, args: string, context: H
       let entries = [...unique.values()];
       if (descriptions) {
         if (!context.github.describeCatalog) throw new Error("GitHub resolver cannot load catalog descriptions");
-        if (entries.length > 64) throw new Error("description view supports at most 64 skills; choose a narrower catalog source");
+        if (entries.length > maximumDescribedCatalogEntries) {
+          if (!filter) {
+            throw new Error(`description view loads at most ${maximumDescribedCatalogEntries} skills; add a filter matching skill name, repository, or path`);
+          }
+          entries = entries.filter((entry) => catalogEntryMatches(entry, filter, false));
+          if (entries.length > maximumDescribedCatalogEntries) {
+            throw new Error(`description filter still matches ${entries.length} skills; narrow it to at most ${maximumDescribedCatalogEntries} by skill name, repository, or path`);
+          }
+        }
         entries = await Promise.all(entries.map(async (entry) => ({
           ...entry,
           description: await context.github.describeCatalog!(entry, signal),
         })));
       }
-      entries = entries.filter(({ name, repo, path, description }) => !filter || [name, repo, path, description ?? ""].some((value) => value.toLowerCase().includes(filter)))
+      entries = entries.filter((entry) => catalogEntryMatches(entry, filter, descriptions))
         .sort((left, right) => left.repo.localeCompare(right.repo) || left.path.localeCompare(right.path) || left.name.localeCompare(right.name));
       return formatSkillCatalog(entries, context.catalogStyle, descriptions);
     }

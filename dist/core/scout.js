@@ -1,4 +1,5 @@
 /** Deterministic, execution-allowlist-only skill discovery for the talent scout. */
+import { InvalidSkillDocumentError } from "./github.js";
 const stopWords = new Set([
     "a", "al", "algo", "alguien", "con", "de", "del", "el", "en", "la", "las", "lo", "los", "para", "por", "que", "se", "un", "una", "usar", "usando",
     "a", "an", "and", "for", "in", "of", "on", "someone", "that", "the", "to", "using", "with",
@@ -11,8 +12,9 @@ function tokens(value) {
             .filter((token) => token.length > 1 && !stopWords.has(token)))];
 }
 /**
- * Searches only exact execution-trusted references. It loads bounded frontmatter
- * descriptions, never instruction bodies or project-configured visible sources.
+ * Searches exact execution-trusted references plus skills discovered in trusted
+ * repositories. It loads bounded frontmatter descriptions, never instruction bodies
+ * or project-configured visible sources.
  */
 export async function filterTrustedSkills(query, trusted, resolver, signal) {
     const clean = query.trim();
@@ -23,10 +25,44 @@ export async function filterTrustedSkills(query, trusted, resolver, signal) {
     const wanted = tokens(clean);
     if (!wanted.length)
         return [];
-    const described = await Promise.all(trusted.map(async (skill) => ({
+    const references = new Map();
+    for (const skill of trusted)
+        references.set(`${skill.repo.toLowerCase()}\0${skill.path}\0${skill.track}`, skill);
+    const described = await Promise.all([...references.values()].map(async (skill) => ({
         skill,
         description: (await resolver.describe(skill, signal)).description,
     })));
+    if ((trusted.repositories?.length ?? 0) > 0) {
+        if (!resolver.listCatalog)
+            throw new Error("GitHub resolver cannot enumerate trusted repositories");
+        const groups = await Promise.all(trusted.repositories.map((source) => resolver.listCatalog(source, signal)));
+        const discovered = await Promise.all(groups.flat().map(async (entry) => {
+            const track = entry.track;
+            if (!track)
+                throw new Error("trusted repository row lacks branch metadata");
+            const identity = `${entry.repo.toLowerCase()}\0${entry.path}\0${track}`;
+            if (references.has(identity))
+                return undefined;
+            if (resolver.inspectCatalog) {
+                let metadata;
+                try {
+                    metadata = await resolver.inspectCatalog(entry, signal);
+                }
+                catch (error) {
+                    if (error instanceof InvalidSkillDocumentError)
+                        return undefined;
+                    throw error;
+                }
+                return {
+                    skill: { kind: "github", name: metadata.name, repo: entry.repo, path: entry.path, track },
+                    description: metadata.description,
+                };
+            }
+            const skill = { kind: "github", name: entry.name, repo: entry.repo, path: entry.path, track };
+            return { skill, description: (await resolver.describe(skill, signal)).description };
+        }));
+        described.push(...discovered.filter((value) => value !== undefined));
+    }
     return described.map(({ skill, description }) => {
         const name = normalized(skill.name);
         const coordinates = normalized(`${skill.repo} ${skill.path}`);

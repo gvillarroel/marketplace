@@ -7,6 +7,12 @@ const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)))
 const defaults = [
   "test-ts/contracts.test.ts",
   "test-ts/adapters.test.ts",
+  "test-ts/pi-team.test.ts",
+  "test-ts/copilot-team.test.ts",
+  "test-ts/copilot-coordinator-lifecycle.test.ts",
+  "test-ts/copilot-install-drift.test.ts",
+  "test-ts/copilot-extension-contract.test.ts",
+  "test-ts/copilot-extension-runner.test.ts",
   "test-ts/agent-matrix.test.ts",
   "test-ts/cycle-evidence.test.ts",
   "test-ts/compatibility.test.ts",

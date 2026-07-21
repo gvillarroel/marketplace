@@ -32,6 +32,8 @@
     "test:live:opencode": "node scripts/run-live-codex-leads.mjs opencode",
     "test:live:pi": "node scripts/run-live-codex-leads.mjs pi",
     "test:live:codex": "node scripts/run-live-codex-leads.mjs all",
+    "test:installed:copilot": "node scripts/verify-installed-copilot.mjs",
+    "test:installed:copilot:smoke": "node scripts/verify-installed-copilot.mjs --smoke",
     "prepack": "npm run build"
   },
   "keywords": [

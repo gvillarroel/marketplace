@@ -7,12 +7,29 @@ declare module "@earendil-works/pi-coding-agent" {
   export interface Model {
     readonly id: string;
     readonly provider: string;
+    readonly maxTokens?: number;
     readonly [key: string]: unknown;
   }
   export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   export interface ExtensionContext {
     cwd: string;
     model: Model | undefined;
+    modelRegistry: {
+      find(provider: string, modelId: string): Model | undefined;
+      hasConfiguredAuth?(model: Model): boolean;
+    };
+    mode: "tui" | "rpc" | "json" | "print";
+    hasUI: boolean;
+    signal: AbortSignal | undefined;
+    ui: {
+      notify(message: string, level?: "info" | "warning" | "error"): void;
+      setStatus(key: string, text: string | undefined): void;
+      setWidget(
+        key: string,
+        content: string[] | undefined,
+        options?: { placement?: "aboveEditor" | "belowEditor" },
+      ): void;
+    };
   }
   export interface ToolDefinition {
     name: string;
@@ -29,12 +46,30 @@ declare module "@earendil-works/pi-coding-agent" {
     ): Promise<unknown>;
   }
   export interface ExtensionCommandContext extends ExtensionContext {
-    ui: { notify(message: string, level: "info" | "warning" | "error"): void };
+  }
+  export interface AutocompleteItem {
+    value: string;
+    label: string;
+    description?: string;
   }
   export interface ExtensionAPI {
+    on(
+      event: "session_shutdown",
+      handler: (
+        event: { type: "session_shutdown"; reason: "quit" | "reload" | "new" | "resume" | "fork"; targetSessionFile?: string },
+        context: ExtensionContext,
+      ) => Promise<void> | void,
+    ): void;
     registerTool(tool: unknown): void;
+    registerShortcut(shortcut: string, options: {
+      description?: string;
+      handler(context: ExtensionContext): Promise<void> | void;
+    }): void;
     registerCommand(name: string, options: {
       description?: string;
+      getArgumentCompletions?: (
+        argumentPrefix: string,
+      ) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
       handler(args: string, context: ExtensionCommandContext): Promise<void>;
     }): void;
     getThinkingLevel(): ThinkingLevel;
@@ -74,6 +109,24 @@ declare module "@earendil-works/pi-coding-agent" {
   }
   export function getAgentDir(): string;
   export interface AgentSession {
+    readonly model?: Model;
+    readonly thinkingLevel?: ThinkingLevel;
+    readonly messages: Array<{
+      role: string;
+      content?: Array<{ type: string; text?: string; thinking?: string }>;
+      provider?: string;
+      model?: string;
+      responseModel?: string;
+      responseId?: string;
+      usage?: {
+        input?: number;
+        output?: number;
+        reasoning?: number;
+        cacheRead?: number;
+        cacheWrite?: number;
+        totalTokens?: number;
+      };
+    }>;
     subscribe(handler: (event: unknown) => void): () => void;
     prompt(text: string): Promise<void>;
     abort(): Promise<void>;

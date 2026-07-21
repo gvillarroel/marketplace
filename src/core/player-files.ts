@@ -5,7 +5,7 @@ import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isHarborId } from "./identity.js";
 import { validateConfiguredSkillReferences } from "./skills.js";
-import type { GithubSkill, HarborTool, PlayerDefinition } from "./types.js";
+import type { HarborTool, PlayerDefinition, TrustedGithubSkills } from "./types.js";
 
 const allowedKeys = new Set(["name", "description", "order", "tools", "model", "skills"]);
 const allowedTools = new Set<HarborTool>(["read", "search", "edit", "execute"]);
@@ -24,7 +24,7 @@ function parseJsonField(frontmatter: Map<string, string>, key: string): unknown 
   catch { throw new Error(`fixed player has invalid JSON frontmatter field: ${key}`); }
 }
 
-function parsePlayerFile(path: string, trustedSkills: readonly GithubSkill[]): ParsedPlayerFile {
+function parsePlayerFile(path: string, trustedSkills: TrustedGithubSkills): ParsedPlayerFile {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`fixed player must be a regular file: ${path}`);
   if (stat.size < 1 || stat.size > maxFileBytes) throw new Error(`fixed player file must be 1..${maxFileBytes} bytes: ${path}`);
@@ -68,7 +68,7 @@ function parsePlayerFile(path: string, trustedSkills: readonly GithubSkill[]): P
 }
 
 /** Loads all fixed players in stable frontmatter order from one bundled directory. */
-export function loadFixedPlayers(directory: URL, trustedSkills: readonly GithubSkill[]): ReadonlyMap<string, PlayerDefinition> {
+export function loadFixedPlayers(directory: URL, trustedSkills: TrustedGithubSkills): ReadonlyMap<string, PlayerDefinition> {
   const root = fileURLToPath(directory);
   const stat = lstatSync(root);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`fixed player directory must be a regular directory: ${root}`);

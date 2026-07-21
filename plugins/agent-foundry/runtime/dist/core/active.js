@@ -141,10 +141,28 @@ export function listManagedActiveIds(harness, project) {
 }
 /** Lists fixed roles first, followed by canonical project profiles that are safe to invoke. */
 export function listInvocablePlayerIds(harness, project) {
+    return listInvocablePlayers(harness, project).map(({ id }) => id);
+}
+/**
+ * Returns an invocation-scoped snapshot of every fixed/current player. Active
+ * definitions are parsed once during the scan so callers cannot create a run
+ * and then lose its preparation to a second filesystem read.
+ */
+export function listInvocablePlayers(harness, project) {
+    locationFor(harness);
+    const players = [...rolePlayers].map(([id, definition]) => ({
+        id,
+        source: "fixed",
+        definition,
+    }));
     const ids = new Set(rolePlayers.keys());
-    for (const { id } of scanActiveProfiles(harness, project).managedProfiles)
+    for (const { id, definition } of scanActiveProfiles(harness, project).managedProfiles) {
+        if (ids.has(id))
+            continue;
         ids.add(id);
-    return [...ids];
+        players.push({ id, source: "active", definition });
+    }
+    return players;
 }
 /** Loads one active player only if it is owned, revision-4, validated, and canonical. */
 export function loadManagedActivePlayer(harness, project, id) {

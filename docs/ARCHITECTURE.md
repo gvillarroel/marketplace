@@ -40,7 +40,8 @@ sus métricas están en [SIMPLIFICATION-PLAN.md](SIMPLIFICATION-PLAN.md).
 10. **Artefactos reproducibles.** `dist/` y `plugins/*/runtime/dist/` se generan
     desde `src/` con `scripts/build.mjs`; nunca son la fuente que se edita.
 11. **Reclutamiento acotado.** `/scout` consume un turno del agente fijo
-    `talent-scout`, que sólo puede filtrar metadata de `trustedSkills` y hacer
+    `talent-scout`, que sólo puede enumerar los repositorios confiables, filtrar
+    metadata de sus referencias exactas y hacer
     un `join`; no forma parte de los targets delegables del coordinador.
 
 ## Capas y dirección de dependencias
@@ -82,7 +83,7 @@ mismo layout.
 | Consumidor | Entrypoint | Superficie principal |
 | --- | --- | --- |
 | Copilot marketplace | `.github/plugin/marketplace.json` y `plugins/agent-foundry/plugin.json` | Instala únicamente `agent-foundry`. |
-| Copilot extensión | `plugins/agent-foundry/extensions/agent-harbor/extension.mjs` | Comandos client deterministas, `/<id>`, cambio/restauración de agente y guard de `team-lead`. |
+| Copilot extensión | `plugins/agent-foundry/extensions/agent-harbor/extension.mjs` | `/team`, controles client deterministas, `/player`, aliases `/<id>`, runner terminal seguro y guard de `team-lead`. |
 | Copilot MCP | `plugins/agent-foundry/.mcp.json` → runtime generado `adapters/copilot-mcp.js` | Tool global `control`; `--skills-player <id>` publica sólo `skills`; `--scout` publica sólo `filter_skills` y `join_player`. |
 | Copilot model-backed | `plugins/agent-foundry/skills/contract/SKILL.md` | Único wrapper Markdown: `/contract` hace preflight y crea exactamente un child. Los cuatro controles deterministas no tienen fallback skill. |
 | OpenCode server | export `.`/`./server` → `dist/adapters/opencode.js` | Plugin `AgentHarborPlugin`: commands, agents y tools lifecycle, delegación, skills y las dos tools aisladas del scout. |
@@ -127,8 +128,8 @@ Semántica común:
 - `list-skills [filter]` carga el override cerrado
   `.agent-harbor/skill-sources.json`, enumera scopes `repository`, `folder` o
   `skill` desde una rama resuelta y muestra sólo repositorio, path y nombre. No
-  descarga, muestra, instala ni cachea bodies. El catálogo visible no amplía la
-  allowlist exacta `trustedSkills` usada para ejecución.
+  descarga, muestra, instala ni cachea bodies. Un override visible del proyecto
+  no amplía `trustedSkills` ni `trustedSkillRepositories`, usados para ejecución.
 
 ### `/contract`
 
@@ -150,9 +151,11 @@ Un fallo de ejecución y otro de cleanup se conservan juntos en un
 
 La invocación nominal evita una inferencia de routing:
 
-- Copilot `/<id>` recarga agentes, resuelve el ID fijo namespaced o el
-  path administrado exacto, selecciona el agente, envía una tarea y restaura la
-  selección anterior bajo `withSelectionLock`.
+- Copilot `/<id>` y `/player <id>` recargan agentes, resuelven el ID fijo
+  namespaced o el path administrado exacto, seleccionan el agente, adjuntan
+  observadores y envían una tarea bajo `withSelectionLock`. La selección previa
+  sólo se restaura tras un terminal nativo; `/player` consulta el roster al
+  invocarse y por eso incluye perfiles unidos durante la sesión.
 - OpenCode configura `/<id>` con `agent: <id>`,
   `template: "$ARGUMENTS"` y `subtask: false`; el hook previo vuelve a validar
   tarea, actividad y ownership.
@@ -175,7 +178,7 @@ cada especialista exitoso una sola vez y sintetizar sólo la evidencia devuelta.
 
 | Harness | Boundary de delegación | Controles ejecutables |
 | --- | --- | --- |
-| Copilot | `task` nativo + `createCopilotCoordinatorGuard` | Snapshot de agentes fuera del hook; target exacto activo; path revalidado; sin recursión/nesting; máximo seis y uno in-flight por prompt. `selectionEpoch` impide que un refresh tardío pise una selección más nueva. El host ejecuta y termina cada `task` síncrono. |
+| Copilot | `task` nativo + `createCopilotCoordinatorGuard` | Snapshot de agentes fuera del hook; target exacto activo; path revalidado; admission contra actividad process-local antes del child; sin recursión/nesting; máximo seis y uno in-flight por prompt. `selectionEpoch` impide que un refresh tardío pise una selección más nueva. El host ejecuta y termina cada `task` síncrono. |
 | OpenCode | Tool exclusiva `harbor_delegate` | Target string revalidado contra el roster activo en cada llamada; resolución del turno de usuario raíz; modelo/variant heredado; máximo seis, sin target repetido y uno in-flight. Cada llamada usa `runAgent`, normaliza paths absolutos del proyecto y borra la sesión child. |
 | Pi | Custom tool `harbor_delegate` en la sesión del lead | Enum capturado al crearla, `executionMode: "sequential"`, máximo seis y sin target repetido. Cada dispatch reconstruye la definición y abre/limpia una sesión child. |
 
@@ -296,7 +299,8 @@ nombres únicos. Una lista no vacía requiere la capacidad `read`.
   el proyecto. `readRepositorySkill` rechaza paths ambiguos, escape físico y
   symlinks en cualquier segmento.
 - `kind: "github"` debe coincidir exactamente con `trustedSkills` por nombre,
-  repo, path y `refs/heads/...`. `GhResolver` resuelve primero la rama a un SHA
+  repo, path y `refs/heads/...`, o señalar un path exacto bajo uno de los siete
+  roots de `trustedSkillRepositories`. `GhResolver` resuelve primero la rama a un SHA
   de commit y descarga el archivo exacto fijado a ese SHA mediante `gh api`.
   Cada proceso tiene timeout de 20 s, señal de cancelación y buffer acotado;
   Agent Harbor no almacena credenciales.
@@ -342,6 +346,15 @@ el hook síncrono del host no expone. `emitHarborEvidence` absorbe fallos
 síncronos o asíncronos del collector: observar nunca cambia ejecución ni
 cleanup.
 
+La vista interactiva Copilot es independiente de esa evidencia durable:
+`CopilotTeamRuntime` conserva sólo snapshots process-local por proyecto y
+`formatCopilotTeamView` combina esos runs con el roster determinista. Eventos
+`assistant.usage` se deduplican con HMAC efímero y los hooks del coordinador
+emiten sólo correlación, estados, modelo/reasoning y contadores nativos, nunca
+contenido. `/team` consume este estado sin iniciar inferencia. El runner directo
+espera `session.idle`/`session.error`; timeout pide abort y, si no hay settlement
+acotado, conserva selección y lock lógico hasta el terminal tardío.
+
 ## Build and generated artifacts
 
 `npm run build` runs only `scripts/build.mjs`: it removes both generated trees,
@@ -354,7 +367,7 @@ same `dist` output.
 | `src/core/{bundled,roles}/*.md` | `dist/core/{bundled,roles}/*.md` and the same paths under the Copilot runtime | Editable roster definitions for every harness. |
 | `dist/core/*.js` | `plugins/agent-foundry/runtime/dist/core/*.js` | Runtime for the single Copilot plugin. |
 | `dist/adapters/{shared,copilot,copilot-mcp}.js` | Same paths under the `agent-foundry` runtime | Global/player-scoped MCP and Copilot preflight. |
-| `dist/adapters/{direct,copilot-coordinator}.js` | `plugins/agent-foundry/runtime/dist/adapters/` only | Client controls and coordinator guard. |
+| `dist/adapters/{direct,copilot-coordinator,copilot-team-runtime,copilot-team-view}.js` | `plugins/agent-foundry/runtime/dist/adapters/` only | Client controls, coordinator guard, process-local activity, and `/team` rendering. |
 | Manifests, `plugins/*/agents`, `plugins/*/skills`, `extension.mjs` | Not generated | Copilot assets reviewed as source. |
 
 The `Copilot runtime is generated byte-for-byte from shared core` test protects

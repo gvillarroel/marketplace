@@ -104,7 +104,7 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                 };
             }
             config.command.scout = {
-                description: "Recruit and join one player from Agent Harbor's limited trusted skill group",
+                description: "Recruit and join one player from Agent Harbor's trusted skill repositories",
                 template: "$ARGUMENTS",
                 agent: scoutPlayer.name,
                 subtask: false,

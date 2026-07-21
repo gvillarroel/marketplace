@@ -185,3 +185,111 @@ ID instead of a `harbor-`-prefixed alias, Pi registers a joined ID immediately,
 and OpenCode delegation revalidates its target against the live roster so a
 player joined during the session can be invoked without weakening ownership
 checks.
+
+## Empirical joined-player command gate
+
+Recorded at `2026-07-21T00:22:00-04:00`.
+
+| Check | Result |
+| --- | --- |
+| Copilot 1.0.73 | Joined personal command and agent discovered in project A; `/new-player` returned `LOCAL-COPILOT-PLAYER-OK`; both absent in project B |
+| OpenCode 1.18.3 | Exact command/agent discovered only in project A; direct invocation returned `LOCAL-OPENCODE-PLAYER-OK`; `team-lead` delegated to it and returned `LOCAL-OPENCODE-DELEGATED-OK` |
+| Pi 0.80.10 | Same RPC process changed from no command to `/new-player` source `extension`; authenticated invocation returned `LOCAL-PI-PLAYER-OK` |
+| Filesystem | Registration and project-A active bytes matched for all runtimes; project B and real user-home registrations remained absent |
+| Offline lifecycle | `join offline-player` passed in 92 ms with all HTTP proxies directed to an unreachable local port |
+| Regression | `npm test` passed 93 tests; typecheck and `git diff --check` passed |
+
+The empirical run also exposed that Pi can settle with a terminal provider error
+without emitting `text_delta`. `PiOrchestrator` now recovers successful text
+from the disposable child's settled transcript and includes bounded terminal
+diagnostics when evidence is truly empty. Reproduction scripts and complete
+local evidence remain under the ignored `work/empirical-join-20260721-0012/`.
+
+## Default gvillarroel repository trust gate
+
+Recorded at `2026-07-21T00:24:14-04:00`.
+
+| Command | Result |
+| --- | --- |
+| `npm test` | Passed: 93 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 23,738.994 ms |
+| `npm run build` and `npm run typecheck` | Passed |
+| Authenticated `node dist/cli.js pi list-skills` | Passed: 70 rows across 7 gvillarroel repositories |
+| Authenticated trusted-skill filter for `zx scripts automation` | Passed: returned 5 validated exact references; an oversized remote skill was excluded fail-closed |
+| `git diff --check` | Passed |
+
+The built-in trust roots and the project fixture now cover `knowledge`,
+`marketplace`, `pi-menton`, `sdlc`, `skills`, `slidev-manim`, and `zx-harness`
+on `refs/heads/main`. Each selected player still receives only its declared
+exact `SKILL.md`, pinned to one commit and isolated from sibling files.
+
+## Pi team observability adversarial gate
+
+Recorded at `2026-07-21T02:41:08-04:00` after four bounded critique/correction
+passes. The final pass reported no actionable high- or medium-severity finding.
+
+| Command or check | Result |
+| --- | --- |
+| `npm run typecheck` | Passed |
+| Focused adapters, contracts and Pi-team suite | Passed: 93 tests, 0 failed, 0 skipped, 0 cancelled |
+| `npm run test:ts` | Passed: 124 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 20,504.530 ms |
+| `npm test` clean-build canonical gate | Passed: 124 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 24,639.153 ms; installed Copilot, OpenCode and Pi smokes passed |
+| Native Pi 0.80.10 RPC | Passed: real command discovery exposed `/team`; canonical smoke rendered its roster; manual `/team stop all` returned an informational zero-token success while idle |
+| `npm pack --dry-run --json` | Passed: 113 entries, including compiled Pi team runtime/view and terminal-layout modules |
+| `git diff --check` | Passed |
+
+The gate covers searchable roster and live mission views, root/child hierarchy,
+native model/thinking/usage with truthful lower bounds, per-root and stop-all
+cancellation, stale repair, bounded history/concurrency, double-booking,
+post-commit scout reconciliation, no-ghost preflight, metadata/task privacy,
+lazy catalog isolation, wide Unicode and ANSI-safe 96-cell wrapping, and
+privacy-safe event/transcript usage deduplication. Deterministic controls remain
+zero-model paths.
+
+## Copilot team observability adversarial gate
+
+Recorded at `2026-07-21T04:18:29-04:00` after iterative manual review and an
+independent bounded critic pass. The final critic verdict was `CLEAN` for the
+three last reproduced race families.
+
+| Command or check | Result |
+| --- | --- |
+| `npm run typecheck` | Passed |
+| Copilot runtime, view, lifecycle, extension-contract, and behavioral focal | Passed: 22 tests; the runner grouped 19 host-race scenarios |
+| Independent final re-audit | Passed: manual-selection event lag, pre-timeout terminal reconciliation, and contiguous tool-complete/session-idle ordering; no remaining reproduction in scope |
+| `npm test` clean-build canonical gate | Passed: 154 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 23,414.160 ms; installed Copilot, OpenCode, and Pi smokes passed without a model request |
+| `npm audit --audit-level=high` | Passed: 0 vulnerabilities |
+| `npm pack --dry-run --json` | Passed: 120 entries, including generated Copilot runtime/view adapters and observability documentation |
+| `git diff --check` | Passed |
+
+The gate covers a zero-model `/team` view, native-registry readiness, truthful
+starting/working/waiting/cleaning states, searchable roster and hierarchy,
+32-row bounded rendering, concurrent personal-profile reads, model/reasoning
+provenance, native usage lower bounds, task redaction, project isolation,
+double-booking and root capacity, child admission reservation, stop-by-root or
+child ID, selection restoration, refresh generations, third-party guard
+compatibility, terminal buffering, and synchronous child-before-root terminal
+ordering. Interactive output failures are surfaced; notification backlog and
+host RPC hangs remain bounded.
+
+### Copilot control-surface corrective pass
+
+Recorded at `2026-07-21T04:34:55-04:00` after a fresh installed-SDK reproduction
+and one bounded critic/fix/re-audit loop.
+
+| Command or check | Result |
+| --- | --- |
+| `npm run typecheck` and `npm run build` | Passed |
+| Copilot runtime, view, lifecycle, extension-contract, and behavioral focal | Passed: 23 tests; the runner grouped 21 host/UX scenarios |
+| Fresh real Copilot SDK sequence | Passed: first `/team`, `/team design`, `/bench list design`, `/join`, `/retire`, and retired `/player`; usage stayed byte-identical with no assistant events |
+| Active-work `/bench` safety regression | Passed: literal filters `stop` and `stop all` rendered enriched zero-model views with `abort=0`; the following explicit `/team stop <child-id>` produced the sole expected abort |
+| Independent bounded re-audit | `CLEAN` after the `/bench` parser separation |
+| `npm test` clean-build canonical gate | Passed: 155 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 24,609.251 ms; installed Copilot, OpenCode, and Pi discovery passed |
+| `npm audit --audit-level=high` | Passed: 0 vulnerabilities |
+| `npm pack --dry-run --json --silent` | Passed: 120 entries, 176,725 bytes packed, 802,591 bytes unpacked |
+| `git diff --check` | Passed |
+
+The corrective pass also verifies bounded authoritative recovery on the first
+`/team`, enriched `/bench list <filter>` output, path-free immediate/restart
+guidance after `/join`, concise `/retire`, and class-specific inactive-player
+remediation for bundled benched, personal benched, stale/conflicted, and
+missing/retired identities.

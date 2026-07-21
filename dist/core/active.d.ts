@@ -23,6 +23,12 @@ export declare function listOwnedActiveIds(harness: HarnessName, project: string
 export declare function listManagedActiveIds(harness: HarnessName, project: string): string[];
 /** Lists fixed roles first, followed by canonical project profiles that are safe to invoke. */
 export declare function listInvocablePlayerIds(harness: HarnessName, project: string): string[];
+/**
+ * Returns an invocation-scoped snapshot of every fixed/current player. Active
+ * definitions are parsed once during the scan so callers cannot create a run
+ * and then lose its preparation to a second filesystem read.
+ */
+export declare function listInvocablePlayers(harness: HarnessName, project: string): InvocablePlayerIdentity[];
 /** Loads one active player only if it is owned, revision-4, validated, and canonical. */
 export declare function loadManagedActivePlayer(harness: HarnessName, project: string, id: unknown): PlayerDefinition;
 /** Pi-specific convenience wrapper for loading a canonical active player. */

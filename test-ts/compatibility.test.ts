@@ -46,6 +46,7 @@ async function executable(name: string): Promise<Launch | undefined> {
 }
 
 interface Result { code: number | null; stdout: string; stderr: string; timedOut: boolean }
+interface RpcResult extends Result { events: any[] }
 
 interface AcpInspection { transcript: string; serverRequests: string[] }
 
@@ -64,6 +65,63 @@ async function run(launch: Launch, args: string[], options: { cwd: string; env?:
     child.on("error", reject);
     const timer = setTimeout(() => { timedOut = true; child.kill(); }, options.timeout ?? 60_000);
     child.on("close", (code) => { clearTimeout(timer); resolve({ code, stdout, stderr, timedOut }); });
+  });
+}
+
+async function runInteractiveRpc(
+  launch: Launch,
+  args: string[],
+  options: {
+    cwd: string;
+    env?: NodeJS.ProcessEnv;
+    timeout?: number;
+    requests: readonly Record<string, unknown>[];
+    done(events: readonly any[]): boolean;
+  },
+): Promise<RpcResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(launch.command, [...launch.prefix, ...args], {
+      cwd: options.cwd,
+      env: options.env,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = ""; let stderr = ""; let pending = ""; let timedOut = false; let ending = false;
+    const events: any[] = [];
+    let requestIndex = 0;
+    const sendNext = () => {
+      if (requestIndex >= options.requests.length) return;
+      if (requestIndex > 0) {
+        const priorId = options.requests[requestIndex - 1].id;
+        if (!events.some((item) => item.type === "response" && item.id === priorId)) return;
+      }
+      child.stdin.write(`${JSON.stringify(options.requests[requestIndex])}\n`);
+      requestIndex += 1;
+    };
+    const maybeEnd = () => {
+      if (!ending && options.done(events)) { ending = true; child.stdin.end(); }
+    };
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+      stdout += chunk;
+      pending += chunk;
+      const lines = pending.split(/\r?\n/u);
+      pending = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try { events.push(JSON.parse(line)); } catch { /* Caller will fail on missing expected events. */ }
+      }
+      sendNext();
+      maybeEnd();
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    child.stdin.on("error", () => { /* Ignore EPIPE after a completed RPC scenario. */ });
+    child.on("error", reject);
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, options.timeout ?? 60_000);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr, timedOut, events });
+    });
+    sendNext();
   });
 }
 
@@ -184,6 +242,8 @@ async function inspectCopilotDirectExtension(launch: Launch, sandbox: string, wo
   });
   let session: Awaited<ReturnType<CopilotClient["createSession"]>> | undefined;
   const events: string[] = [];
+  const extensionMessages: string[] = [];
+  const usage = { calls: 0, input: 0, output: 0, reasoning: 0 };
   try {
     await client.start();
     session = await client.createSession({
@@ -195,7 +255,15 @@ async function inspectCopilotDirectExtension(launch: Launch, sandbox: string, wo
       infiniteSessions: { enabled: false },
       skipCustomInstructions: true,
     });
-    session.on((event) => { events.push(event.type); });
+    session.on((event) => {
+      events.push(event.type);
+      if (typeof event.data?.message === "string") extensionMessages.push(event.data.message);
+      if (event.type !== "assistant.usage") return;
+      usage.calls += 1;
+      usage.input += event.data.inputTokens ?? 0;
+      usage.output += event.data.outputTokens ?? 0;
+      usage.reasoning += event.data.reasoningTokens ?? 0;
+    });
     let listed = await session.rpc.commands.list();
     let direct = listed.commands.find((command) => command.name === "bench" && command.kind === "client");
     for (let attempt = 0; !direct && attempt < 30; attempt += 1) {
@@ -207,12 +275,69 @@ async function inspectCopilotDirectExtension(launch: Launch, sandbox: string, wo
     const expectedCommands = [...rolePlayers.keys(), ...bundledPlayers.keys()];
     assert.ok(expectedCommands.every((name) => listed.commands.some((command) => command.name === name && command.kind === "client")));
     assert.ok(listed.commands.some((command) => command.name === "scout" && command.kind === "client"));
+    assert.ok(listed.commands.some((command) => command.name === "team" && command.kind === "client"));
+    assert.ok(listed.commands.some((command) => command.name === "player" && command.kind === "client"));
+
+    const beforeTeam = { ...usage };
+    const beforeMetrics = await session.rpc.usage.getMetrics();
+    const firstTeamMessage = extensionMessages.length;
+    const team = await session.rpc.commands.invoke({ name: "team", input: "" });
+    assert.equal(team.kind, "completed");
+    const firstTeamOutput = extensionMessages.slice(firstTeamMessage).findLast((message) => message.includes("Agent Harbor Copilot team"));
+    assert.ok(firstTeamOutput, "first /team emitted no enriched view");
+    assert.match(firstTeamOutput, /Team: 3 ready · 0 active · 6 benched · 0 unhealthy/u);
+    assert.doesNotMatch(firstTeamOutput, /discovery\/coordinator is not ready|reload the Copilot session/u);
+
+    const teamDesignMessage = extensionMessages.length;
+    assert.equal((await session.rpc.commands.invoke({ name: "team", input: "design" })).kind, "completed");
+    const teamDesignOutput = extensionMessages.slice(teamDesignMessage).findLast((message) => message.includes("Agent Harbor Copilot team"));
+    assert.match(teamDesignOutput ?? "", /design · bundled · bench/u);
+
+    const benchDesignMessage = extensionMessages.length;
+    assert.equal((await session.rpc.commands.invoke({ name: "bench", input: "list design" })).kind, "completed");
+    const benchDesignOutput = extensionMessages.slice(benchDesignMessage).findLast((message) => message.includes("Agent Harbor Copilot bench"));
+    assert.match(benchDesignOutput ?? "", /design · bundled · bench/u);
+    assert.match(benchDesignOutput ?? "", /Capacity:/u);
+    assert.doesNotMatch(benchDesignOutput ?? "", /^design \| bundled \| bench$/mu);
+    assert.ok((benchDesignOutput ?? "").split("\n").every((line) => line.length <= 96));
+
+    const personalId = "sdk-ux-reviewer";
+    const definition = JSON.stringify({
+      name: personalId,
+      description: "Review user-facing behavior",
+      prompt: "Review safely",
+      tools: ["read", "search"],
+    });
+    const joinMessage = extensionMessages.length;
+    assert.equal((await session.rpc.commands.invoke({ name: "join", input: definition })).kind, "completed");
+    const joinOutput = extensionMessages.slice(joinMessage).findLast((message) => message.includes("Agent Harbor /join"));
+    assert.match(joinOutput ?? "", /joined · personal · ready/u);
+    assert.match(joinOutput ?? "", new RegExp(`Run now: /player ${personalId} <task>`, "u"));
+    assert.match(joinOutput ?? "", new RegExp(`After restarting Copilot: /${personalId} <task>`, "u"));
+    assert.doesNotMatch(joinOutput ?? "", /registration:|active:/u);
+    assert.equal((joinOutput ?? "").includes(sandbox), false);
+    assert.equal((joinOutput ?? "").includes(workingDirectory), false);
+    assert.equal((await session.rpc.commands.invoke({ name: "retire", input: personalId })).kind, "completed");
+    await assert.rejects(
+      () => session!.rpc.commands.invoke({ name: "player", input: `${personalId} inspect again` }),
+      /missing or retired.*re-run \/join.*inspect \/team sdk-ux-reviewer/is,
+    );
+    await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 50));
+    assert.deepEqual(usage, beforeTeam, "/team must not create or consume a model call");
+    assert.deepEqual(await session.rpc.usage.getMetrics(), beforeMetrics, "/team must leave native usage metrics unchanged");
+    await assert.rejects(() => session!.rpc.commands.invoke({ name: "player", input: "" }), /usage: \/player <id> <task>/i);
+    await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 50));
+    assert.deepEqual(usage, beforeTeam, "invalid /player preflight must not create or consume a model call");
+    assert.deepEqual(await session.rpc.usage.getMetrics(), beforeMetrics, "invalid /player must leave native usage metrics unchanged");
 
     const initial = await session.rpc.agent.list();
     for (const id of rolePlayers.keys()) assert.ok(initial.agents.some((agent) => agent.name === id || agent.id.endsWith(`:${id}`)), id);
     assert.ok(initial.agents.some((agent) => agent.id === "agent-foundry:talent-scout"), "talent-scout");
     for (const id of bundledPlayers.keys()) assert.ok(!initial.agents.some((agent) => agent.name === id || agent.id === id), `${id} must start on the bench`);
-    await assert.rejects(() => session!.rpc.commands.invoke({ name: "portfolio-management", input: "must not reach a model" }), /not active/i);
+    await assert.rejects(
+      () => session!.rpc.commands.invoke({ name: "portfolio-management", input: "must not reach a model" }),
+      /benched|not active/i,
+    );
 
     const invoked = await session.rpc.commands.invoke({ name: "bench", input: "on all" });
     assert.equal(invoked.kind, "completed");
@@ -344,6 +469,8 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot.js")),
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-mcp.js")),
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-coordinator.js")),
+    access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-team-runtime.js")),
+    access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-team-view.js")),
   ]);
   const contract = await readFile(join(plugins, "agent-foundry", "skills", "contract", "SKILL.md"), "utf8");
   assert.match(contract, /agent-harbor\(control\)/);
@@ -374,11 +501,16 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
   assert.match(extension, /event\.phase !== "target\.resolved"/);
   assert.match(extension, /type: "agent-harbor-guard"/);
   assert.match(extension, /ephemeral: true/);
-  assert.match(extension, /await coordinator\.refresh\(\)/);
+  assert.match(extension, /boundedHostCall\("Copilot coordinator (?:refresh|startup refresh)", \(\) => coordinator\.refresh\(\)\)/);
   for (const name of deterministicCommandNames) assert.match(extension, new RegExp(`\\["${name}"`));
-  assert.equal(extension.match(/sendAndWait/g)?.length, 1, "only explicit player commands may send one prompt");
+  assert.equal(extension.match(/session\.send\(/g)?.length, 1, "only explicit player commands may send one prompt");
+  assert.doesNotMatch(extension, /sendAndWait/);
+  assert.match(extension, /name: "team"/);
+  assert.match(extension, /name: "player"/);
+  assert.match(extension, /CopilotTeamRuntime/);
+  assert.match(extension, /formatCopilotTeamView/);
   assert.match(extension, /agent\.select/);
-  assert.match(extension, /name: id/);
+  assert.match(extension, /name: agent\.id/);
   assert.doesNotMatch(extension, /createSession|\.prompt\(/);
   assert.doesNotMatch(extension, /[\[\"]contract[\]\"]\s*,/);
   assert.match(extension, /catch \(error\)[\s\S]*throw error;/);
@@ -403,7 +535,15 @@ test("Copilot runtimes contain exact physical byte copies of their shared build 
   const roleFiles = ["crafter.md", "team-lead.md"];
   const runtimes = [{
     name: "agent-foundry",
-    adapters: ["copilot-coordinator.js", "copilot-mcp.js", "copilot.js", "direct.js", "shared.js"],
+    adapters: [
+      "copilot-coordinator.js",
+      "copilot-mcp.js",
+      "copilot-team-runtime.js",
+      "copilot-team-view.js",
+      "copilot.js",
+      "direct.js",
+      "shared.js",
+    ],
   }] as const;
 
   for (const runtime of runtimes) {
@@ -787,16 +927,32 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
       const listed = await run(pi!, ["list"], { cwd: directory, env, timeout: 30_000 });
       succeeded(listed);
       assert.ok(listed.stdout.toLowerCase().includes(root.toLowerCase()));
-      const initialRpc = await run(pi!, ["--no-session", "-e", join(dist, "adapters", "pi.js"), "--mode", "rpc"], {
-        cwd: directory, env, timeout: 60_000, input: '{"type":"get_commands"}\n',
+      const initialRpc = await runInteractiveRpc(pi!, ["--no-session", "-e", join(dist, "adapters", "pi.js"), "--mode", "rpc"], {
+        cwd: directory,
+        env,
+        timeout: 60_000,
+        requests: [
+          { id: "commands", type: "get_commands" },
+          { id: "team", type: "prompt", message: "/team" },
+        ],
+        done: (events) => events.some((item) => item.id === "team" && item.type === "response")
+          && events.some((item) => item.type === "extension_ui_request" && item.method === "notify"),
       });
       succeeded(initialRpc);
-      const initialResponse = initialRpc.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+      const initialEvents = initialRpc.events;
+      const initialResponse = initialEvents
         .find((item) => item.type === "response" && item.command === "get_commands");
       assert.ok(initialResponse?.success);
       const initialNames = new Set<string>(initialResponse.data.commands.map((command: any) => command.name));
       assert.ok([...commands, ...rolePlayers.keys()].every((name) => initialNames.has(name)));
+      assert.ok(initialNames.has("team"));
       assert.ok([...bundledPlayers.keys()].every((name) => !initialNames.has(name)), "bundled Pi players must start on the bench");
+      const teamNotice = initialEvents.find((item) => item.type === "extension_ui_request" && item.method === "notify");
+      assert.equal(teamNotice?.notifyType, "info");
+      assert.match(teamNotice?.message ?? "", /Agent Harbor team .*0 model tokens/u);
+      assert.match(teamNotice?.message ?? "", /team-lead · manager · ready/u);
+      assert.match(teamNotice?.message ?? "", /talent-scout \(\/scout\) · utility · ready/u);
+      assert.ok(initialEvents.some((item) => item.id === "team" && item.type === "response" && item.success));
 
       const bench = await run(pi!, ["--no-session", "-e", join(dist, "adapters", "pi.js"), "-p", "/bench on all"], { cwd: directory, env, timeout: 60_000 });
       succeeded(bench);
@@ -809,6 +965,28 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
       assert.ok(response?.success);
       const names = new Set<string>(response.data.commands.map((command: any) => command.name));
       assert.ok([...commands, ...rolePlayers.keys(), ...bundledPlayers.keys()].every((name) => names.has(name)));
+
+      const staleRpc = await runInteractiveRpc(pi!, ["--no-session", "-e", join(dist, "adapters", "pi.js"), "--mode", "rpc"], {
+        cwd: directory,
+        env,
+        timeout: 60_000,
+        requests: [
+          { id: "off", type: "prompt", message: "/bench off design" },
+          { id: "stale", type: "prompt", message: "/design must not reach a model" },
+        ],
+        done: (events) => events.some((item) => item.id === "stale" && item.type === "response"),
+      });
+      succeeded(staleRpc);
+      assert.ok(staleRpc.events.some((item) => item.id === "off" && item.type === "response" && item.success));
+      const staleResponse = staleRpc.events.find((item) => item.id === "stale" && item.type === "response");
+      assert.equal(staleResponse?.success, true, "Pi reports handled extension commands as successful prompt responses");
+      const staleNotice = staleRpc.events.find((item) => item.type === "extension_ui_request" && item.method === "notify" && item.notifyType === "error");
+      assert.equal(staleNotice, undefined, "RPC duplicated its structured failure through notify");
+      const staleError = staleRpc.events.find((item) => item.type === "extension_error" && item.event === "command");
+      assert.match(JSON.stringify(staleError), /Preflight stopped · no model was called · 0 model tokens/u);
+      assert.match(JSON.stringify(staleError), /Usage: \/design <task>.*Cost: 1 model child when active/su);
+      assert.equal(staleRpc.events.filter((item) => item.type === "extension_error" && item.event === "command").length, 1);
+      assert.equal(staleRpc.events.some((item) => item.type === "message_end" && item.message?.role === "assistant"), false);
     }),
   ]);
 });

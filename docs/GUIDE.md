@@ -34,30 +34,40 @@ copilot plugin update agent-foundry
 ### Use
 
 Start Copilot with `copilot --experimental` after installing or updating. The
-plugin extension then registers `/bench`, `/join`, `/retire`, and
+plugin extension then registers `/team`, `/bench`, `/join`, `/retire`, and
 `/list-skills` as direct client commands: they execute TypeScript without a
-model request or model tokens. `/contract` deliberately remains model-backed
-because it creates exactly one child. Use Copilot's native `/agent` selector
-for `team-lead`, `crafter`, or players activated through
-`/bench`.
+model request or model tokens. `/team` shows the roster, live root and child
+work, effective model/reasoning, native usage, lead capacity, and the last
+mission; `/team stop <run-id|all>` cancels controlled project work. `/contract`
+deliberately remains model-backed because it creates exactly one child. Use
+Copilot's native `/agent` selector for `team-lead`, `crafter`, or players
+activated through `/bench`.
 
 For a prompt sent straight to one named player, use
 `/<id> <task>`—for example `/design design the bounded change`.
 This selects that exact agent and sends one prompt without a separate routing
 inference. Fixed and bundled aliases are registered at startup; an inactive
-bundled player is rejected before inference. Restart the session after adding
-a personal player so its alias can be discovered. `/team-lead` is
+bundled player is rejected before inference. `/player <id> <task>` resolves the
+current active roster dynamically, so a newly joined personal player is usable
+immediately; reload only to add its convenience `/<id>` alias. `/team-lead` is
 deliberately different: the coordinator may run the smallest necessary
 sequence of one to six named children. The extension guards Copilot's native
 `task` calls in code: only exact active Agent Harbor targets are accepted,
-nested or concurrent delegation is denied, and the count resets per user
-prompt.
+nested or concurrent delegation and persistent-member double-booking are
+denied before native child work, and the count resets per user prompt.
+
+Direct player runs attach native usage and terminal listeners before sending
+one prompt, then restore the previous selection. A timeout requests abort and
+waits for a bounded terminal event; if Copilot does not settle, the selection
+stays pinned and another player cannot start until the late terminal event.
+See [Copilot team observability](COPILOT-TEAM-OBSERVABILITY.md) for telemetry,
+privacy, and cleanup semantics.
 
 Copilot may request one extension-capability approval when these coordinator
 hooks first attach. That host permission exchange is deterministic and does not
 send a model prompt.
 
-The four deterministic controls are deliberately **not** published as Copilot
+The five deterministic controls are deliberately **not** published as Copilot
 skills, so they cannot silently fall back to a model-routed path and spend
 tokens. If extensions are disabled, use the package CLI directly—for example
 `agent-harbor copilot bench list`—or enable extensions with `/experimental on`
@@ -187,11 +197,12 @@ After publishing a new Git revision, install that revision again (or run `pi ins
 
 ### Use
 
-Invoke `/bench`, `/join`, `/retire`, or `/list-skills` directly; their native
-handlers perform no model request. `/contract` creates exactly one child by
-design. Invoke `/team-lead <task>`, `/crafter <task>`, any activated bundled
-SDLC companion, or any active personal
-player directly.
+Invoke `/team`, `/bench`, `/join`, `/retire`, or `/list-skills` directly; their
+native handlers perform no model request. `/team` shows the roster, active roots
+and children, effective model/thinking, native usage and last mission. It can
+also stop one run or all project work. `/contract` creates exactly one child by
+design. Invoke `/team-lead <task>`, `/crafter <task>`, any activated bundled SDLC
+companion, or any active personal player directly.
 
 `/team-lead` can delegate sequentially to as many as six active specialists
 when the task genuinely needs multiple stages. Each delegation is
@@ -339,6 +350,8 @@ The suite also exercises exact dispatch of all eight OpenCode roster IDs, direct
 
 | Command | Purpose |
 | --- | --- |
+| `/team` (Copilot, Pi) | Show roster, live work, model/thinking, native usage and stop controls. |
+| `/player <id> <task>` (Copilot) | Run any currently active player directly, including one just joined. |
 | `/bench` | List players or set their current-folder state with `on` and `off`. |
 | `/join` | Register a recurring player at user level and activate it here. |
 | `/retire` | Remove one personal registration and its managed local copy. |
@@ -350,7 +363,7 @@ The inference budget is part of the executable contract:
 
 | Operation | Required model budget |
 | --- | --- |
-| View or change the bench, join, retire | 0 model requests on a direct surface |
+| View the Pi team; view or change the bench; join; retire | 0 model requests on a direct surface |
 | List trusted skills | 0 model requests; authenticated `gh` network I/O is allowed |
 | Scout and join a player | One recruiter model session; skill filtering and the final join are deterministic scoped tools |
 | Valid contract | Exactly one child model session |
@@ -406,7 +419,8 @@ skills: [{"kind":"github","name":"zx-example-author","repo":"gvillarroel/zx-harn
 ```
 
 `repo` paths are relative to the project where the player runs. GitHub
-references must match the exact trusted execution allowlist. Add or edit a file
+references must match an exact trusted reference or an exact path under a
+trusted repository root. Add or edit a file
 and rebuild to change the corresponding roster; duplicate names/orders,
 symlinks, unknown fields, duplicate skill references, and untrusted GitHub
 skills fail the build or startup closed. Bundled definitions remain
@@ -425,8 +439,9 @@ The model-assisted shortcut is:
 
 `/scout` selects the fixed internal `talent-scout` agent. That agent receives
 no filesystem, shell, ambient skill, delegation, contract, or general
-lifecycle tools. It can only filter the exact `trustedSkills` group by public
-frontmatter metadata and call one closed-schema `join`. It may issue at most
+lifecycle tools. It can only enumerate the built-in trusted repositories and
+filter their exact skill references by public frontmatter metadata before
+calling one closed-schema `join`. It may issue at most
 three filter queries and one join. The generated player is persistent and
 otherwise follows the same validation, ownership, collision, and activation
 rules as a literal `/join`.
@@ -463,7 +478,8 @@ collision and is never overwritten or deleted.
 
 `skills` accepts at most three references with unique names. A repository
 reference points to one exact `SKILL.md` relative to the current project root;
-a GitHub reference must match the trusted exact-reference catalog. A portable
+a GitHub reference must match an exact reference or repository root in the
+built-in trust policy. A portable
 player with skills must explicitly include `read`, but does not receive
 `execute` merely to load them. Omitted `skills` and `skills: []` both mean an
 empty skill group:
@@ -545,22 +561,36 @@ immutable branch snapshot without downloading their bodies. The optional
 `name` field overrides the folder-derived name only for an exact `skill` scope.
 Use `"sources": []` to display an empty catalog.
 
-Catalog visibility is intentionally separate from execution trust. Showing a
-repository or folder does not authorize every discovered skill for a player.
-The execution allowlist remains a set of explicit exact references in
-`src/core/defaults.ts`. The included policy trusts
-`gvillarroel/zx-harness/skills/zx-example-author/SKILL.md` on
-`refs/heads/main`. Repository references are not global or folder-wide: each
-player names one project-relative `SKILL.md`, and that file is copied only for
-that player's invocation. List GitHub catalog snapshots without downloading
-their bodies:
+The project catalog file is loaded only when `/list-skills` runs. A malformed
+or oversized catalog therefore reports an error for that command without
+blocking `/team`, `/bench`, `/join`, `/retire`, or `/contract`.
+
+Description lookup is capped at 64 skills per command. For larger catalogs,
+Agent Harbor applies a supplied name/repository/path filter before requesting
+descriptions; an over-broad filter fails with an instruction to narrow it. The
+default 70-skill catalog therefore supports filtered description searches
+without loading every body. Terminal tables wrap at 96 terminal cells, keeping
+ANSI sequences and grapheme clusters intact and counting wide CJK/emoji as two.
+
+Project-controlled catalog visibility is separate from execution trust.
+Showing a repository or folder does not authorize its skills unless the
+built-in execution policy also names that exact reference or repository root.
+The included policy trusts every exact `SKILL.md` on
+`refs/heads/main` in the seven gvillarroel repositories that currently contain
+skills: `knowledge`, `marketplace`, `pi-menton`, `sdlc`, `skills`,
+`slidev-manim`, and `zx-harness`. Each player still names one exact path, and
+only that file is copied for that player's invocation. List GitHub catalog
+snapshots without downloading their bodies:
 
 ```text
 /list-skills
 /list-skills zx
-/list-skills --descriptions
-/list-skills --descriptions automation
+/list-skills --descriptions zx
 ```
+
+The unfiltered `/list-skills --descriptions` form is available when the
+project-visible catalog contains at most 64 skills. Larger catalogs require a
+name, repository, or path filter, as in the example above.
 
 The command uses the developer's authenticated `gh` CLI. It resolves the
 configured branch before listing but keeps commit/blob details out of the
@@ -570,10 +600,11 @@ There are therefore two deliberately separate lists to edit:
 
 - `.agent-harbor/skill-sources.json` in the current project controls what
   `/list-skills` shows and accepts repository, folder, or exact-skill scopes.
-- `trustedSkills` in `src/core/defaults.ts` controls the exact skills that may
-  be assigned to a player and that `/scout` is allowed to return. It accepts
-  only exact `SKILL.md` references; changing it requires rebuilding the
-  package. A broad visible repository never becomes executable implicitly.
+- `trustedSkills` and `trustedSkillRepositories` in `src/core/defaults.ts`
+  control the exact references and repository roots that may be assigned to a
+  player and that `/scout` may return. Changing them requires rebuilding the
+  package. A project-local visible repository never becomes executable unless
+  it is also one of those built-in trust roots.
 
 ## Agents
 

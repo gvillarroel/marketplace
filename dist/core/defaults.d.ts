@@ -2,9 +2,10 @@
  * Built-in SDLC players, fixed coordination roles, and trusted remote skill references.
  * These definitions are policy-bearing defaults consumed by every harness renderer.
  */
-import type { GithubSkill, GithubSkillCatalogSource, PlayerDefinition } from "./types.js";
-/** Exact GitHub skill references permitted in player definitions; branch heads are pinned when loaded. */
-export declare const trustedSkills: readonly GithubSkill[];
+import type { GithubSkillCatalogSource, GithubSkillRepositoryTrust, PlayerDefinition, TrustedGithubSkills } from "./types.js";
+/** Every gvillarroel repository currently containing at least one `SKILL.md`. */
+export declare const trustedSkillRepositories: readonly GithubSkillRepositoryTrust[];
+export declare const trustedSkills: TrustedGithubSkills;
 /** Ordered lifecycle peers loaded from editable Markdown definitions. */
 export declare const bundledPlayers: ReadonlyMap<string, PlayerDefinition>;
 /** Default visible catalog; a project's `.agent-harbor/skill-sources.json` replaces it. */

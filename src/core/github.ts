@@ -9,10 +9,13 @@ import { Buffer } from "node:buffer";
 import { promisify } from "node:util";
 import { posix } from "node:path";
 import { isHarborId } from "./identity.js";
-import type { GithubResolver, GithubSkill, GithubSkillCatalogEntry, GithubSkillCatalogSource } from "./types.js";
+import type { GithubResolver, GithubSkill, GithubSkillCatalogEntry, GithubSkillCatalogSource, TrustedGithubSkills } from "./types.js";
 
 const execute = promisify(execFile);
 const segmentPattern = /^[A-Za-z0-9._-]+$/;
+
+/** A remote `SKILL.md` that cannot safely participate in execution trust. */
+export class InvalidSkillDocumentError extends Error {}
 
 function safeSegments(value: string, firstAlphanumeric: boolean): boolean {
   if (!value || value.length > 240 || value.includes("..")) return false;
@@ -74,7 +77,7 @@ export function validateGithubSkillCatalogSource(value: unknown): GithubSkillCat
 type GhCommand = (file: string, args: readonly string[], signal?: AbortSignal, timeoutMs?: number) => Promise<string | Uint8Array>;
 const runGh: GhCommand = async (file, args, signal, timeoutMs = 20_000) => (await execute(file, [...args], {
   encoding: "buffer",
-  maxBuffer: 64 * 1024,
+  maxBuffer: 256 * 1024,
   signal,
   timeout: timeoutMs,
 })).stdout;
@@ -97,30 +100,32 @@ function parseScalar(value: string, field: string, sourceLabel: string): string 
       ? value.slice(1, -1).replace(/''/g, "'") : value;
     if (typeof parsed !== "string" || parsed.includes("\0") || parsed.includes("\n")) throw new Error();
     return parsed;
-  } catch { throw new Error(`${sourceLabel} skill has invalid ${field} frontmatter`); }
+  } catch { throw new InvalidSkillDocumentError(`${sourceLabel} skill has invalid ${field} frontmatter`); }
 }
 
 /** Parses bounded public frontmatter and the private instruction body. */
 export function parseSkillDocument(raw: string | Uint8Array, expectedName?: string, sourceLabel = "GitHub"): { name: string; description: string; body: string } {
   const source = bytes(raw);
-  if (source.length === 0 || source.length > 18_000) throw new Error(`${sourceLabel} skill body must be 1..18000 UTF-8 bytes`);
-  const document = text(source).replace(/\r\n/g, "\n");
-  if (!document.startsWith("---\n") || document.includes("\0")) throw new Error(`${sourceLabel} skill requires first-line YAML frontmatter`);
+  if (source.length === 0 || source.length > 18_000) throw new InvalidSkillDocumentError(`${sourceLabel} skill body must be 1..18000 UTF-8 bytes`);
+  let document: string;
+  try { document = text(source).replace(/\r\n/g, "\n"); }
+  catch { throw new InvalidSkillDocumentError(`${sourceLabel} skill body must be valid UTF-8`); }
+  if (!document.startsWith("---\n") || document.includes("\0")) throw new InvalidSkillDocumentError(`${sourceLabel} skill requires first-line YAML frontmatter`);
   const end = document.indexOf("\n---\n", 4);
-  if (end < 0 || end > 4_096) throw new Error(`${sourceLabel} skill has invalid frontmatter`);
+  if (end < 0 || end > 4_096) throw new InvalidSkillDocumentError(`${sourceLabel} skill has invalid frontmatter`);
   const names = document.slice(4, end).split("\n").filter((line) => line.startsWith("name:"));
-  if (names.length !== 1) throw new Error(`${sourceLabel} skill must declare exactly one top-level name`);
+  if (names.length !== 1) throw new InvalidSkillDocumentError(`${sourceLabel} skill must declare exactly one top-level name`);
   const name = parseScalar(names[0].slice("name:".length).trim(), "name", sourceLabel);
-  if (!isHarborId(name)) throw new Error(`${sourceLabel} skill has invalid name frontmatter`);
-  if (expectedName !== undefined && name !== expectedName) throw new Error(`${sourceLabel} skill name does not match its canonical reference`);
+  if (!isHarborId(name)) throw new InvalidSkillDocumentError(`${sourceLabel} skill has invalid name frontmatter`);
+  if (expectedName !== undefined && name !== expectedName) throw new InvalidSkillDocumentError(`${sourceLabel} skill name does not match its canonical reference`);
   const descriptions = document.slice(4, end).split("\n").filter((line) => line.startsWith("description:"));
-  if (descriptions.length > 1) throw new Error(`${sourceLabel} skill must declare at most one top-level description`);
+  if (descriptions.length > 1) throw new InvalidSkillDocumentError(`${sourceLabel} skill must declare at most one top-level description`);
   const description = descriptions.length
     ? parseScalar(descriptions[0].slice("description:".length).trim(), "description", sourceLabel).trim()
     : "";
-  if (description.length > 1_000) throw new Error(`${sourceLabel} skill description exceeds 1000 characters`);
+  if (description.length > 1_000) throw new InvalidSkillDocumentError(`${sourceLabel} skill description exceeds 1000 characters`);
   const body = document.slice(end + 5).trim();
-  if (!body) throw new Error(`${sourceLabel} skill body is empty`);
+  if (!body) throw new InvalidSkillDocumentError(`${sourceLabel} skill body is empty`);
   return { name, description, body };
 }
 
@@ -129,13 +134,15 @@ export function parseSkillBody(raw: string | Uint8Array, expectedName: string, s
 }
 
 /** Returns whether all security-relevant coordinates exactly match an allowlisted skill reference. */
-export function isTrustedGithubSkill(skill: GithubSkill, trusted: readonly GithubSkill[]): boolean {
+export function isTrustedGithubSkill(skill: GithubSkill, trusted: TrustedGithubSkills): boolean {
   return trusted.some((candidate) => candidate.name === skill.name && candidate.repo.toLowerCase() === skill.repo.toLowerCase() &&
-    candidate.path === skill.path && candidate.track === skill.track);
+    candidate.path === skill.path && candidate.track === skill.track) ||
+    (trusted.repositories ?? []).some((repository) => repository.repo.toLowerCase() === skill.repo.toLowerCase() &&
+      repository.track === skill.track);
 }
 
 /** Validates, allowlists, pins, and loads one GitHub skill through the supplied resolver. */
-export async function loadTrustedGithubSkill(value: unknown, trusted: readonly GithubSkill[], resolver: GithubResolver, signal?: AbortSignal): Promise<{ skill: GithubSkill; commit: string; body: string }> {
+export async function loadTrustedGithubSkill(value: unknown, trusted: TrustedGithubSkills, resolver: GithubResolver, signal?: AbortSignal): Promise<{ skill: GithubSkill; commit: string; body: string }> {
   const skill = validateGithubSkill(value);
   if (!isTrustedGithubSkill(skill, trusted)) throw new Error("untrusted GitHub skill reference");
   signal?.throwIfAborted();
@@ -214,7 +221,7 @@ export class GhResolver implements GithubResolver {
     const raw = text(await this.run(this.executable, [
       "api", "--hostname", "github.com", "--method", "GET",
       `repos/${source.repo}/git/trees/${commit}?recursive=1`,
-      "--jq", 'if .truncated then error("repository tree is truncated; choose a narrower folder") else .tree[] | select(.type == "blob") | [.path, .sha] | @tsv end',
+      "--jq", 'if .truncated then error("repository tree is truncated; choose a narrower folder") else .tree[] | select(.type == "blob" and (.path == "SKILL.md" or (.path | endswith("/SKILL.md")))) | [.path, .sha] | @tsv end',
     ], signal, this.timeoutMs));
     const entries: GithubSkillCatalogEntry[] = [];
     const seen = new Set<string>();
@@ -235,11 +242,15 @@ export class GhResolver implements GithubResolver {
   }
 
   /** Loads a catalog row's description from the immutable commit that produced it. */
-  async describeCatalog(entry: GithubSkillCatalogEntry, signal?: AbortSignal): Promise<string> {
+  async inspectCatalog(entry: GithubSkillCatalogEntry, signal?: AbortSignal): Promise<{ name: string; description: string }> {
     if (!entry.commit || !entry.track) throw new Error("catalog row lacks pinned metadata");
     const raw = await this.rawSkill(entry.repo, entry.path, entry.commit, signal);
-    // Catalog `name` may intentionally be a display override. Execution-trusted
-    // references use describe(), which still enforces the canonical name.
-    return parseSkillDocument(raw).description;
+    const { name, description } = parseSkillDocument(raw);
+    return { name, description };
+  }
+
+  /** Loads only the public description while preserving an optional catalog display name. */
+  async describeCatalog(entry: GithubSkillCatalogEntry, signal?: AbortSignal): Promise<string> {
+    return (await this.inspectCatalog(entry, signal)).description;
   }
 }
