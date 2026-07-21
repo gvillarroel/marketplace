@@ -6,11 +6,11 @@ import test from "node:test";
 import { listInvocablePlayerIds, listManagedActiveIds, requireInvocablePlayer } from "../src/core/active.js";
 import { executeCommand } from "../src/core/commands.js";
 import { bundledPlayers, legacyBundledPlayerIds, trustedSkills } from "../src/core/defaults.js";
-import { GhResolver } from "../src/core/github.js";
+import { GhResolver, validateGithubSkill } from "../src/core/github.js";
 import { Roster } from "../src/core/lifecycle.js";
 import { validatePlayer } from "../src/core/lifecycle.js";
 import { harnessSpec } from "../src/core/profiles.js";
-import { createSkillCapsule, loadConfiguredSkills } from "../src/core/skills.js";
+import { createSkillCapsule, loadConfiguredSkills, validateRepositorySkill } from "../src/core/skills.js";
 import type { GithubResolver, HarnessName, Orchestrator } from "../src/core/types.js";
 
 for (const harness of ["copilot", "opencode", "pi"] as const) {
@@ -64,6 +64,15 @@ for (const harness of ["copilot", "opencode", "pi"] as const) {
   });
 }
 
+test("bench tokenizes commas and spaces, deduplicates IDs, and preserves first-seen output order", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-bench-tokenization-"));
+  const roster = new Roster(harnessSpec("pi", join(root, "home"), join(root, "project")));
+  assert.equal(
+    await roster.bench("on design, portfolio-management, design", bundledPlayers),
+    "design: turned on\nportfolio-management: turned on",
+  );
+});
+
 test("revision 3 personal profiles remain removable but cannot be reactivated without a revision 4 rejoin", async () => {
   for (const harness of ["copilot", "opencode", "pi"] as const) {
     const root = await mkdtemp(join(tmpdir(), `harbor-stale-personal-${harness}-`));
@@ -85,6 +94,23 @@ test("revision 3 personal profiles remain removable but cannot be reactivated wi
     await roster.join({ ...player, replace: true });
     assert.match(await roster.bench("list worker", bundledPlayers), /worker \| personal \| on/);
     assert.ok(listManagedActiveIds(harness, spec.project).includes("worker"));
+  }
+});
+
+test("bench off preserves an owned active profile when its personal registration is missing or corrupt", async () => {
+  for (const registrationState of ["missing", "corrupt"] as const) {
+    const root = await mkdtemp(join(tmpdir(), `harbor-bench-registration-${registrationState}-`));
+    const spec = harnessSpec("pi", join(root, "home"), join(root, "project"));
+    const roster = new Roster(spec);
+    await roster.join({ name: "worker", description: "Worker", prompt: "Work", tools: ["read"] });
+    const registration = join(spec.home, spec.registrationDir, `worker${spec.extension}`);
+    const active = join(spec.project, spec.activeDir, `worker${spec.extension}`);
+    const activeBefore = await readFile(active);
+    if (registrationState === "missing") await rm(registration);
+    else await writeFile(registration, "corrupt registration\n", "utf8");
+
+    await assert.rejects(() => roster.bench("off worker", bundledPlayers), /personal registration missing: worker/);
+    assert.deepEqual(await readFile(active), activeBefore);
   }
 });
 
@@ -263,6 +289,22 @@ test("GitHub resolver pins one branch and one exact blob with two read-only canc
   await assert.rejects(() => new GhResolver().resolve(trustedSkills[0], aborted.signal), (error: any) => error?.name === "AbortError" && error?.code === "ABORT_ERR");
 });
 
+test("GitHub skill loading stops after one invalid branch SHA without fetching content", async () => {
+  const calls: Array<{ file: string; args: readonly string[]; signal?: AbortSignal; timeoutMs?: number }> = [];
+  const controller = new AbortController();
+  const resolver = new GhResolver(async (file, args, signal, timeoutMs) => {
+    calls.push({ file, args, signal, timeoutMs });
+    return "not-a-sha";
+  }, 1_234, "custom-gh");
+
+  await assert.rejects(() => resolver.load(trustedSkills[0], controller.signal), /invalid commit SHA/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls.filter(({ args }) => args.some((arg) => arg.includes("/contents/"))).length, 0);
+  assert.equal(calls[0].file, "custom-gh");
+  assert.equal(calls[0].timeoutMs, 1_234);
+  assert.equal(calls[0].signal, controller.signal);
+});
+
 test("default gh runner enforces its process timeout", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "harbor-gh-timeout-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -327,6 +369,20 @@ test("validation rejects every non-canonical player shape before mutation", () =
     { ...base, unknown: true },
   ];
   for (const value of invalid) assert.throws(() => validatePlayer(value));
+});
+
+test("player and skill validators share the canonical identifier boundaries", () => {
+  const validators: readonly { label: string; validate: (name: unknown) => { name: string } }[] = [
+    { label: "player", validate: (name) => validatePlayer({ name, description: "x", prompt: "x", tools: ["read"] }) },
+    { label: "repository skill", validate: (name) => validateRepositorySkill({ kind: "repo", name, path: "skills/example/SKILL.md" }) },
+    { label: "GitHub skill", validate: (name) => validateGithubSkill({ kind: "github", name, repo: "owner/repo", path: "skills/example/SKILL.md", track: "refs/heads/main" }) },
+  ];
+  for (const name of ["a", "a".repeat(48)]) {
+    for (const validator of validators) assert.equal(validator.validate(name).name, name, `${validator.label}: ${name.length}`);
+  }
+  for (const name of ["a".repeat(49), "A", "a_b", "-a", 1]) {
+    for (const validator of validators) assert.throws(() => validator.validate(name), /invalid/, validator.label);
+  }
 });
 
 test("join rejects an oversized rendered profile before writing", async () => {

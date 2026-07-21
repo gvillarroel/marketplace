@@ -6,7 +6,7 @@ de implementación es `refactor/simplify-agent-harbor`.
 
 ## Línea base
 
-En `main@0dc250d`, la auditoría estática encontró 3.158 líneas físicas de
+En `main@0dc250d`, la auditoría estática encontró 3.158 líneas no vacías de
 TypeScript de producción (incluidos comentarios y declaraciones ambientales). Los
 hotspots principales eran:
 
@@ -61,6 +61,32 @@ La simplificación no puede cambiar:
 6. **Un lifecycle interno OpenCode.** `runAgent` y `run` preparan diferencias
    específicas, pero comparten creación, prompt, extracción, evidencia,
    cleanup y combinación de errores dentro del mismo runtime.
+
+## Resultados medidos
+
+Las cifras comparan `main@0dc250d` con la implementación de esta rama. Las
+“decisiones” siguen la misma heurística de la línea base.
+
+| Métrica | Antes | Después | Resultado |
+| --- | ---: | ---: | --- |
+| `Roster.bench` | 108 líneas / ~62 decisiones | 12 / 1 | El método público sólo coordina parse, plan y transacción. |
+| OpenCode `runAgent + run` | ~186 / 37 | 42 / ~7 | Las diferencias específicas quedan en wrappers pequeños. |
+| Lifecycle OpenCode total | ~186 / 37 | 131 / ~19 | Un solo `create`, `prompt`, `delete` y protocolo de evidencia. |
+| LOC no vacías `src/orchestrators` | 553 | 512 | -41 líneas. |
+| LOC no vacías `src/**/*.ts` | 3.158 | 3.244 | +86 por helpers nombrados y dos módulos canónicos; la meta es complejidad local, no minimizar bytes fuente. |
+| Lecturas por candidato owned en discovery managed | hasta 2 | 1 | `owned` y `managed` derivan del mismo snapshot. |
+
+| Duplicación estática | Antes | Después |
+| --- | ---: | ---: |
+| Literales de la regex canónica de ID | 6 | 1 |
+| Tablas canónicas de layout | 2 | 1 |
+| Llamadas OpenCode `session.create/prompt/delete` | 6 | 3 |
+| Resoluciones branch → commit duplicadas | 2 | 1 |
+| Call sites `cp(...)` en el build | 6 | 2 |
+
+Los hotspots Copilot/Pi fuera del alcance permanecen sin cambios. Se evita así
+mezclar una reducción comprobable con reescrituras simultáneas de las zonas de
+mayor riesgo.
 
 ## Cambios deliberadamente fuera de alcance
 
