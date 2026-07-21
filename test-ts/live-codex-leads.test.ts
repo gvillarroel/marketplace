@@ -26,6 +26,7 @@ import {
   type LiveCodexHarness,
   type LiveLifecycleRecord,
 } from "./support/live-codex-cycle.js";
+import { LIVE_FIXTURE_TOOL_TARGETS } from "./support/live-tool-targets.mjs";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const preferredModel = "gpt-5.3-codex-spark";
@@ -450,7 +451,7 @@ async function runPiRpcCore(
     });
     child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
     child.once("error", rejectPromise);
-    const timer = setTimeout(() => child.kill(), 240_000);
+    const timer = setTimeout(() => child.kill(), LIVE_CODEX_COMMUNICATION_BUDGET.wallTimeMs);
     child.once("close", (code, signal) => {
       clearTimeout(timer);
       if (overflow) return rejectPromise(new Error("Pi RPC exceeded its bounded output limit"));
@@ -503,6 +504,8 @@ function safeTraceDiagnostics(traceText: string): Record<string, unknown> {
       kind: record.kind,
       agent: record.agent ?? (typeof record.raw.sessionSha256 === "string" ? sessionAgents.get(record.raw.sessionSha256) : undefined) ?? null,
       tool: typeof record.raw.tool === "string" ? record.raw.tool : null,
+      targetClass: typeof record.raw.targetClass === "string" ? record.raw.targetClass : null,
+      errorClass: typeof record.raw.errorClass === "string" ? record.raw.errorClass : null,
     })),
   };
 }
@@ -542,8 +545,10 @@ function inspectTrace(run: HarnessRun, acceptanceId: string, prompt: string, pro
     }
     assert.equal(start.raw.completePredecessorCopied, false, `stage ${index + 1} copied the complete predecessor response`);
     assert.ok((start.raw.task as any).utf8Bytes <= 4_096, `stage ${index + 1} prompt exceeded 4 KiB`);
-    assert.ok(numberAt(end, "markerOccurrences") <= 1, `stage ${index + 1} duplicated its preferred marker`);
-    assert.ok(numberAt(end, "allCycleMarkerOccurrences") <= 1, `stage ${index + 1} returned stale handoff markers`);
+    const markerOccurrences = numberAt(end, "markerOccurrences");
+    const allCycleMarkerOccurrences = numberAt(end, "allCycleMarkerOccurrences");
+    assert.ok(markerOccurrences <= 1, `stage ${index + 1} duplicated its preferred marker`);
+    assert.equal(allCycleMarkerOccurrences, markerOccurrences, `stage ${index + 1} returned a foreign or stale handoff marker`);
     assert.ok(numberAt(end, "nonceOccurrences") >= (index === expectedAgents.length - 1 ? 0 : 1)
       && numberAt(end, "nonceOccurrences") <= 3, `stage ${index + 1} returned an inefficient hidden-ID count`);
     assert.equal(numberAt(end, "concurrentDelegations"), 0, `stage ${index + 1} did not settle`);
@@ -606,13 +611,42 @@ function inspectTrace(run: HarnessRun, acceptanceId: string, prompt: string, pro
     "specialist native tool identities do not match",
   );
   const agentForTool = (record: LiveLifecycleRecord): string => record.agent ?? agentSessions.get(stringAt(record, "sessionSha256")) ?? "";
+  const toolsFor = (agent: string) => toolStarts.filter((record) => agentForTool(record) === agent);
+  const targetClassFor = (record: LiveLifecycleRecord): string => stringAt(record, "targetClass");
+  const allowedFixtureTargets = new Set<string>(LIVE_FIXTURE_TOOL_TARGETS);
+  const portfolioTools = toolsFor("portfolio-management");
+  assert.ok(portfolioTools.length >= 1 && portfolioTools.length <= 3,
+    "portfolio-management must make between one and three bounded reads");
+  assert.ok(portfolioTools.every((record) => new Set(["read", "grep", "glob", "find", "ls", "search"]).has(record.raw.tool as string)),
+    "portfolio-management used a non-read/search tool");
+  assert.ok(portfolioTools.every((record) => allowedFixtureTargets.has(targetClassFor(record))),
+    "portfolio-management accessed a target outside the three bounded fixture files");
+  assert.equal(toolsFor("design").length, 0, "design used tools instead of the portfolio handoff");
+  const buildTools = toolsFor("build");
+  const buildReads = buildTools.filter((record) => record.raw.tool === "read");
+  assert.ok(buildReads.length >= 1 && buildReads.length <= 3,
+    "build must make between one and three bounded reads before editing");
+  assert.ok(buildTools.every((record) => new Set(["read", "apply_patch", "edit", "write"]).has(record.raw.tool as string)),
+    "build used an unrelated tool");
+  assert.ok(buildTools.every((record) => allowedFixtureTargets.has(targetClassFor(record))),
+    "build accessed a target outside the three bounded fixture files");
   const mutations = toolStarts.filter((record) => new Set(["apply_patch", "edit", "write"]).has(record.raw.tool as string));
-  assert.ok(mutations.length > 0, "implementation made no observed edit");
-  assert.ok(mutations.every((record) => agentForTool(record) === "smith"), "a non-smith specialist edited the fixture");
+  assert.ok(mutations.length > 0, "build made no observed edit");
+  assert.ok(mutations.every((record) => agentForTool(record) === "build"), "a non-build specialist edited the fixture");
+  assert.ok(mutations.every((record) => targetClassFor(record) === "src/score.js"), "build edited outside src/score.js");
   const shellCalls = toolStarts.filter((record) => record.raw.tool === "bash");
   assert.equal(shellCalls.length, 1, "the cycle must make exactly one shell call");
-  assert.equal(agentForTool(shellCalls[0]), "probe", "only probe may run verification");
-  assert.equal(shellCalls[0].raw.commandClass, "npm-test", "probe did not run exactly npm test");
+  assert.equal(agentForTool(shellCalls[0]), "manage", "only manage may run operational verification");
+  assert.equal(shellCalls[0].raw.commandClass, "npm-test", "manage did not run exactly npm test");
+  assert.equal(toolsFor("manage").length, 1, "manage must use only the single operational verification call");
+  const consumeTools = toolsFor("consume");
+  assert.equal(consumeTools.length, 3, "consume must read exactly the three bounded acceptance files");
+  assert.ok(consumeTools.every((record) => record.raw.tool === "read"), "consume used a non-read acceptance tool");
+  assert.deepEqual(consumeTools.map(targetClassFor).sort(), [...LIVE_FIXTURE_TOOL_TARGETS].sort(),
+    "consume did not read each bounded acceptance file exactly once");
+  const disposeTools = toolsFor("dispose");
+  assert.equal(disposeTools.length, 0,
+    "dispose used a tool instead of the returned handoff while assessing closure and end-of-life readiness");
   const totalToolCalls = starts.length + toolStarts.length;
   assert.ok(totalToolCalls <= LIVE_CODEX_COMMUNICATION_BUDGET.totalToolCalls, "cycle exceeded its tool-call budget");
   for (const agent of expectedAgents) {
@@ -713,7 +747,7 @@ for (const harness of selectedHarnesses) {
         assert.equal(sha256(await readFile(join(fixture.project, path), "utf8")), beforeHashes[path], `${path} changed outside the implementation boundary`);
       }
       const afterScore = sha256(await readFile(join(fixture.project, "src", "score.js"), "utf8"));
-      assert.notEqual(afterScore, beforeScore, "smith did not change src/score.js");
+      assert.notEqual(afterScore, beforeScore, "build did not change src/score.js");
       passedReport = {
         schema: LIVE_CODEX_REPORT_SCHEMA,
         status: "passed",

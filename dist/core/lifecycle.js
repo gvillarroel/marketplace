@@ -3,10 +3,11 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { trustedSkills } from "./defaults.js";
+import { bundledPlayers, legacyBundledPlayerIds, trustedSkills } from "./defaults.js";
 import { validateGithubSkill } from "./github.js";
 const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
-const reserved = new Set(["scout", "sage", "smith", "probe", "guard", "pilot", "team-lead", "repo-cartographer", "crafter", "bench", "join", "retire", "contract", "list-skills"]);
+const legacyBundledIds = new Set(legacyBundledPlayerIds);
+const reserved = new Set([...bundledPlayers.keys(), ...legacyBundledPlayerIds, "team-lead", "repo-cartographer", "crafter", "bench", "join", "retire", "contract", "list-skills"]);
 const allowedTools = new Set(["read", "search", "edit", "execute"]);
 function contained(parent, child) {
     const root = resolve(parent);
@@ -316,6 +317,17 @@ export class Roster {
                 if (!filter || id.includes(filter))
                     rows.push(`${id} | bundled | ${state}`);
             }
+            for (const id of legacyBundledPlayerIds) {
+                if (bundled.has(id) || (filter && !id.includes(filter)))
+                    continue;
+                const { active } = this.paths(id);
+                await rejectSymlinkTraversal(this.spec.project, active);
+                const content = await existing(active);
+                if (content === undefined)
+                    continue;
+                const state = isOwnedProfile(content, id, "sdlc") ? "retired-active" : "conflict";
+                rows.push(`${id} | legacy | ${state}`);
+            }
             const registrationRoot = contained(this.spec.home, join(this.spec.home, this.spec.registrationDir));
             let entries = [];
             try {
@@ -352,12 +364,14 @@ export class Roster {
             throw new Error("invalid player list");
         return this.withMutationLock(async () => {
             const changes = [];
+            const cleanedLegacy = [];
             for (const id of expanded) {
                 const paths = this.paths(id);
                 await Promise.all([rejectSymlinkTraversal(this.spec.home, paths.registration), rejectSymlinkTraversal(this.spec.project, paths.active)]);
                 const active = await existing(paths.active);
                 const definition = bundled.get(id);
-                const roster = definition ? "sdlc" : "personal";
+                const legacy = !definition && legacyBundledIds.has(id);
+                const roster = definition || legacy ? "sdlc" : "personal";
                 if (active !== undefined && !isOwnedProfile(active, id, roster))
                     throw new Error(`unmanaged collision: ${id}`);
                 if (match[1] === "off") {
@@ -366,13 +380,33 @@ export class Roster {
                     changes.push({ path: paths.active });
                     continue;
                 }
+                if (legacy)
+                    throw new Error(`retired bundled player: ${id}; use bench off ${id}`);
                 const source = definition ? this.spec.renderPlayer(definition, "sdlc") : await existing(paths.registration);
                 if (!source || (!definition && !isOwnedProfile(source, id, "personal")))
                     throw new Error(`unknown player: ${id}`);
                 changes.push({ path: paths.active, content: source });
             }
+            if (expanded.some((id) => bundled.has(id))) {
+                for (const id of legacyBundledPlayerIds) {
+                    if (bundled.has(id) || expanded.includes(id))
+                        continue;
+                    const { active } = this.paths(id);
+                    await rejectSymlinkTraversal(this.spec.project, active);
+                    const content = await existing(active);
+                    if (content === undefined)
+                        continue;
+                    if (!isOwnedProfile(content, id, "sdlc"))
+                        throw new Error(`unmanaged legacy collision: ${id}`);
+                    changes.push({ path: active });
+                    cleanedLegacy.push(id);
+                }
+            }
             await this.transaction(changes);
-            return expanded.map((id) => `${id}: turned ${match[1]}`).join("\n");
+            return [
+                ...expanded.map((id) => `${id}: turned ${match[1]}`),
+                ...cleanedLegacy.map((id) => `${id}: retired legacy profile removed`),
+            ].join("\n");
         });
     }
     async retire(id) {

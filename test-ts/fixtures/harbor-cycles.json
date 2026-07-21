@@ -29,51 +29,51 @@
     ],
     "bundled": [
       {
-        "id": "scout",
+        "id": "portfolio-management",
         "runtimeIds": {
-          "copilot": "scout",
-          "opencode": "scout",
-          "pi": "scout"
+          "copilot": "portfolio-management",
+          "opencode": "portfolio-management",
+          "pi": "portfolio-management"
         }
       },
       {
-        "id": "sage",
+        "id": "design",
         "runtimeIds": {
-          "copilot": "sage",
-          "opencode": "sage",
-          "pi": "sage"
+          "copilot": "design",
+          "opencode": "design",
+          "pi": "design"
         }
       },
       {
-        "id": "smith",
+        "id": "build",
         "runtimeIds": {
-          "copilot": "smith",
-          "opencode": "smith",
-          "pi": "smith"
+          "copilot": "build",
+          "opencode": "build",
+          "pi": "build"
         }
       },
       {
-        "id": "probe",
+        "id": "manage",
         "runtimeIds": {
-          "copilot": "probe",
-          "opencode": "probe",
-          "pi": "probe"
+          "copilot": "manage",
+          "opencode": "manage",
+          "pi": "manage"
         }
       },
       {
-        "id": "guard",
+        "id": "consume",
         "runtimeIds": {
-          "copilot": "guard",
-          "opencode": "guard",
-          "pi": "guard"
+          "copilot": "consume",
+          "opencode": "consume",
+          "pi": "consume"
         }
       },
       {
-        "id": "pilot",
+        "id": "dispose",
         "runtimeIds": {
-          "copilot": "pilot",
-          "opencode": "pilot",
-          "pi": "pilot"
+          "copilot": "dispose",
+          "opencode": "dispose",
+          "pi": "dispose"
         }
       }
     ]
@@ -100,43 +100,43 @@
       "id": "full-sdlc",
       "coordinator": "team-lead",
       "activate": [
-        "scout",
-        "sage",
-        "smith",
-        "probe",
-        "guard",
-        "pilot"
+        "portfolio-management",
+        "design",
+        "build",
+        "manage",
+        "consume",
+        "dispose"
       ],
       "steps": [
         {
-          "agent": "scout",
-          "task": "Discover the exact files, constraints, and validation surface for the bounded fixture. Do not edit.",
+          "agent": "portfolio-management",
+          "task": "Define the portfolio outcome, scope, constraints, dependencies, and acceptance criteria for the bounded fixture. Do not edit.",
           "evidenceFrom": null
         },
         {
-          "agent": "sage",
-          "task": "Design the smallest evidence-backed implementation plan from the discovery findings. Do not edit.",
-          "evidenceFrom": "scout"
+          "agent": "design",
+          "task": "Design the smallest evidence-backed solution from the approved portfolio scope and acceptance criteria. Do not edit.",
+          "evidenceFrom": "portfolio-management"
         },
         {
-          "agent": "smith",
-          "task": "Implement the smallest correct change from the verified design and report the changed scope.",
-          "evidenceFrom": "sage"
+          "agent": "build",
+          "task": "Build the smallest correct change from the verified design and report the changed scope.",
+          "evidenceFrom": "design"
         },
         {
-          "agent": "probe",
-          "task": "Run focused verification for the implemented change and report reproducible results.",
-          "evidenceFrom": "smith"
+          "agent": "manage",
+          "task": "Run focused operational verification for the built change and report reproducible results and control evidence.",
+          "evidenceFrom": "build"
         },
         {
-          "agent": "guard",
-          "task": "Review the change and verification evidence for correctness, regressions, safety, scope, and coverage. Do not edit.",
-          "evidenceFrom": "probe"
+          "agent": "consume",
+          "task": "Validate the managed change and evidence from the consumer perspective for usability, integration, acceptance, and coverage. Do not edit.",
+          "evidenceFrom": "manage"
         },
         {
-          "agent": "pilot",
-          "task": "Assess delivery readiness, rollback, and residual risk from the verified review evidence. Do not edit.",
-          "evidenceFrom": "guard"
+          "agent": "dispose",
+          "task": "Produce a non-destructive disposition record from the consumer evidence, covering keep, evolve, eventual retirement, rollback, retention, and residual dependencies. Do not edit or undo the change.",
+          "evidenceFrom": "consume"
         }
       ]
     }

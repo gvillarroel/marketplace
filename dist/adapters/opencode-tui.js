@@ -28,8 +28,8 @@ export function openCodeDirectCommands(api) {
     });
     return [
         metadata("bench-list", "Agent Harbor: view bench", "List the bench directly without a model request.", "bench-list", () => execute("bench", "list")),
-        metadata("bench-on", "Agent Harbor: activate players", "Activate player IDs directly without a model request.", "bench-on", () => prompt("Activate Agent Harbor players", "scout sage, or all", "bench", "on ")),
-        metadata("bench-off", "Agent Harbor: deactivate players", "Deactivate player IDs directly without a model request.", "bench-off", () => prompt("Deactivate Agent Harbor players", "smith, or all", "bench", "off ")),
+        metadata("bench-on", "Agent Harbor: activate players", "Activate player IDs directly without a model request.", "bench-on", () => prompt("Activate Agent Harbor players", "portfolio-management design, or all", "bench", "on ")),
+        metadata("bench-off", "Agent Harbor: deactivate players", "Deactivate player IDs directly without a model request.", "bench-off", () => prompt("Deactivate Agent Harbor players", "build, or all", "bench", "off ")),
         metadata("join", "Agent Harbor: join player", "Register JSON directly without a model request.", "harbor-join", () => prompt("Join an Agent Harbor player", "{\"name\":\"reviewer\",...}", "join")),
         metadata("retire", "Agent Harbor: retire player", "Retire an ID directly without a model request.", "harbor-retire", () => prompt("Retire an Agent Harbor player", "reviewer", "retire")),
         metadata("skills-list", "Agent Harbor: list trusted skills", "Resolve and list trusted skills without a model request.", "harbor-list-skills", () => execute("list-skills", "")),

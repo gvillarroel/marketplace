@@ -96,7 +96,7 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   });
   const reset = (prompt: string) => hooks.onUserPromptSubmitted({ sessionId: "parent", workingDirectory: project, prompt }, invocation);
   const finish = (value: ReturnType<typeof input>, evidence: string) => hooks.onPostToolUse({ ...value, toolResult: evidence }, invocation);
-  assert.match((await hooks.onPreToolUse(input("scout", "before snapshot"), invocation))?.permissionDecisionReason ?? "", /snapshot is unavailable/);
+  assert.match((await hooks.onPreToolUse(input("portfolio-management", "before snapshot"), invocation))?.permissionDecisionReason ?? "", /snapshot is unavailable/);
   await coordinator.refresh();
 
   await reset("use the default specialists");
@@ -115,7 +115,7 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
     const id = step.agent;
     const call = input(id, datasetTask(fullCycle, index, priorEvidence));
     if (index === 0) {
-      coordinator.observeEvent({ type: "tool.execution_start", data: { toolName: "task", toolCallId: "sdlc-scout-call" } });
+      coordinator.observeEvent({ type: "tool.execution_start", data: { toolName: "task", toolCallId: "sdlc-portfolio-management-call" } });
     }
     assert.equal((await hooks.onPreToolUse(call, invocation))?.permissionDecision, "allow");
     if (index === 0) {
@@ -124,18 +124,18 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
         data: { agentName: step.agent, toolCallId: "different-call" },
       });
       coordinator.observeEvent({
-        type: "subagent.started", agentId: "scout-child",
-        data: { agentName: step.agent, toolCallId: "sdlc-scout-call" },
+        type: "subagent.started", agentId: "portfolio-management-child",
+        data: { agentName: step.agent, toolCallId: "sdlc-portfolio-management-call" },
       });
       coordinator.observeEvent({
-        type: "subagent.completed", agentId: "scout-child",
-        data: { agentName: step.agent, toolCallId: "sdlc-scout-call" },
+        type: "subagent.completed", agentId: "portfolio-management-child",
+        data: { agentName: step.agent, toolCallId: "sdlc-portfolio-management-call" },
       });
       coordinator.observeEvent({ type: "tool.execution_complete", agentId: "nested-child", data: { toolDescription: { name: "task" } } });
       assert.match((await hooks.onPreToolUse(input(fullCycle.steps[1].agent, "parallel"), invocation))?.permissionDecisionReason ?? "", /sequentially/);
       coordinator.observeEvent({
         type: "tool.execution_complete",
-        data: { toolCallId: "sdlc-scout-call", success: true, result: `evidence:${step.agent}` },
+        data: { toolCallId: "sdlc-portfolio-management-call", success: true, result: `evidence:${step.agent}` },
       });
     } else {
       await finish(call, `evidence:${step.agent}`);
@@ -151,10 +151,10 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
     ].map((phase) => `${agent}:${phase}`)),
   );
   assert.ok(evidenceEvents.filter((event) => event.phase === "evidence.returned").every((event) => (event.evidence?.utf8Bytes ?? 0) > 0));
-  assert.ok(evidenceEvents.some((event) => event.agent === "scout" && event.invocationId === "sdlc-scout-call"));
+  assert.ok(evidenceEvents.some((event) => event.agent === "portfolio-management" && event.invocationId === "sdlc-portfolio-management-call"));
   assert.ok(!evidenceEvents.some((event) => event.childId === "wrong-child"));
-  assert.ok(evidenceEvents.some((event) => event.childId === "scout-child" && event.phase === "child.started" && event.basis === "observed"));
-  assert.ok(evidenceEvents.some((event) => event.agent === "scout" && event.phase === "child.cleaned" && event.basis === "inferred"));
+  assert.ok(evidenceEvents.some((event) => event.childId === "portfolio-management-child" && event.phase === "child.started" && event.basis === "observed"));
+  assert.ok(evidenceEvents.some((event) => event.agent === "portfolio-management" && event.phase === "child.cleaned" && event.basis === "inferred"));
   assert.deepEqual(
     evidenceEvents.filter((event) => event.phase === "target.resolved").map((event) => event.runtimeAgent),
     [
@@ -165,47 +165,47 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   assert.equal(reloads, 1, "preToolUse must use the verified snapshot without reentrant host RPC");
 
   await reset("reject invalid delegations");
-  const serialized = input("scout", "serialized host arguments");
+  const serialized = input("portfolio-management", "serialized host arguments");
   serialized.toolArgs = JSON.stringify(serialized.toolArgs) as any;
   assert.equal((await hooks.onPreToolUse(serialized, invocation))?.permissionDecision, "allow");
   await finish(serialized as any, "serialized evidence");
   await reset("reject malformed serialized delegations");
-  assert.match((await hooks.onPreToolUse({ ...input("scout", "work"), toolArgs: "not-json" }, invocation))?.permissionDecisionReason ?? "", /bounded object/);
-  assert.match((await hooks.onPreToolUse({ ...input("scout", "work"), toolArgs: "[]" }, invocation))?.permissionDecisionReason ?? "", /bounded object/);
-  const oversizedObject = input("scout", "work");
+  assert.match((await hooks.onPreToolUse({ ...input("portfolio-management", "work"), toolArgs: "not-json" }, invocation))?.permissionDecisionReason ?? "", /bounded object/);
+  assert.match((await hooks.onPreToolUse({ ...input("portfolio-management", "work"), toolArgs: "[]" }, invocation))?.permissionDecisionReason ?? "", /bounded object/);
+  const oversizedObject = input("portfolio-management", "work");
   oversizedObject.toolArgs = { ...oversizedObject.toolArgs, description: "x".repeat(100_001) };
   assert.match((await hooks.onPreToolUse(oversizedObject, invocation))?.permissionDecisionReason ?? "", /bounded object/);
-  assert.match((await hooks.onPreToolUse({ ...input("scout", "work"), toolArgs: JSON.stringify(oversizedObject.toolArgs) }, invocation))?.permissionDecisionReason ?? "", /bounded object/);
+  assert.match((await hooks.onPreToolUse({ ...input("portfolio-management", "work"), toolArgs: JSON.stringify(oversizedObject.toolArgs) }, invocation))?.permissionDecisionReason ?? "", /bounded object/);
   assert.match((await hooks.onPreToolUse(input(copilotFixedAgentIds.get("team-lead")!, "recurse"), invocation))?.permissionDecisionReason ?? "", /recursively/);
-  assert.match((await hooks.onPreToolUse(input("scout", "   "), invocation))?.permissionDecisionReason ?? "", /non-empty/);
-  assert.match((await hooks.onPreToolUse(input("scout", "x".repeat(30_001)), invocation))?.permissionDecisionReason ?? "", /exceeds 30000 bytes/);
-  assert.match((await hooks.onPreToolUse(input("scout", "nested", "child"), invocation))?.permissionDecisionReason ?? "", /nested/);
-  await roster.bench("off pilot", bundledPlayers);
-  assert.match((await hooks.onPreToolUse(input("pilot", "release"), invocation))?.permissionDecisionReason ?? "", /not active/);
+  assert.match((await hooks.onPreToolUse(input("portfolio-management", "   "), invocation))?.permissionDecisionReason ?? "", /non-empty/);
+  assert.match((await hooks.onPreToolUse(input("portfolio-management", "x".repeat(30_001)), invocation))?.permissionDecisionReason ?? "", /exceeds 30000 bytes/);
+  assert.match((await hooks.onPreToolUse(input("portfolio-management", "nested", "child"), invocation))?.permissionDecisionReason ?? "", /nested/);
+  await roster.bench("off dispose", bundledPlayers);
+  assert.match((await hooks.onPreToolUse(input("dispose", "retire safely"), invocation))?.permissionDecisionReason ?? "", /not active/);
 
   failCurrent = true;
   await assert.rejects(() => coordinator.refresh(), /current unavailable/);
-  assert.match((await hooks.onPreToolUse(input("scout", "work"), invocation))?.permissionDecisionReason ?? "", /snapshot is unavailable/);
+  assert.match((await hooks.onPreToolUse(input("portfolio-management", "work"), invocation))?.permissionDecisionReason ?? "", /snapshot is unavailable/);
   failCurrent = false; await coordinator.refresh(); failReload = true;
   await assert.rejects(() => coordinator.refresh(), /reload unavailable/);
-  assert.match((await hooks.onPreToolUse(input("scout", "work"), invocation))?.permissionDecisionReason ?? "", /snapshot is unavailable/);
+  assert.match((await hooks.onPreToolUse(input("portfolio-management", "work"), invocation))?.permissionDecisionReason ?? "", /snapshot is unavailable/);
   failReload = false; await coordinator.refresh();
 
   current = copilotFixedAgentIds.get("crafter")!;
   await coordinator.refresh();
-  assert.equal(await hooks.onPreToolUse(input("scout", "unrelated agent task"), invocation), undefined);
+  assert.equal(await hooks.onPreToolUse(input("portfolio-management", "unrelated agent task"), invocation), undefined);
   coordinator.observeEvent({ type: "subagent.selected", data: { agentName: "team-lead" } });
   await reset("selection event normalizes the logical lead ID");
-  const selectedCall = input("scout", "selected lead task");
+  const selectedCall = input("portfolio-management", "selected lead task");
   assert.equal((await hooks.onPreToolUse(selectedCall, invocation))?.permissionDecision, "allow");
   await finish(selectedCall, "selected lead evidence");
   coordinator.observeEvent({ type: "subagent.selected", agentId: "nested", data: { agentName: "crafter" } });
   await reset("nested selection events cannot replace the root selection");
-  const afterNestedSelection = input("scout", "root lead remains selected");
+  const afterNestedSelection = input("portfolio-management", "root lead remains selected");
   assert.equal((await hooks.onPreToolUse(afterNestedSelection, invocation))?.permissionDecision, "allow");
   await finish(afterNestedSelection, "nested selection ignored");
   coordinator.observeEvent({ type: "subagent.deselected", data: {} });
-  assert.equal(await hooks.onPreToolUse(input("scout", "deselected task"), invocation), undefined);
+  assert.equal(await hooks.onPreToolUse(input("portfolio-management", "deselected task"), invocation), undefined);
   assert.equal(reloads, 4, "snapshot refreshes are explicit and bounded");
 
   let markReloadStarted!: () => void;
@@ -230,10 +230,10 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   await racingCoordinator.hooks.onUserPromptSubmitted({
     sessionId: racingInvocation.sessionId, workingDirectory: project, prompt: "concurrent selection",
   }, racingInvocation);
-  const racingCall = input("scout", "selection event wins the refresh race", racingInvocation.sessionId);
+  const racingCall = input("portfolio-management", "selection event wins the refresh race", racingInvocation.sessionId);
   assert.equal((await racingCoordinator.hooks.onPreToolUse(racingCall, racingInvocation))?.permissionDecision, "allow",
     "a newer root selection event must not be overwritten by a stale refresh result");
-  assert.equal(racingEvidence.find((event) => event.phase === "target.resolved")?.agent, "scout");
+  assert.equal(racingEvidence.find((event) => event.phase === "target.resolved")?.agent, "portfolio-management");
   await racingCoordinator.hooks.onPostToolUse({ ...racingCall, toolResult: "race evidence" }, racingInvocation);
 
   let markDeselectReloadStarted!: () => void;
@@ -254,7 +254,7 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   releaseDeselectReload();
   await deselectRefresh;
   assert.equal(await deselectCoordinator.hooks.onPreToolUse(
-    input("scout", "newer deselection wins", "deselected-parent"), { sessionId: "deselected-parent" },
+    input("portfolio-management", "newer deselection wins", "deselected-parent"), { sessionId: "deselected-parent" },
   ), undefined, "a newer root deselection must not be overwritten by a stale refresh result");
 
   let markFailingReloadStarted!: () => void;
@@ -287,7 +287,7 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   failingReload = false;
   await failureRaceCoordinator.refresh();
   const failureRaceInvocation = { sessionId: "failure-race-parent" };
-  const failureRaceCall = input("scout", "selection survives failed refresh", failureRaceInvocation.sessionId);
+  const failureRaceCall = input("portfolio-management", "selection survives failed refresh", failureRaceInvocation.sessionId);
   assert.equal((await failureRaceCoordinator.hooks.onPreToolUse(failureRaceCall, failureRaceInvocation))?.permissionDecision, "allow");
   assert.equal(failureRaceEvidence.find((event) => event.phase === "target.resolved")?.invocationId,
     "post-failure-selection-call", "a failed refresh erased a newer selection event");
@@ -522,9 +522,9 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
   const creates: any[] = []; const prompts: any[] = []; const deletes: string[] = [];
   const defaultModel = { providerID: "openai", modelID: "gpt-5.3-codex-spark", variant: "low" };
   const sdlcModel = { providerID: "openai", modelID: "gpt-5.6-luna", variant: "high" };
-  let blockScout = false; let enterScout!: () => void; let releaseScout!: () => void;
-  const scoutEntered = new Promise<void>((resolve) => { enterScout = resolve; });
-  const scoutReleased = new Promise<void>((resolve) => { releaseScout = resolve; });
+  let blockPortfolioManagement = false; let enterPortfolioManagement!: () => void; let releasePortfolioManagement!: () => void;
+  const portfolioManagementEntered = new Promise<void>((resolve) => { enterPortfolioManagement = resolve; });
+  const portfolioManagementReleased = new Promise<void>((resolve) => { releasePortfolioManagement = resolve; });
   const client = { session: {
     create: async ({ body }: any) => {
       const id = `child-${creates.length + 1}`;
@@ -533,7 +533,9 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
     },
     prompt: async ({ path, body }: any) => {
       prompts.push({ id: path.id, body });
-      if (blockScout && body.agent === "scout") { enterScout(); await scoutReleased; blockScout = false; }
+      if (blockPortfolioManagement && body.agent === "portfolio-management") {
+        enterPortfolioManagement(); await portfolioManagementReleased; blockPortfolioManagement = false;
+      }
       return { data: { parts: [{ type: "text", text: `evidence:${body.agent}` }] } };
     },
     message: async ({ path }: any) => {
@@ -567,9 +569,9 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
     assert.equal(config.command[`harbor-${id}`].template, "$ARGUMENTS");
   }
   const directPreflight = plugin["command.execute.before"]!;
-  await directPreflight({ command: "harbor-scout", sessionID: "parent", arguments: "map" }, { parts: [] });
+  await directPreflight({ command: "harbor-portfolio-management", sessionID: "parent", arguments: "prioritize" }, { parts: [] });
   await assert.rejects(() => directPreflight(
-    { command: "harbor-scout", sessionID: "parent", arguments: "   " }, { parts: [] },
+    { command: "harbor-portfolio-management", sessionID: "parent", arguments: "   " }, { parts: [] },
   ), /non-empty/);
 
   const execution: any = {
@@ -599,27 +601,27 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
 
   const beforeInvalid = creates.length;
   const sdlcExecution = { ...execution, messageID: "sdlc-invalid" };
-  await assert.rejects(() => delegate.execute({ agent: "scout", task: "work" }, { ...sdlcExecution, agent: "crafter" }), /only to team-lead/);
+  await assert.rejects(() => delegate.execute({ agent: "portfolio-management", task: "work" }, { ...sdlcExecution, agent: "crafter" }), /only to team-lead/);
   await assert.rejects(() => delegate.execute({ agent: "team-lead", task: "recurse" }, sdlcExecution), /recursively/);
   await assert.rejects(() => delegate.execute({ agent: "unknown", task: "work" }, sdlcExecution), /not found/);
-  await assert.rejects(() => delegate.execute({ agent: "probe", task: "   " }, sdlcExecution), /non-empty/);
-  await roster.bench("off pilot", bundledPlayers);
-  await assert.rejects(() => delegate.execute({ agent: "pilot", task: "release" }, sdlcExecution), /not found/);
+  await assert.rejects(() => delegate.execute({ agent: "manage", task: "   " }, sdlcExecution), /non-empty/);
+  await roster.bench("off dispose", bundledPlayers);
+  await assert.rejects(() => delegate.execute({ agent: "dispose", task: "retire safely" }, sdlcExecution), /not found/);
   await assert.rejects(() => directPreflight(
-    { command: "harbor-pilot", sessionID: "parent", arguments: "release" }, { parts: [] },
+    { command: "harbor-dispose", sessionID: "parent", arguments: "retire safely" }, { parts: [] },
   ), /not found/);
   assert.equal(creates.length, beforeInvalid, "invalid or inactive targets must create zero children");
-  await roster.bench("on pilot", bundledPlayers);
+  await roster.bench("on dispose", bundledPlayers);
 
-  blockScout = true;
+  blockPortfolioManagement = true;
   const firstStage = delegate.execute(
     { agent: fullCycle.steps[0].agent, task: datasetTask(fullCycle, 0) }, { ...sdlcExecution, messageID: "sdlc-1" },
   );
-  await scoutEntered;
+  await portfolioManagementEntered;
   await assert.rejects(() => delegate.execute(
     { agent: fullCycle.steps[1].agent, task: "parallel stage" }, { ...sdlcExecution, messageID: "sdlc-parallel" },
   ), /sequentially/);
-  releaseScout();
+  releasePortfolioManagement();
   evidence = String(await firstStage);
   await assert.rejects(() => delegate.execute(
     { agent: fullCycle.steps[0].agent, task: "duplicate stage" }, { ...sdlcExecution, messageID: "sdlc-duplicate" },
@@ -676,13 +678,13 @@ test("OpenCode TUI exposes direct controls that bypass sessions and models", asy
     assert.ok(commands.every((command) => command.namespace === "palette"));
     await commands.find((command) => command.name.endsWith("bench-list"))!.run();
     assert.match(toasts.at(-1).title, /0 model tokens/);
-    assert.match(toasts.at(-1).message, /scout \| bundled \| bench/);
+    assert.match(toasts.at(-1).message, /portfolio-management \| bundled \| bench/);
 
     commands.find((command) => command.name.endsWith("bench-on"))!.run();
-    await prompts.at(-1).onConfirm("scout");
+    await prompts.at(-1).onConfirm("portfolio-management");
     assert.match(toasts.at(-1).message, /turned on/);
     commands.find((command) => command.name.endsWith("bench-off"))!.run();
-    await prompts.at(-1).onConfirm("scout");
+    await prompts.at(-1).onConfirm("portfolio-management");
     assert.match(toasts.at(-1).message, /turned off/);
 
     commands.find((command) => command.name.endsWith("join"))!.run();
@@ -780,7 +782,7 @@ test("Pi deterministic command handlers never enter the SDK orchestrator", async
       getThinkingLevel: () => { throw new Error("deterministic commands requested model state"); },
     } as any);
     await commands.get("bench").handler("list", { cwd: join(root, "project"), ui: { notify: (value: string) => notices.push(value) } });
-    assert.match(notices.at(-1)!, /scout \| bundled \| bench/);
+    assert.match(notices.at(-1)!, /portfolio-management \| bundled \| bench/);
     await commands.get("join").handler(JSON.stringify({ name: "native", description: "Native", prompt: "Work", tools: ["read"] }), {
       cwd: join(root, "project"), ui: { notify: (value: string) => notices.push(value) },
     });
@@ -930,7 +932,7 @@ test("Pi team lead delegates sequentially to different active agents with bounds
     const beforeInvalid = calls.length;
     await assert.rejects(() => delegate.execute("bad", { agent: "team-lead", task: "recurse" }, new AbortController().signal, undefined, context), /recursive/);
     await assert.rejects(() => delegate.execute("bad", { agent: "unknown", task: "work" }, new AbortController().signal, undefined, context), /ENOENT|not found/);
-    await assert.rejects(() => delegate.execute("bad", { agent: "probe", task: "   " }, new AbortController().signal, undefined, context), /non-empty/);
+    await assert.rejects(() => delegate.execute("bad", { agent: "manage", task: "   " }, new AbortController().signal, undefined, context), /non-empty/);
     assert.equal(calls.length, beforeInvalid, "invalid delegation must not create a child");
 
     for (const [index, step] of fullCycle.steps.slice(2).entries()) {

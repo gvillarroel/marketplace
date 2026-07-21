@@ -19,6 +19,7 @@ import { runDeterministicCommand } from "../src/adapters/direct.js";
 import { copilotFixedAgentIds, resolveCopilotPlayer } from "../src/adapters/copilot-coordinator.js";
 import { loadHarborCycleDataset } from "./support/harbor-cycles.js";
 import { foldMarkdownWrappedText } from "./support/live-handoff.js";
+import { LIVE_FIXTURE_TOOL_TARGETS, classifyLiveToolTarget } from "./support/live-tool-targets.mjs";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const plugins = join(root, "plugins");
@@ -26,7 +27,7 @@ const reportPath = join(root, "work", "live-team-lead-report.json");
 const harborExtensionId = "plugin:agent-foundry:agent-harbor";
 const harborExtensionName = "agent-foundry:agent-harbor";
 const model = process.env.AGENT_HARBOR_LIVE_MODEL || "gpt-5.4-mini";
-const reasoningEffort = process.env.AGENT_HARBOR_LIVE_REASONING || "none";
+const reasoningEffort = process.env.AGENT_HARBOR_LIVE_REASONING || "low";
 const maxAiCredits = 60;
 const liveRequested = process.env.npm_lifecycle_event === "test:live:lead" || process.env.AGENT_HARBOR_LIVE === "1";
 const sandboxBypassCanarySessionId = "agent-harbor-sandbox-bypass-canary";
@@ -103,7 +104,7 @@ function createFixturePermissionHandler(project: string, audit: PermissionAuditE
           approved = request.possibleUrls.length === 0 &&
             request.possiblePaths.every((path) => isFixturePath(project, path)) &&
             !request.hasWriteFileRedirection &&
-            /^(?:npm(?:\.cmd)? test|node(?:\.exe)? --test)$/iu.test(request.fullCommandText.trim());
+            /^npm(?:\.cmd)? test$/iu.test(request.fullCommandText.trim());
           break;
         case "custom-tool":
           approved = request.toolName === "task";
@@ -344,7 +345,7 @@ test("live Copilot team-lead selects and orchestrates the Harbor SDLC cycle effi
       "# Bounded acceptance fixture", "", `Acceptance ID: ${acceptanceId}`,
       "", "Repair clampScore without changing its exported name.",
       "It must reject non-finite input and clamp finite values to the inclusive range 0..100.",
-      "The delivery gate is `npm test`. Do not add dependencies or touch files outside this fixture.", "",
+      "The operational management gate is `npm test`. Do not add dependencies or touch files outside this fixture.", "",
     ].join("\n"), "utf8"),
     writeFile(join(project, "src", "score.js"), [
       "export function clampScore(value) {", "  if (!Number.isFinite(value)) throw new TypeError(\"score must be finite\");",
@@ -481,16 +482,17 @@ test("live Copilot team-lead selects and orchestrates the Harbor SDLC cycle effi
 
     const prompt = [
       "This is a live Agent Harbor acceptance task in the current bounded fixture.",
-      "Complete all six required, distinct delivery gates below in dependency order. Select the active specialist whose published role exactly matches each gate; do not perform specialist work in the parent and do not use built-in or intermediate routers.",
-      "The eligible specialists and their published roles are intentionally listed out of workflow order: pilot (Delivery readiness), smith (Focused implementation), scout (Repository discovery), guard (Read-only review), probe (Focused verification), sage (Implementation design). Treat each published role as authoritative: each specialist may cover only its matching gate and must be used exactly once.",
-      "Required gates: discover the fixture and its hidden acceptance ID without editing; design the smallest evidence-backed fix; implement it; run focused verification; perform a read-only correctness/safety/coverage review; assess delivery readiness and rollback risk.",
-      "All six gates are mandatory acceptance conditions. Passing the implementation or verification gate does not make the independent review and delivery-readiness gates optional.",
-      "Keep every gate inside ACCEPTANCE.md, src/score.js, and test/score.test.js. Discovery and design are read-only; implementation edits only src/score.js and leaves test execution to verification; verification runs exactly npm test once; review only reads those three files and returned evidence; delivery readiness uses returned evidence and needs no exploratory tools.",
+      "Complete all six required, distinct lifecycle gates below in dependency order. Select the active specialist whose published role exactly matches each gate; do not perform specialist work in the parent and do not use built-in or intermediate routers.",
+      "The eligible specialists and their published roles are intentionally listed out of workflow order: dispose (Non-destructive disposition review), build (Focused construction), portfolio-management (Portfolio framing), consume (Consumer acceptance), manage (Operational management and verification), design (Solution design). Treat each published role as authoritative: each specialist may cover only its matching gate and must be used exactly once.",
+      "Required gates: frame the fixture's portfolio outcome, scope, constraints, dependencies, acceptance criteria, and hidden acceptance ID without editing; design the smallest evidence-backed fix; build it; manage it by running the required operational verification; validate it from the consumer perspective with a read-only correctness, safety, usability, integration, acceptance, and coverage review; produce a non-destructive disposition record recommending keep, evolve, or eventual retirement and covering rollback, retention, and residual dependencies without undoing the fix.",
+      "Mandatory state machine: portfolio-management -> design -> build -> manage -> consume -> dispose -> final synthesis. Keep a private monotonic gate_index initialized to 0. Call only the agent_type at that index; after every successful task result increment it exactly once and never decrement or reuse an ID, regardless of evidence content. At gate_index 6 all tools are forbidden: synthesize immediately and do not act on Dispose's recommendation. Never finalize at indices 0-5. On an actual task tool error, stop immediately and make no later tool call.",
+      "Keep every gate inside ACCEPTANCE.md, src/score.js, and test/score.test.js; never use wildcard paths or unbounded exploration. When a native tool schema requires an absolute path, resolve only one of those three exact relative paths against the fixture root and never return the absolute form in evidence. Portfolio management uses one to three bounded read/search calls; design uses only the portfolio handoff and no tools; build uses one to three bounded reads, edits only src/score.js, and leaves test execution to manage; manage uses only the shell to run exactly npm test once; consume reads each of the three files exactly once; dispose uses only returned evidence and no tools, makes no changes, and leaves the fix intact.",
       "Use one synchronous task at a time and each eligible specialist exactly once. Give every child only its bounded gate, constraints, the immediately preceding handoff when one exists, and this completion contract:",
-      "Copy this exact output rule into every child task: include the exact token HARBOR_HANDOFF:<your exact agent_type>:<acceptance ID> exactly once in the response. A standalone final line is preferred but surrounding line formatting is not a validity condition. Keep all child evidence concise.",
-      "For gates 2-6, copy the immediately preceding HARBOR_HANDOFF line verbatim exactly once into the next task prompt; do not copy any older handoff or full child response.",
-      "The acceptance ID exists only in the fixture; do not guess it. Treat a missing or duplicated exact handoff token as a failed gate: stop without rewriting or retrying it. Stop on any failed gate. Keep every delegated prompt under 4 KiB.",
-      "After all gates pass, begin the final response with HARBOR_SEQUENCE: followed by the actual agent_type values in execution order, then give a compact delivery conclusion.",
+      "Copy this required child-output request literally into every child task: include the exact token HARBOR_HANDOFF:<your exact agent_type>:<acceptance ID> exactly once as a standalone final line, never quote, copy, or emit any predecessor's HARBOR_HANDOFF token, and keep the acceptance ID to at most three total occurrences. Keep all child evidence concise. If a successful child nevertheless omits the preferred diagnostic token, that gate is still consumed: never retry it.",
+      "For gates 2-6, pass the immediately preceding evidence concisely. Copy its HARBOR_HANDOFF line at most once if present; a bounded paraphrase carrying the same acceptance ID is equally valid. Do not copy any older handoff or full child response.",
+      "The acceptance ID exists only in the fixture; do not guess it. Native child identity and completion are authoritative. A duplicated or foreign handoff token is a failed gate; a missing preferred token alone is not. Stop without rewriting or retrying an actually failed gate. A marked risk or NO-GO result is valid evidence and never waives a later state. Manage is not the end: always dispatch Consume after Manage and Dispose after Consume. Calling Dispose is mandatory and non-destructive; it records a recommendation and does not retire or undo the change. Keep every delegated prompt under 4 KiB.",
+      `After all gates pass, the first non-whitespace content in the final response must be exactly HARBOR_SEQUENCE:${expectedAgents.join(" -> ")}. Do not put a heading, Markdown delimiter, or preamble before it; then give a compact lifecycle conclusion.`,
+      "Final invariant: six successful delegations means zero remaining tool calls. After the first successful Dispose result, write the final response immediately; never call Dispose or any other agent again.",
     ].join("\n");
     const inferenceStartedAt = Date.now();
     let response;
@@ -501,10 +503,58 @@ test("live Copilot team-lead selects and orchestrates the Harbor SDLC cycle effi
     assert.ok(inferenceDurationMs <= communicationBudget.wallTimeMs, "orchestrated run exceeded its wall-time budget");
 
     calls = inspectCalls(events, runtimeAgents);
+    const childToolStarts = events.filter((event) =>
+      event.type === "tool.execution_start" && Boolean(event.agentId));
+    const agentForChildTool = (event: SessionEvent): string =>
+      calls.find((call) => call.childId === event.agentId)?.agent ?? "";
+    const toolsFor = (agent: string) => childToolStarts.filter((event) => agentForChildTool(event) === agent);
+    const targetFor = (event: Extract<SessionEvent, { type: "tool.execution_start" }>): string =>
+      classifyLiveToolTarget(event.data.toolName, event.data.arguments, project);
+    const portfolioTools = toolsFor("portfolio-management");
+    assert.ok(portfolioTools.length >= 1 && portfolioTools.length <= 3,
+      "portfolio-management must make between one and three bounded read/search calls");
+    assert.ok(portfolioTools.every((event) => LIVE_FIXTURE_TOOL_TARGETS.includes(
+      targetFor(event),
+    )), `portfolio-management accessed a path outside the bounded fixture files: ${JSON.stringify(portfolioTools.map((event) => ({ tool: event.data.toolName, target: targetFor(event) })))}`);
+    assert.equal(toolsFor("design").length, 0, "design used tools instead of the portfolio handoff");
+    const buildTools = toolsFor("build");
+    assert.ok(buildTools.length >= 2 && buildTools.length <= 4,
+      "build must make a bounded read/edit sequence");
+    const buildReads = buildTools.filter((event) => !new Set(["apply_patch", "edit", "write"]).has(event.data.toolName));
+    assert.ok(buildReads.length >= 1 && buildReads.length <= 3,
+      "build must make between one and three bounded reads before editing");
+    assert.ok(buildReads.every((event) => LIVE_FIXTURE_TOOL_TARGETS.includes(
+      targetFor(event),
+    )), `build read outside the bounded fixture files: ${JSON.stringify(buildReads.map((event) => ({ tool: event.data.toolName, target: targetFor(event) })))}`);
+    const mutations = childToolStarts.filter((event) => event.type === "tool.execution_start" &&
+      new Set(["apply_patch", "edit", "write"]).has(event.data.toolName));
+    assert.ok(mutations.length > 0, "build made no observed edit");
+    assert.ok(mutations.every((event) => agentForChildTool(event) === "build"),
+      "a non-build specialist edited the fixture");
+    assert.equal(toolsFor("manage").length, 1, "manage must use only the single operational verification call");
+    assert.equal(permissionAudit.filter((entry) =>
+      entry.source === "runtime" && entry.kind === "shell" && entry.decision === "approved").length, 1,
+    "the cycle must approve exactly one sandboxed npm test execution");
+    const consumeTools = toolsFor("consume");
+    assert.equal(consumeTools.length, 3, "consume must read exactly the three bounded acceptance files");
+    assert.deepEqual(
+      consumeTools.map(targetFor).sort(),
+      [...LIVE_FIXTURE_TOOL_TARGETS].sort(),
+      "consume did not read each bounded acceptance file exactly once",
+    );
+    const disposeTools = toolsFor("dispose");
+    assert.equal(disposeTools.length, 0,
+      "dispose used a tool instead of the returned handoff while assessing closure and end-of-life readiness");
     const markers = expectedAgents.map((agent) => `HARBOR_HANDOFF:${agent}:${acceptanceId}`);
     for (const [index, call] of calls.entries()) {
       const normalizedResult = withoutTrailingBlankLines(call.result);
-      assert.equal(occurrences(normalizedResult, markers[index]), 1, `stage ${index + 1} returned an invalid handoff marker`);
+      const markerOccurrences = occurrences(normalizedResult, markers[index]);
+      assert.ok(markerOccurrences <= 1, `stage ${index + 1} duplicated its handoff marker`);
+      assert.equal(markers.reduce((total, marker) => total + occurrences(normalizedResult, marker), 0), markerOccurrences,
+        `stage ${index + 1} returned a stale or additional handoff marker`);
+      const resultHiddenIdOccurrences = occurrences(normalizedResult, acceptanceId);
+      assert.ok(resultHiddenIdOccurrences >= (index === expectedAgents.length - 1 ? 0 : 1) && resultHiddenIdOccurrences <= 3,
+        `stage ${index + 1} returned an inefficient hidden-ID count`);
       assert.ok(utf8Bytes(call.result) <= communicationBudget.returnedEvidenceBytes / expectedAgents.length,
         `stage ${index + 1} returned excessive evidence`);
       if (index === 0) {
@@ -513,6 +563,8 @@ test("live Copilot team-lead selects and orchestrates the Harbor SDLC cycle effi
         const hiddenIdOccurrences = occurrences(call.prompt, acceptanceId);
         assert.ok(hiddenIdOccurrences >= 1 && hiddenIdOccurrences <= 3,
           `stage ${index + 1} did not receive bounded hidden handoff evidence`);
+        assert.ok(occurrences(call.prompt, markers[index - 1]) <= 1,
+          `stage ${index + 1} duplicated its immediate handoff`);
         const previousResult = withoutTrailingBlankLines(calls[index - 1].result);
         if (foldMarkdownWrappedText(previousResult) !== markers[index - 1]) {
           assert.equal(foldMarkdownWrappedText(call.prompt).includes(foldMarkdownWrappedText(previousResult)), false,
@@ -570,7 +622,8 @@ test("live Copilot team-lead selects and orchestrates the Harbor SDLC cycle effi
       }, `stage ${index + 1} guard proof did not fingerprint its exact prompt`);
     }
 
-    const sequenceLine = /HARBOR_SEQUENCE:\s*([^\r\n]+)/.exec(finalContent)?.[1] ?? "";
+    assert.ok(occurrences(finalContent, acceptanceId) <= 3, "final synthesis repeated the hidden acceptance ID excessively");
+    const sequenceLine = /^\s*HARBOR_SEQUENCE:\s*([^\r\n]+)/u.exec(finalContent)?.[1] ?? "";
     const reportedAgents = sequenceLine.match(new RegExp(`\\b(?:${expectedAgents.join("|")})\\b`, "g")) ?? [];
     assert.deepEqual(reportedAgents, expectedAgents, "final synthesis did not report the observed sequence exactly");
     assert.ok(utf8Bytes(finalContent) <= communicationBudget.finalBytes, "team-lead final synthesis is not compact");
@@ -697,6 +750,9 @@ test("live Copilot team-lead selects and orchestrates the Harbor SDLC cycle effi
           evidence: result ? { sha256: sha256(result), utf8Bytes: utf8Bytes(result) } : undefined,
           handoff: result && expectedMarker ? {
             exactOccurrences: occurrences(result, expectedMarker),
+            allCycleMarkerOccurrences: expectedAgents.reduce((total, candidate) =>
+              total + occurrences(result, `HARBOR_HANDOFF:${candidate}:${acceptanceId}`), 0),
+            hiddenIdOccurrences: occurrences(result, acceptanceId),
             transportedExactlyOnce: occurrences(result, expectedMarker) === 1,
             standaloneFinalLine: normalizedResult.split("\n").at(-1) === expectedMarker,
           } : undefined,

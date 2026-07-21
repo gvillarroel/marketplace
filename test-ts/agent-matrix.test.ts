@@ -34,6 +34,17 @@ async function runMission(orchestrator: Orchestrator): Promise<string> {
 test("the factory roster has exactly three active roles and six opt-in SDLC players", () => {
   assert.deepEqual([...rolePlayers.keys()], fixedIds);
   assert.deepEqual([...bundledPlayers.keys()], sdlcIds);
+  assert.deepEqual(
+    Object.fromEntries([...bundledPlayers].map(([id, player]) => [id, player.tools])),
+    {
+      "portfolio-management": ["read", "search"],
+      design: [],
+      build: ["read", "edit"],
+      manage: ["read", "execute"],
+      consume: ["read"],
+      dispose: [],
+    },
+  );
   assert.match(rolePlayers.get("team-lead")!.prompt, /at most six times/);
   for (const player of [...rolePlayers.values(), ...bundledPlayers.values()]) {
     assert.equal(player.name.length > 0, true);
@@ -53,8 +64,8 @@ test("all harness rosters expose only fixed roles until owned SDLC profiles are 
     await roster.bench("on all", bundledPlayers);
     assert.deepEqual(listManagedActiveIds(harness, project), [...sdlcIds].sort());
     assert.deepEqual(new Set(listInvocablePlayerIds(harness, project)), new Set([...fixedIds, ...sdlcIds]));
-    assert.equal(requireInvocablePlayer(harness, project, "scout").source, "active");
-    if (harness === "pi") assert.deepEqual(loadPiActivePlayer(project, "smith").tools, ["read", "edit"]);
+    assert.equal(requireInvocablePlayer(harness, project, "portfolio-management").source, "active");
+    if (harness === "pi") assert.deepEqual(loadPiActivePlayer(project, "build").tools, ["read", "edit"]);
 
     const active = harnessSpec(harness, home, project).activeDir;
     await mkdir(join(project, active), { recursive: true });
@@ -62,9 +73,9 @@ test("all harness rosters expose only fixed roles until owned SDLC profiles are 
     assert.ok(!listManagedActiveIds(harness, project).includes("intruder"));
     assert.throws(() => requireInvocablePlayer(harness, project, "intruder"), /not found/);
 
-    await roster.bench("off scout", bundledPlayers);
-    assert.ok(!listInvocablePlayerIds(harness, project).includes("scout"));
-    assert.throws(() => requireInvocablePlayer(harness, project, "scout"), /not found/);
+    await roster.bench("off portfolio-management", bundledPlayers);
+    assert.ok(!listInvocablePlayerIds(harness, project).includes("portfolio-management"));
+    assert.throws(() => requireInvocablePlayer(harness, project, "portfolio-management"), /not found/);
   }
 });
 
@@ -104,7 +115,7 @@ test("Copilot reuses one orchestrator to dispatch every SDLC agent in order", as
     stop: async () => { stops += 1; },
   }) as any);
 
-  assert.equal(await runMission(orchestrator), "evidence:pilot");
+  assert.equal(await runMission(orchestrator), "evidence:dispose");
   assert.deepEqual(creates.map((entry) => entry.name), sdlcIds);
   assert.deepEqual(tasks.map((entry) => entry.name), sdlcIds);
   assert.deepEqual(deletes, sdlcIds.map((_id, index) => `copilot-child-${index + 1}`));
@@ -137,7 +148,7 @@ test("OpenCode contract runner processes every staged SDLC definition with clean
   } };
   const orchestrator = new OpenCodeOrchestrator(client as any, process.cwd());
 
-  assert.equal(await runMission(orchestrator), "evidence:pilot");
+  assert.equal(await runMission(orchestrator), "evidence:dispose");
   assert.deepEqual(prompts.map((entry) => entry.name), sdlcIds);
   assert.deepEqual(deletes, creates.map((entry) => entry.id));
   for (const [index, player] of [...bundledPlayers.values()].entries()) {
@@ -294,7 +305,7 @@ test("Pi reuses one orchestrator to dispatch every SDLC identity in isolated ses
     process.cwd(), async () => sdk as any, [], undefined, [], undefined, { model, thinkingLevel: "minimal" },
   );
 
-  assert.equal(await runMission(orchestrator), "evidence:pilot");
+  assert.equal(await runMission(orchestrator), "evidence:dispose");
   assert.deepEqual(creates.map((entry) => entry.name), sdlcIds);
   assert.deepEqual(prompts.map((entry) => entry.name), sdlcIds);
   assert.deepEqual(cleanup, sdlcIds.flatMap(() => ["unsubscribe", "dispose"]));

@@ -7,7 +7,7 @@ requirements are consolidated in [REQUIREMENTS.md](REQUIREMENTS.md).
 
 It contains two plugins:
 
-- `agent-foundry`: five slash controls, a user-level bench, six canonical SDLC definitions rendered on activation, a team lead, and a trusted GitHub-skill catalog.
+- `agent-foundry`: five slash controls, a user-level bench, six opt-in SDLC companion definitions rendered on activation, a team lead, and a trusted GitHub-skill catalog.
 - `repo-cartographer`: repository orientation plus a `crafter` agent for minimal zx and TypeScript command examples.
 
 ## Install
@@ -42,7 +42,7 @@ for `team-lead`, `repo-cartographer`, `crafter`, or players activated through
 `/bench`.
 
 For a prompt sent straight to one named player, use
-`/harbor-<id> <task>`—for example `/harbor-scout map the relevant files`.
+`/harbor-<id> <task>`—for example `/harbor-design design the bounded change`.
 This selects that exact agent and sends one prompt without a separate routing
 inference. Fixed and bundled aliases are registered at startup; an inactive
 bundled player is rejected before inference. Restart the session after adding
@@ -105,7 +105,7 @@ the TUI plugin and do not create a model session. The `on`, `off`, `join`,
 The canonical `/bench`, `/join`, `/retire`, `/contract`, and `/list-skills`
 commands remain available for parity, but OpenCode routes that command system
 through the model. For exact argument syntax without inference, use the package
-CLI, for example `agent-harbor opencode bench on scout`. Select `team-lead`,
+CLI, for example `agent-harbor opencode bench on portfolio-management`. Select `team-lead`,
 `repo-cartographer`, `crafter`, or an activated player through OpenCode's native
 agent interface.
 
@@ -184,7 +184,8 @@ After publishing a new Git revision, install that revision again (or run `pi ins
 Invoke `/bench`, `/join`, `/retire`, or `/list-skills` directly; their native
 handlers perform no model request. `/contract` creates exactly one child by
 design. Invoke `/team-lead <task>`, `/repo-cartographer <task>`,
-`/crafter <task>`, or any active personal player directly.
+`/crafter <task>`, any activated bundled SDLC companion, or any active personal
+player directly.
 
 `/team-lead` can delegate sequentially to as many as six active specialists
 when the task genuinely needs multiple stages. Each delegation is
@@ -238,7 +239,7 @@ npm test
 
 `npm test` is one Node wrapper rather than an npm/`&&` command chain. It rebuilds generated artifacts, removes inherited `NODE_TEST_CONTEXT`, validates each child exit/signal and requires the native runner's TAP summary (`tests > 0`, `fail = 0`), preventing shell propagation quirks, nested-runner state or loaded host code from creating a false green. The suite evaluates all five command contracts across the three runtimes; verifies byte-exact rollback, mutation locking, canonical ownership, idempotency, collisions and leaf/ancestor symlinks; checks remote-body validation, closed tool policies, disposable-session cleanup and double-failure reporting; confirms Copilot/OpenCode discovery; and installs Pi into a temporary home. The agent matrix proves that only the three fixed roles start active and all nine names are available after `bench on all`.
 
-The literal, closed-schema dataset in `test-ts/fixtures/harbor-cycles.json` is independent from the runtime catalog. It defines the default map/build cycle and the opt-in six-stage SDLC cycle. The same cases feed the Copilot hooks and the real OpenCode/Pi delegation tools, while a normalized SDK test proves activation, exact target identity, sequential evidence handoff and cleanup in all three orchestrators. Optional evidence hooks store only SHA-256 hashes, UTF-8 sizes and correlation metadata—never raw tasks or responses—and are no-ops unless explicitly injected. Events label their basis as observed or inferred, so Copilot's synchronous terminal fallback is not presented as a native cleanup event. These offline tests exercise no model or network. They prove requested routing and lifecycle mechanics; the separate live smoke below proves model-driven selection.
+The literal, closed-schema dataset in `test-ts/fixtures/harbor-cycles.json` is independent from the runtime catalog. It defines the default fixed-role map/build cycle and the opt-in six-companion SDLC cycle. The same cases feed the Copilot hooks and the real OpenCode/Pi delegation tools, while a normalized SDK test proves activation, exact target identity, sequential evidence handoff and cleanup in all three orchestrators. Optional evidence hooks store only SHA-256 hashes, UTF-8 sizes and correlation metadata—never raw tasks or responses—and are no-ops unless explicitly injected. Events label their basis as observed or inferred, so Copilot's synchronous terminal fallback is not presented as a native cleanup event. These offline tests exercise no model or network. They prove requested routing and lifecycle mechanics; the separate live smoke below proves model-driven selection.
 
 Run the authenticated live acceptance explicitly when changing lead selection,
 handoff, or native orchestration hooks:
@@ -257,27 +258,32 @@ npm run test:live:codex
 
 These commands deliberately consume model tokens and are never part of
 `npm test`. Each selects the real `team-lead`, activates the dataset's
-six-stage cycle through the deterministic zero-model CLI, presents candidate
+six-companion cycle through the deterministic zero-model CLI, presents candidate
 agents and their published roles out of workflow order, and requires the lead
 to map each exclusive role to its gate as
-`scout → sage → smith → probe → guard → pilot`. Every gate is bounded to three
-fixture files; only implementation edits, verification runs `npm test` once,
-review only reads, and delivery uses returned evidence. After inference, the
-runner deterministically returns all six bundled players to the bench and
+`portfolio-management → design → build → manage → consume → dispose`. Every
+gate is bounded to three fixture files: portfolio management frames value,
+scope, risk and acceptance evidence; design produces the smallest supported
+plan; build alone edits and does not run tests; manage runs `npm test` exactly
+once without editing; consume performs the read-only consumer acceptance,
+correctness, safety and coverage review; and dispose plans safe closure, EOL,
+retention, decommissioning and rollback solely from returned evidence. Dispose
+never deletes or undoes the build. After inference, the
+runner deterministically returns all six bundled companions to the bench and
 checks that the managed roster was cleaned. Listing that bench directly remains
 a separate zero-token operation in every harness.
 
 A random hidden fixture ID proves that evidence moves through immediate,
-bounded handoffs: `scout` must discover it, and every later delegated prompt
-must carry it between one and three times without copying the complete prior
-response. Native prompt, delegation, tool-terminal, model-usage, and session
-events—not model-authored text—are authoritative for agent identity and
+bounded handoffs: `portfolio-management` must discover it, and every later
+delegated prompt must carry it between one and three times without copying the
+complete prior response. Native prompt, delegation, tool-terminal, model-usage,
+and session events—not model-authored text—are authoritative for agent identity and
 completion. A child may emit its own handoff marker as a diagnostic; if it does,
 the marker may appear only once and must not repeat or leak a predecessor's
 marker. Prompts stay below 4 KiB, delegations remain sequential and unique, and
 the fixture must move from a failing preflight test to a passing verification.
 
-Before inference, the smoke confirms the exact Agent Harbor extension is running with a live process and a native `/bench` client command. It requests a fixture-only Copilot sandbox with outbound and local networking disabled and requires the SDK's successful update acknowledgement; the report derives the redacted requested policy from the same RPC object and distinguishes request attempt from acknowledgement. The permission handler permits only fixture reads, the expected source edit, the native `task` tool, and the fixture's test commands, and the run must observe at least one real runtime permission decision. The same configured callback is also exercised directly with an otherwise valid `npm test` request carrying `requestSandboxBypass: true`; this is explicitly reported as a synthetic handler canary, separately from runtime decisions, and must be rejected. The extension emits one ephemeral, redacted guard proof per accepted delegation; all six proofs must match the native `toolCallId` and prompt fingerprint. Nested Node verification names the test file explicitly and removes inherited `NODE_TEST_CONTEXT` so the fixture cannot pass without executing. The default is `gpt-5.4-mini` with reasoning `none`, selected because the acceptance checks literal six-gate compliance rather than deep implementation reasoning; the CLI receives a 60-credit shared safety ceiling while the test enforces the stricter 36-turn, 200,000-token and 180-second budgets. `AGENT_HARBOR_LIVE_MODEL` and `AGENT_HARBOR_LIVE_REASONING` may override the model settings. `COPILOT_CLI_PATH` may point to the authenticated executable when it is not discoverable on `PATH`.
+Before inference, the smoke confirms the exact Agent Harbor extension is running with a live process and a native `/bench` client command. It requests a fixture-only Copilot sandbox with outbound and local networking disabled and requires the SDK's successful update acknowledgement; the report derives the redacted requested policy from the same object and distinguishes request attempt from acknowledgement. The permission handler permits only fixture reads, the expected source edit, the native `task` tool, and the fixture's test command, and the run must observe at least one real runtime permission decision. The same configured callback is also exercised directly with an otherwise valid `npm test` request carrying `requestSandboxBypass: true`; this is reported as a synthetic handler canary, separately from runtime decisions, and must be rejected. The extension emits one ephemeral, redacted guard proof per accepted delegation; all six proofs must match the native `toolCallId` and prompt fingerprint. Nested Node verification names the test file explicitly and removes inherited `NODE_TEST_CONTEXT` so the fixture cannot pass without executing. The default is `gpt-5.4-mini` with reasoning `low`: the small reasoning allowance makes the six-state lifecycle reliable while the CLI's 60-credit ceiling and the test's stricter 36-turn, 200,000-token, and 180-second budgets remain authoritative. `AGENT_HARBOR_LIVE_MODEL` and `AGENT_HARBOR_LIVE_REASONING` may override these settings. `COPILOT_CLI_PATH` may point to the authenticated executable when it is not discoverable on `PATH`.
 
 The Copilot report is written to `work/live-team-lead-report.json`. Its v2
 schema contains hashes, byte counts, order, duration, root/child/total token
@@ -303,10 +309,13 @@ The authenticated results recorded on 2026-07-20 are:
 
 | Harness | Runtime | Provider / model | Reasoning | Luna fallback | Wall time | Model turns | Tool calls | Observed tokens | Verification / cleanup |
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
-| OpenCode | 1.18.3 | `openai/gpt-5.3-codex-spark` | `medium` | No | 103,674 ms | 19 | 18 | 44,544 | Passed / cleaned |
-| Pi | 0.80.10 | `openai-codex/gpt-5.3-codex-spark` | `low` | No | 31,110 ms | 19 | 18 | 38,840 | Passed / cleaned |
+| Copilot | 1.0.71 | `copilot/gpt-5.4-mini` | `low` | N/A | 36,439 ms | 18 | 15 | 115,434 | Passed / cleaned |
+| OpenCode | 1.18.3 | `openai/gpt-5.3-codex-spark` | `medium` | No | 113,318 ms | 18 | 17 | 57,847 | Passed / cleaned |
+| Pi | 0.80.10 | `openai-codex/gpt-5.3-codex-spark` | `low` | No | 32,605 ms | 18 | 15 | 50,272 | Passed / cleaned |
 
-The combined `all --verify-report-only` check accepted both fresh reports.
+The combined Codex `all --verify-report-only` check accepted both fresh Codex
+reports, and the Copilot `--verify-report-only` gate accepted its fresh v2
+report.
 
 Every live script removes inherited runner state and its prior report, then
 requires a newly written `status: passed` report with the expected schema and a
@@ -363,21 +372,37 @@ The zero-model way to view it is `/bench` in experimental Copilot and in Pi,
 
 ```text
 /bench
-/bench on scout sage
-/bench off smith
+/bench on portfolio-management design
+/bench off build
 /bench on all
 /bench off all
 ```
 
-`on` and `off` are idempotent. There is no `toggle`. `all` means only the six bundled profiles:
+`on` and `off` are idempotent. There is no `toggle`. `all` means only the six
+bundled companion profiles:
 
-`scout → sage → smith → probe → guard → pilot`
+`portfolio-management → design → build → manage → consume → dispose`
 
-The three fixed roles are active without this command. The six names above are
-only included definitions until activated; discovery and direct invocation
-reject them while they remain on the bench.
+The three fixed roles are active without this command. The six companion names
+above are only included definitions until activated; discovery and direct
+invocation reject them while they remain on the bench.
 
 Their canonical definitions live once in `src/core/defaults.ts` and are rendered directly into the current harness's native agent directory when activated. A batch is serialized, fully preflighted, written file-atomically, verified, and rolled back byte-for-byte on failure.
+
+For upgrades, the former IDs `scout`, `sage`, `smith`, `probe`, `guard`, and
+`pilot` remain reserved and Agent Harbor will not route or register them. A
+native harness can still discover their old project files until they are
+cleaned and the session is restarted. Run this explicit cleanup before relying
+on the exact six-companion roster:
+
+```text
+/bench off scout sage smith probe guard pilot
+```
+
+It removes only legacy profiles with complete Agent Harbor ownership. Any
+mutation of the new bundled companions, including `/bench on all`, performs the
+same legacy cleanup in its transaction. An unmanaged legacy collision aborts
+the whole mutation and is never overwritten or deleted.
 
 ## Personal players
 
@@ -437,8 +462,22 @@ The command uses the developer's authenticated `gh` CLI and reports repository, 
 
 ## Agents
 
+The three fixed roles are available at startup and are separate from the
+opt-in SDLC companions:
+
 - `agent-foundry:team-lead`: derives the smallest sufficient sequence, preferring one specialist and permitting at most six sequential named delegations when distinct stages are necessary.
 - `repo-cartographer:repo-cartographer`: builds compact evidence-based repository maps.
 - `repo-cartographer:crafter`: refreshes the trusted external zx skill on every invocation, then creates a minimal self-contained zx or TypeScript command example.
+
+The six bundled companions start on the bench and represent the ordered SDLC
+when the full cycle is explicitly required. For ordinary work, `team-lead`
+still selects only the smallest sufficient subset:
+
+- `portfolio-management`: frames portfolio value, priority, scope, acceptance criteria, dependencies, and risk from repository evidence.
+- `design`: turns approved scope into the smallest evidence-backed design and explicit completion criteria.
+- `build`: implements the approved design with a bounded change and leaves execution to lifecycle management.
+- `manage`: verifies and operates the built change, producing reproducible operational evidence without editing it.
+- `consume`: validates correctness, safety, coverage, usability, and value from the consumer's perspective.
+- `dispose`: performs a non-destructive disposition review covering keep, evolve, eventual retirement, retention, rollback, and decommissioning; it never removes or undoes the delivered change.
 
 The marketplace relies on Copilot's native Markdown agents, user-invocable skills, and subagent tools. Its policies reduce accidental scope but cannot turn model instructions into an operating-system sandbox.

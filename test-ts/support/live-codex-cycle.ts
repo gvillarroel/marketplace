@@ -258,22 +258,22 @@ export function liveCodexExpectedAgents(): readonly string[] {
 }
 
 export function buildLiveCodexPrompt(expectedAgents = liveCodexExpectedAgents()): string {
-  assert.deepEqual(expectedAgents, ["scout", "sage", "smith", "probe", "guard", "pilot"],
+  assert.deepEqual(expectedAgents, ["portfolio-management", "design", "build", "manage", "consume", "dispose"],
     "the live prompt requires the canonical Harbor SDLC order");
   return [
     "This is a live Agent Harbor acceptance task in the current bounded fixture.",
-    "Complete all six required, distinct delivery gates below in dependency order. Select the active specialist whose published role exactly matches each gate; do not perform specialist work in the parent and do not use built-in or intermediate routers.",
-    "The only eligible specialists for this task and their published roles are intentionally listed out of workflow order: pilot (Delivery readiness), smith (Focused implementation), scout (Repository discovery), guard (Read-only review), probe (Focused verification), sage (Implementation design). Treat each published role as authoritative: each specialist may cover only its matching gate and must be used exactly once. Never call repo-cartographer, crafter, team-lead, or any unlisted specialist; after pilot, synthesize the final response immediately without another delegation.",
-    "Required gates: discover the fixture and its hidden acceptance ID without editing; design the smallest evidence-backed fix; implement it; run focused verification; perform a read-only correctness/safety/coverage review; assess delivery readiness and rollback risk.",
-    "All six gates are mandatory acceptance conditions. Passing the implementation or verification gate does not make the independent review and delivery-readiness gates optional.",
-    "Do not emit a final response after only one through five delegation results. After probe returns, the only valid next delegation is guard; after guard returns, the only valid next delegation is pilot; only after pilot returns may you synthesize.",
-    "Keep every gate inside ACCEPTANCE.md, src/score.js, and test/score.test.js. When reading, use only those exact relative file paths; never use glob, grep, find, list, wildcard paths, absolute paths, or exploratory search. Discovery and design are read-only; implementation edits only src/score.js and leaves test execution to verification; verification runs exactly npm test once; review only reads those three files and returned evidence; delivery readiness uses returned evidence and needs no exploratory tools.",
+    "Complete all six required, distinct lifecycle gates below in dependency order. Select the active specialist whose published role exactly matches each gate; do not perform specialist work in the parent and do not use built-in or intermediate routers.",
+    "The only eligible specialists for this task and their published roles are intentionally listed out of workflow order: dispose (Non-destructive disposition review), build (Focused construction), portfolio-management (Portfolio framing), consume (Consumer acceptance), manage (Operational management and verification), design (Solution design). Treat each published role as authoritative: each specialist may cover only its matching gate and must be used exactly once. Never call repo-cartographer, crafter, team-lead, or any unlisted specialist; after dispose, synthesize the final response immediately without another delegation.",
+    "Required gates: frame the fixture's portfolio outcome, scope, constraints, dependencies, acceptance criteria, and hidden acceptance ID without editing; design the smallest evidence-backed fix; build it; manage it by running the required operational verification; validate it from the consumer perspective with a read-only correctness, safety, usability, integration, acceptance, and coverage review; produce a non-destructive disposition record recommending keep, evolve, or eventual retirement and covering rollback, retention, and residual dependencies without undoing the fix.",
+    "Mandatory state machine: portfolio-management -> design -> build -> manage -> consume -> dispose -> final synthesis. Keep a private monotonic gate_index initialized to 0. Call only the agent at that index; after every successful harbor_delegate result increment it exactly once and never decrement or reuse an ID, regardless of evidence content. At gate_index 6 all tools are forbidden: synthesize immediately and do not act on Dispose's recommendation. Never finalize at indices 0-5. On an actual harbor_delegate tool error, stop immediately and make no later tool call.",
+    "Keep every gate inside ACCEPTANCE.md, src/score.js, and test/score.test.js; never use wildcard paths or unbounded exploration. When a native tool schema requires an absolute path, resolve only one of those three exact relative paths against the fixture root and never return the absolute form in evidence. Portfolio management uses only one to three bounded read/search calls. Design uses only the portfolio handoff and no tools. Build uses only one to three reads of those files, edits only src/score.js, and leaves test execution to Manage. Manage uses only the shell to run exactly npm test once and does not read or edit. Consume reads each of ACCEPTANCE.md, src/score.js, and test/score.test.js exactly once, uses no other tools, and does not edit or execute. Dispose uses only the returned handoff and no tools, makes no changes, and leaves the implemented fix intact.",
     "Use one synchronous delegation at a time and each eligible specialist exactly once. Give every child only its bounded gate, constraints, the immediately preceding handoff when one exists, and this completion contract:",
-    "Copy this exact output rule into every child task: include the exact token HARBOR_HANDOFF:<your exact agent ID>:<acceptance ID> exactly once in the response, and never quote, copy, or emit any predecessor's HARBOR_HANDOFF token. A standalone final line is preferred but surrounding line formatting is not a validity condition. Keep all child evidence concise.",
+    "In every child task, request the exact diagnostic token HARBOR_HANDOFF:<your exact agent ID>:<acceptance ID> exactly once and forbid quoting, copying, or emitting any predecessor's HARBOR_HANDOFF token. The acceptance ID may appear at most three times total. Request the token as a standalone final line and keep all child evidence concise. If a successful child nevertheless omits the preferred token, that gate is still consumed: never retry it.",
     "Pass only concise evidence forward. Before each later delegation, remove the predecessor's literal HARBOR_HANDOFF token, strip every absolute path in favor of the three exact relative paths, and paraphrase its evidence while preserving the acceptance ID; never paste a complete prior response into another child task.",
     "The acceptance ID exists only in the fixture; do not guess it. Native tool lifecycle is authoritative for child identity and completion. A missing preferred marker alone does not fail a completed native delegation; a duplicated or stale marker does. Stop on any actual failed gate, never rewrite or retry a completed gate, and keep every delegated prompt under 4 KiB.",
-    "A substantive finding, residual risk, or NO-GO conclusion is valid gate evidence when its exact handoff token is present; it is not a failed tool gate and never waives a later mandatory gate. In particular, always dispatch pilot after a marked guard response so pilot can independently assess readiness.",
-    `After all gates pass, begin the final response exactly with ${expectedSequencePrefix(expectedAgents)}, then give a compact delivery conclusion.`,
+    "A substantive finding, residual risk, or NO-GO conclusion with its exact handoff token is valid evidence, not a failed gate, and never waives a later state. In particular, Manage is not the end: always dispatch Consume after Manage and Dispose after Consume. Calling Dispose is mandatory and non-destructive; it records a recommendation and does not retire or undo the change.",
+    `After all gates pass, the first non-whitespace content in the final response must be exactly ${expectedSequencePrefix(expectedAgents)}. Do not put a heading, Markdown delimiter, or preamble before it; then give a compact lifecycle conclusion.`,
+    "Final invariant: six successful delegations means zero remaining tool calls. After the first successful Dispose result, write the final response immediately; never call Dispose or any other agent again.",
   ].join("\n");
 }
 
@@ -302,7 +302,7 @@ export async function createLiveCodexFixture(harness: LiveCodexHarness): Promise
         "",
         "Repair clampScore without changing its exported name.",
         "It must reject non-finite input and clamp finite values to the inclusive range 0..100.",
-        "The delivery gate is `npm test`. Do not add dependencies or touch files outside this fixture.",
+        "The operational management gate is `npm test`. Do not add dependencies or touch files outside this fixture.",
         "",
       ].join("\n"), "utf8"),
       writeFile(join(project, "src", "score.js"), [
@@ -446,9 +446,13 @@ export function assertLiveCodexDelegations(
     assert.ok(utf8Bytes(call.prompt) <= 4_096, `delegation ${index + 1} exceeded the prompt byte budget`);
     assert.ok(utf8Bytes(call.result) <= 12_288, `delegation ${index + 1} exceeded the evidence byte budget`);
     const marker = handoffMarker(call.agent, acceptanceId);
-    assert.equal(occurrences(call.result, marker), 1, `delegation ${index + 1} did not return its marker exactly once`);
-    assert.equal(call.result.match(allMarkerPattern)?.length ?? 0, 1,
+    const markerOccurrences = occurrences(call.result, marker);
+    assert.ok(markerOccurrences <= 1, `delegation ${index + 1} duplicated its marker`);
+    assert.equal(call.result.match(allMarkerPattern)?.length ?? 0, markerOccurrences,
       `delegation ${index + 1} returned a stale or additional cycle marker`);
+    const resultAcceptanceIds = occurrences(call.result, acceptanceId);
+    assert.ok(resultAcceptanceIds >= (index === expectedAgents.length - 1 ? 0 : 1) && resultAcceptanceIds <= 3,
+      `delegation ${index + 1} returned an inefficient acceptance-ID count`);
     if (index === 0) {
       assert.equal(occurrences(call.prompt, acceptanceId), 0, "discovery prompt knew the hidden acceptance ID in advance");
     } else {
@@ -487,7 +491,10 @@ export function assertLiveCodexDelegations(
 }
 
 export function assertLiveCodexFinal(finalText: string, expectedAgents = liveCodexExpectedAgents()): void {
-  assert.ok(finalText.startsWith(expectedSequencePrefix(expectedAgents)), "lead final response has the wrong sequence prefix");
+  const exactSequence = expectedSequencePrefix(expectedAgents);
+  const flexibleColonSpacing = regexEscape(exactSequence).replace("HARBOR_SEQUENCE:", "HARBOR_SEQUENCE:\\s*");
+  assert.match(finalText, new RegExp(`^\\s*${flexibleColonSpacing}(?:\\s|$)`, "u"),
+    "lead final response has the wrong sequence prefix");
   assert.ok(utf8Bytes(finalText) <= LIVE_CODEX_COMMUNICATION_BUDGET.finalBytes,
     "lead final response exceeded its byte budget");
 }

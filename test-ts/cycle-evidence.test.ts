@@ -16,6 +16,7 @@ import { PiOrchestrator } from "../src/orchestrators/pi.js";
 import { loadHarborCycleDataset, type HarborCycle, type HarborHarness } from "./support/harbor-cycles.js";
 import { assertHarborEvidenceMetadataOnly, HarborEvidenceCollector } from "./support/harbor-evidence.js";
 import { foldMarkdownWrappedText } from "./support/live-handoff.js";
+import { classifyLiveToolTarget } from "./support/live-tool-targets.mjs";
 
 const dataset = loadHarborCycleDataset();
 const defaultCycle = dataset.cycles.find((cycle) => cycle.id === "default-specialists")!;
@@ -27,16 +28,34 @@ const offlineGithub = {
 const openCodeModel = { providerID: "openai", modelID: "gpt-5.3-codex-spark", variant: "low" } as const;
 
 test("live handoff comparison removes Markdown quote and fence wrappers", () => {
-  const response = "Evidence from the completed gate.\nHARBOR_HANDOFF:scout:AH-hidden";
+  const response = "Evidence from the completed gate.\nHARBOR_HANDOFF:portfolio-management:AH-hidden";
   const nestedQuoteAndFence = [
     "> ```text",
     "> Evidence from the completed gate.",
-    "> HARBOR_HANDOFF:scout:AH-hidden",
+    "> HARBOR_HANDOFF:portfolio-management:AH-hidden",
     "> ```",
   ].join("\n");
   const tildeFence = `~~~markdown\n${response}\n~~~`;
   assert.equal(foldMarkdownWrappedText(nestedQuoteAndFence), foldMarkdownWrappedText(response));
   assert.equal(foldMarkdownWrappedText(tildeFence), foldMarkdownWrappedText(response));
+});
+
+test("live tool observers classify bounded targets without retaining raw paths", () => {
+  const fixtureRoot = join(tmpdir(), "agent-harbor-tool-target-fixture");
+  assert.equal(classifyLiveToolTarget("read", { filePath: "ACCEPTANCE.md" }), "ACCEPTANCE.md");
+  assert.equal(classifyLiveToolTarget("read", { path: ".\\src\\score.js" }), "src/score.js");
+  assert.equal(classifyLiveToolTarget("grep", { pattern: "clampScore", path: "test/score.test.js" }), "test/score.test.js");
+  assert.equal(classifyLiveToolTarget("glob", { path: "src", pattern: "score.js" }), "src/score.js");
+  assert.equal(classifyLiveToolTarget("find", { path: ".", pattern: "test/score.test.js" }), "test/score.test.js");
+  assert.equal(classifyLiveToolTarget("apply_patch", {
+    patchText: "*** Begin Patch\n*** Update File: src/score.js\n@@\n-old\n+new\n*** End Patch",
+  }), "src/score.js");
+  assert.equal(classifyLiveToolTarget("write", { path: "package.json", content: "private" }), "other");
+  assert.equal(classifyLiveToolTarget("read", {}), "none");
+  assert.equal(classifyLiveToolTarget("read", { paths: ["ACCEPTANCE.md", "src/score.js"] }), "multiple");
+  assert.equal(classifyLiveToolTarget("read", { path: "C:\\fixture\\ACCEPTANCE.md" }), "other");
+  assert.equal(classifyLiveToolTarget("read", { path: join(fixtureRoot, "ACCEPTANCE.md") }, fixtureRoot), "ACCEPTANCE.md");
+  assert.equal(classifyLiveToolTarget("read", { path: join(fixtureRoot, "..", "outside.md") }, fixtureRoot), "other");
 });
 
 function stageTask(cycle: HarborCycle, index: number, priorEvidence: string | undefined): string {
@@ -62,7 +81,7 @@ test("the Harbor cycle dataset is literal, closed, and independent from runtime 
     dataset.roster.fixed.map((player) => player.runtimeIds.copilot),
     [...copilotFixedAgentIds.values()],
   );
-  assert.deepEqual(fullCycle.steps.map((step) => step.agent), ["scout", "sage", "smith", "probe", "guard", "pilot"]);
+  assert.deepEqual(fullCycle.steps.map((step) => step.agent), ["portfolio-management", "design", "build", "manage", "consume", "dispose"]);
   assert.ok(dataset.cycles.every((cycle) => cycle.coordinator === "team-lead"));
 
   const root = await mkdtemp(join(tmpdir(), "harbor-cycle-invalid-"));
@@ -240,15 +259,15 @@ test("evidence hooks retain only hashes and byte lengths", () => {
   const secretError = "error-that-must-not-enter-the-trace";
   const events: HarborEvidenceEvent[] = [];
   emitHarborEvidence((event) => events.push(event), {
-    phase: "target.resolved", harness: "pi", agent: "scout", outcome: "ok",
+    phase: "target.resolved", harness: "pi", agent: "portfolio-management", outcome: "ok",
     task: fingerprintHarborEvidence(secretTask),
   });
   emitHarborEvidence((event) => events.push(event), {
-    phase: "evidence.returned", harness: "pi", agent: "scout", outcome: "ok",
+    phase: "evidence.returned", harness: "pi", agent: "portfolio-management", outcome: "ok",
     evidence: fingerprintHarborEvidence(secretEvidence),
   });
   emitHarborEvidence((event) => events.push(event), {
-    phase: "child.failed", harness: "pi", agent: "scout", outcome: "error",
+    phase: "child.failed", harness: "pi", agent: "portfolio-management", outcome: "error",
     error: fingerprintHarborEvidence(secretError),
   });
   assertHarborEvidenceMetadataOnly(events, [secretTask, secretEvidence, secretError]);
@@ -266,12 +285,12 @@ test("a failing async evidence collector cannot alter child execution or cleanup
   const orchestrator = new OpenCodeOrchestrator(client as any, process.cwd(), offlineGithub, async () => {
     throw new Error("collector unavailable");
   });
-  assert.equal(await orchestrator.runAgent("scout", "bounded task", "parent", openCodeModel), "evidence");
+  assert.equal(await orchestrator.runAgent("portfolio-management", "bounded task", "parent", openCodeModel), "evidence");
   assert.deepEqual(calls, ["create", "prompt", "delete"]);
 });
 
 test("creation, prompt, and cleanup failures produce bounded truthful evidence traces", async () => {
-  const definition = { ...bundledPlayers.get("scout")!, task: "private bounded task" };
+  const definition = { ...bundledPlayers.get("portfolio-management")!, task: "private bounded task" };
 
   const copilotFactoryEvents: HarborEvidenceEvent[] = [];
   const copilotFactory = new CopilotOrchestrator(
@@ -295,7 +314,7 @@ test("creation, prompt, and cleanup failures produce bounded truthful evidence t
   const openCodeCreate = new OpenCodeOrchestrator({ session: {
     create: async () => { throw new Error("private opencode create failure"); },
   } } as any, process.cwd(), offlineGithub, (event) => openCodeCreateEvents.push(event));
-  await assert.rejects(() => openCodeCreate.runAgent("scout", definition.task, "parent", openCodeModel), /private opencode create failure/);
+  await assert.rejects(() => openCodeCreate.runAgent("portfolio-management", definition.task, "parent", openCodeModel), /private opencode create failure/);
   assert.deepEqual(openCodeCreateEvents.map((event) => event.phase), ["target.resolved", "child.failed"]);
 
   const piCreateEvents: HarborEvidenceEvent[] = [];
@@ -312,7 +331,7 @@ test("creation, prompt, and cleanup failures produce bounded truthful evidence t
     prompt: async () => { throw new Error("private prompt failure"); },
     delete: async () => { throw new Error("private cleanup failure"); },
   } } as any, process.cwd(), offlineGithub, (event) => combinedFailureEvents.push(event));
-  await assert.rejects(() => combinedFailure.runAgent("scout", definition.task, "parent", openCodeModel), AggregateError);
+  await assert.rejects(() => combinedFailure.runAgent("portfolio-management", definition.task, "parent", openCodeModel), AggregateError);
   assert.deepEqual(
     combinedFailureEvents.map((event) => `${event.phase}:${event.outcome}`),
     [
@@ -327,7 +346,7 @@ test("creation, prompt, and cleanup failures produce bounded truthful evidence t
     prompt: async () => ({ data: { parts: [] } }),
     delete: async () => ({ data: true }),
   } } as any, process.cwd(), offlineGithub, (event) => emptyEvidenceEvents.push(event));
-  await assert.rejects(() => emptyEvidence.runAgent("scout", definition.task, "parent", openCodeModel), /empty evidence/);
+  await assert.rejects(() => emptyEvidence.runAgent("portfolio-management", definition.task, "parent", openCodeModel), /empty evidence/);
   assert.deepEqual(
     emptyEvidenceEvents.map((event) => `${event.phase}:${event.outcome}`),
     [

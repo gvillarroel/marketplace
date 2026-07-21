@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { classifyLiveToolTarget } from "./live-tool-targets.mjs";
 
 const schema = "agent-harbor/live-pi-observer@1";
-const expectedAgents = ["scout", "sage", "smith", "probe", "guard", "pilot"];
+const expectedAgents = ["portfolio-management", "design", "build", "manage", "consume", "dispose"];
 const packageRoot = process.env.AGENT_HARBOR_PI_PACKAGE_ROOT?.trim();
 const tracePath = process.env.AGENT_HARBOR_LIVE_TRACE_FILE?.trim();
 const nonce = process.env.AGENT_HARBOR_LIVE_NONCE?.trim();
@@ -141,6 +142,7 @@ if (!sdk.AgentSession.prototype[patched]) {
               callSha256,
               tool: event.toolName,
               commandClass: commandClass(event.toolName, event.args),
+              targetClass: classifyLiveToolTarget(event.toolName, event.args, process.cwd()),
               args: fingerprint(event.args),
             });
           }

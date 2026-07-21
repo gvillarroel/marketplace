@@ -212,7 +212,7 @@ async function inspectCopilotDirectExtension(launch: Launch, sandbox: string, wo
     const initial = await session.rpc.agent.list();
     for (const id of rolePlayers.keys()) assert.ok(initial.agents.some((agent) => agent.name === id || agent.id.endsWith(`:${id}`)), id);
     for (const id of bundledPlayers.keys()) assert.ok(!initial.agents.some((agent) => agent.name === id || agent.id === id), `${id} must start on the bench`);
-    await assert.rejects(() => session!.rpc.commands.invoke({ name: "harbor-scout", input: "must not reach a model" }), /not active/i);
+    await assert.rejects(() => session!.rpc.commands.invoke({ name: "harbor-portfolio-management", input: "must not reach a model" }), /not active/i);
 
     const invoked = await session.rpc.commands.invoke({ name: "bench", input: "on all" });
     assert.equal(invoked.kind, "completed");
@@ -424,7 +424,7 @@ test("every distribution has a direct zero-model bench entrypoint", async (t) =>
     };
     const bench = await run(launch, [harness, "bench", "list"], { cwd: sandbox, env, timeout: 30_000 });
     succeeded(bench);
-    assert.match(bench.stdout, /scout \| bundled \| bench/, harness);
+    assert.match(bench.stdout, /portfolio-management \| bundled \| bench/, harness);
   }
 });
 
@@ -603,8 +603,8 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
           subtask: false,
         });
       }
-      assert.equal(discovered.agent.scout.tools.harbor_delegate, false);
-      assert.equal(discovered.agent.scout.tools["*"], false);
+      assert.equal(discovered.agent["portfolio-management"].tools.harbor_delegate, false);
+      assert.equal(discovered.agent["portfolio-management"].tools["*"], false);
     }),
     t.test("Pi", { skip: pi ? false : "Pi CLI is not installed" }, async (child) => {
       const directory = await mkdtemp(join(tmpdir(), "harbor-pi-native-"));

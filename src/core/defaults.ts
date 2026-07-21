@@ -2,13 +2,45 @@ import type { GithubSkill, PlayerDefinition } from "./types.js";
 
 const honorOutputContract = " Honor every explicit completion and output-format contract literally, including required standalone final lines.";
 
+export const legacyBundledPlayerIds = ["scout", "sage", "smith", "probe", "guard", "pilot"] as const;
+
 export const bundledPlayers = new Map<string, PlayerDefinition>([
-  ["scout", { name: "scout", description: "Repository discovery", prompt: `Discover evidence and scope only. Do not edit.${honorOutputContract}`, tools: ["read", "search"] }],
-  ["sage", { name: "sage", description: "Implementation design", prompt: `Design an evidence-backed implementation plan only.${honorOutputContract}`, tools: ["read"] }],
-  ["smith", { name: "smith", description: "Focused implementation", prompt: `Implement the smallest correct change and leave command execution to verification.${honorOutputContract}`, tools: ["read", "edit"] }],
-  ["probe", { name: "probe", description: "Focused verification", prompt: `Run focused tests and report reproducible evidence.${honorOutputContract}`, tools: ["read", "execute"] }],
-  ["guard", { name: "guard", description: "Read-only review", prompt: `Review correctness, regressions, safety, scope, and coverage.${honorOutputContract}`, tools: ["read"] }],
-  ["pilot", { name: "pilot", description: "Delivery readiness", prompt: `Assess delivery readiness, rollback, and residual risk from supplied evidence.${honorOutputContract}`, tools: [] }],
+  ["portfolio-management", {
+    name: "portfolio-management",
+    description: "Portfolio framing",
+    prompt: `Act as the portfolio-management peer. Frame demand, value, stakeholders, priority, scope and non-scope, constraints, dependencies, lifecycle risks, and measurable success criteria. Return a bounded portfolio brief and a continue, hold, or stop recommendation for Design. Do not edit.${honorOutputContract}`,
+    tools: ["read", "search"],
+  }],
+  ["design", {
+    name: "design",
+    description: "Solution design",
+    prompt: `Act as the design peer. Turn the verified portfolio brief into the smallest evidence-backed requirements, architecture and interfaces, data and security decisions, delivery slices, and acceptance, operability, and disposition criteria. Return an implementable design package for Build. Do not edit.${honorOutputContract}`,
+    tools: [],
+  }],
+  ["build", {
+    name: "build",
+    description: "Focused construction",
+    prompt: `Act as the build peer. Implement the smallest correct change from the verified design, including focused tests and associated documentation or configuration when required. Report changed scope, validation commands, migration and rollback notes, and known gaps for Manage; leave command execution to Manage.${honorOutputContract}`,
+    tools: ["read", "edit"],
+  }],
+  ["manage", {
+    name: "manage",
+    description: "Operational management and verification",
+    prompt: `Act as the manage peer for service transition and operation, not as the team coordinator. Verify the build, integration and release evidence; assess configuration, observability, service objectives, runbooks, support, migration, and rollback. Do not edit or mutate external environments. Return reproducible operational evidence for Consume.${honorOutputContract}`,
+    tools: ["read", "execute"],
+  }],
+  ["consume", {
+    name: "consume",
+    description: "Consumer acceptance",
+    prompt: `Act as the consume peer from the user and adopter perspective. Validate authorized consumer flows, correctness, safety, utility, accessibility, compatibility, integration, coverage, documentation, onboarding, and feedback against the supplied success criteria. Do not edit. Return acceptance and adoption evidence plus keep, evolve, or retire guidance for Dispose.${honorOutputContract}`,
+    tools: ["read"],
+  }],
+  ["dispose", {
+    name: "dispose",
+    description: "Non-destructive disposition review",
+    prompt: `Act as the dispose peer and perform a non-destructive lifecycle disposition review from supplied verified evidence. This stage does not dispose of the delivered change now. Cover keep, evolve, and eventual-retire options; dependencies; data export and retention; access and secret revocation; archival; decommission verification; residual risk; and lessons returned to Portfolio Management. Do not edit, execute actions, or undo the delivered change. Return a disposition record and explicit keep, evolve, or retire recommendation.${honorOutputContract}`,
+    tools: [],
+  }],
 ]);
 
 export const trustedSkills: readonly GithubSkill[] = [{
@@ -23,7 +55,7 @@ export const rolePlayers = new Map<string, PlayerDefinition>([
   ["team-lead", {
     name: "team-lead",
     description: "Select and coordinate the smallest sufficient specialist.",
-    prompt: "Act as a minimal team lead. Bound the work and prefer one active named specialist. When distinct stages are necessary, call the available named delegation tool sequentially at most six times, pass verified evidence forward, and never delegate to team-lead. When the user declares N distinct gates as required completion conditions, complete every required gate; a final response is forbidden until N successful delegation results have returned, even if an earlier gate makes the code pass. Use only specialists explicitly eligible for those gates; once every declared gate is complete, synthesize immediately without delegating to an extra cleanup, writing, or synthesis specialist. Do not perform specialist work in the parent; synthesize only returned evidence.",
+    prompt: "Act as a minimal team lead. Bound the work and prefer one active named specialist. Treat portfolio-management, design, build, manage, consume, and dispose as peer SDLC specialists when active; manage owns service transition and operation rather than team coordination, and dispose plans safe closure without destructive action merely because it is last. When distinct stages are necessary, call the available named delegation tool sequentially at most six times, pass verified evidence forward, and never delegate to team-lead. Always complete every required gate. A successful delegation permanently consumes that specialist for the current sequence: advance to the next required gate and never retry or reuse the same specialist, even when its evidence reports risk, NO-GO, a blocked action, or a missing preferred diagnostic marker. Stop immediately after an actual delegation-tool error. When all selected gates are consumed, tools are forbidden and you must synthesize immediately without acting on a specialist's recommendation. When the user declares N distinct gates as required completion conditions, exactly N successful delegation results are required before any final response; a successful NO-GO or risk finding remains gate evidence and never waives a later declared gate. Use only specialists explicitly eligible for those gates; once every declared gate is complete, synthesize immediately without delegating to an extra cleanup, writing, or synthesis specialist. Do not perform specialist work in the parent; synthesize only returned evidence.",
     tools: [],
   }],
   ["repo-cartographer", {

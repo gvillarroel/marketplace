@@ -40,7 +40,7 @@ export interface HarborCycleDataset {
 const playerIdPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const runtimeIdPattern = /^[a-z0-9][a-z0-9-]{0,47}(?::[a-z0-9][a-z0-9-]{0,47})?$/;
 const canonicalFixedIds = ["team-lead", "repo-cartographer", "crafter"] as const;
-const canonicalBundledIds = ["scout", "sage", "smith", "probe", "guard", "pilot"] as const;
+const canonicalBundledIds = ["portfolio-management", "design", "build", "manage", "consume", "dispose"] as const;
 const canonicalCycles = {
   "default-specialists": ["repo-cartographer", "crafter"],
   "full-sdlc": canonicalBundledIds,

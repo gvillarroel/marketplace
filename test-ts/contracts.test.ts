@@ -3,8 +3,9 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { listInvocablePlayerIds, listManagedActiveIds, requireInvocablePlayer } from "../src/core/active.js";
 import { executeCommand } from "../src/core/commands.js";
-import { bundledPlayers, trustedSkills } from "../src/core/defaults.js";
+import { bundledPlayers, legacyBundledPlayerIds, trustedSkills } from "../src/core/defaults.js";
 import { GhResolver, materializeGithubSkills } from "../src/core/github.js";
 import { Roster } from "../src/core/lifecycle.js";
 import { validatePlayer } from "../src/core/lifecycle.js";
@@ -29,16 +30,20 @@ for (const harness of ["copilot", "opencode", "pi"] as const) {
     assert.match(await executeCommand("bench", "off reviewer", context), /turned off/);
     assert.match(await executeCommand("bench", "on reviewer", context), /turned on/);
     const listing = await executeCommand("bench", "list", context);
-    assert.match(listing, /scout \| bundled \| bench/);
+    assert.match(listing, /portfolio-management \| bundled \| bench/);
     assert.match(listing, /reviewer \| personal \| on/);
-    assert.match(await executeCommand("bench", "on scout", context), /turned on/);
+    assert.match(await executeCommand("bench", "on portfolio-management", context), /turned on/);
     const spec = harnessSpec(harness, home, project);
-    const scout = join(project, spec.activeDir, `scout${spec.extension}`);
-    const canonicalScout = await readFile(scout, "utf8");
-    await writeFile(scout, canonicalScout.replace("Repository discovery", "Outdated repository discovery"), "utf8");
-    assert.match(await executeCommand("bench", "list scout", context), /scout \| bundled \| stale/);
-    assert.match(await executeCommand("bench", "on scout", context), /turned on/);
-    assert.match(await executeCommand("bench", "list scout", context), /scout \| bundled \| on/);
+    const portfolioManagement = join(project, spec.activeDir, `portfolio-management${spec.extension}`);
+    const canonicalPortfolioManagement = await readFile(portfolioManagement, "utf8");
+    await writeFile(
+      portfolioManagement,
+      canonicalPortfolioManagement.replace(/^description: .+$/mu, 'description: "Outdated portfolio framing"'),
+      "utf8",
+    );
+    assert.match(await executeCommand("bench", "list portfolio-management", context), /portfolio-management \| bundled \| stale/);
+    assert.match(await executeCommand("bench", "on portfolio-management", context), /turned on/);
+    assert.match(await executeCommand("bench", "list portfolio-management", context), /portfolio-management \| bundled \| on/);
     assert.match(await executeCommand("list-skills", "zx", context), new RegExp(`${"a".repeat(40)}.*${"b".repeat(40)}`));
     assert.deepEqual(calls, [], "deterministic controls must not invoke an orchestrator or model");
     assert.equal(await executeCommand("contract", JSON.stringify({ ...JSON.parse(player), task: "one task" }), context), `${harness}:child`);
@@ -177,7 +182,13 @@ test("validation rejects every non-canonical player shape before mutation", () =
   const invalid: unknown[] = [
     null,
     [],
+    { ...base, name: "portfolio-management" },
     { ...base, name: "scout" },
+    { ...base, name: "sage" },
+    { ...base, name: "smith" },
+    { ...base, name: "probe" },
+    { ...base, name: "guard" },
+    { ...base, name: "pilot" },
     { ...base, description: "two\nlines" },
     { ...base, prompt: "  " },
     { ...base, tools: [] },
@@ -304,16 +315,130 @@ test("concurrent roster mutations are serialized by one ownership-checked lock",
   assert.equal(maximumWrites, 1);
 });
 
+test("activating the current roster transactionally removes owned legacy SDLC profiles from discovery", async () => {
+  for (const harness of ["copilot", "opencode", "pi"] as const satisfies readonly HarnessName[]) {
+    const root = await mkdtemp(join(tmpdir(), `harbor-legacy-upgrade-${harness}-`));
+    const spec = harnessSpec(harness, join(root, "home"), join(root, "project"));
+    const roster = new Roster(spec);
+    const activeRoot = join(spec.project, spec.activeDir);
+    await mkdir(activeRoot, { recursive: true });
+    for (const id of legacyBundledPlayerIds) {
+      await writeFile(join(activeRoot, `${id}${spec.extension}`), spec.renderPlayer({
+        name: id,
+        description: `Legacy bundled player ${id}`,
+        prompt: `Legacy ${id} instructions`,
+        tools: ["read", "search"],
+      }, "sdlc"), "utf8");
+    }
+
+    assert.match(await roster.bench("list scout", bundledPlayers), /scout \| legacy \| retired-active/);
+    const result = await roster.bench("on all", bundledPlayers);
+    for (const id of legacyBundledPlayerIds) {
+      assert.match(result, new RegExp(`${id}: retired legacy profile removed`));
+      await assert.rejects(() => readFile(join(activeRoot, `${id}${spec.extension}`), "utf8"), /ENOENT/);
+      assert.ok(!listManagedActiveIds(harness, spec.project).includes(id));
+      assert.ok(!listInvocablePlayerIds(harness, spec.project).includes(id));
+      assert.throws(() => requireInvocablePlayer(harness, spec.project, id), /not found/);
+    }
+    assert.deepEqual(listManagedActiveIds(harness, spec.project), [...bundledPlayers.keys()].sort());
+  }
+});
+
+test("an unmanaged legacy collision is never removed during current-roster activation", async () => {
+  for (const harness of ["copilot", "opencode", "pi"] as const satisfies readonly HarnessName[]) {
+    const root = await mkdtemp(join(tmpdir(), `harbor-legacy-collision-${harness}-`));
+    const spec = harnessSpec(harness, join(root, "home"), join(root, "project"));
+    const roster = new Roster(spec);
+    const activeRoot = join(spec.project, spec.activeDir);
+    const collision = join(activeRoot, `scout${spec.extension}`);
+    const untouched = Buffer.from("user-owned legacy filename\n", "utf8");
+    await mkdir(activeRoot, { recursive: true });
+    await writeFile(collision, untouched);
+
+    assert.match(await roster.bench("list scout", bundledPlayers), /scout \| legacy \| conflict/);
+    await assert.rejects(() => roster.bench("on all", bundledPlayers), /unmanaged legacy collision: scout/);
+    assert.deepEqual(await readFile(collision), untouched);
+    assert.deepEqual(listManagedActiveIds(harness, spec.project), []);
+    await assert.rejects(
+      () => readFile(join(activeRoot, `portfolio-management${spec.extension}`), "utf8"),
+      /ENOENT/,
+      "legacy collision preflight must prevent partial activation",
+    );
+  }
+});
+
+test("legacy SDLC profiles support explicit owned cleanup but can never be reactivated", async () => {
+  for (const harness of ["copilot", "opencode", "pi"] as const satisfies readonly HarnessName[]) {
+    const root = await mkdtemp(join(tmpdir(), `harbor-legacy-explicit-${harness}-`));
+    const spec = harnessSpec(harness, join(root, "home"), join(root, "project"));
+    const roster = new Roster(spec);
+    const activeRoot = join(spec.project, spec.activeDir);
+    await mkdir(activeRoot, { recursive: true });
+    for (const id of legacyBundledPlayerIds) {
+      await writeFile(join(activeRoot, `${id}${spec.extension}`), spec.renderPlayer({
+        name: id,
+        description: `Legacy bundled player ${id}`,
+        prompt: `Legacy ${id} instructions`,
+        tools: ["read"],
+      }, "sdlc"), "utf8");
+    }
+
+    await assert.rejects(() => roster.bench("on scout", bundledPlayers), /retired bundled player: scout/);
+    const result = await roster.bench(`off ${legacyBundledPlayerIds.join(" ")}`, bundledPlayers);
+    for (const id of legacyBundledPlayerIds) {
+      assert.match(result, new RegExp(`${id}: turned off`));
+      await assert.rejects(() => readFile(join(activeRoot, `${id}${spec.extension}`), "utf8"), /ENOENT/);
+    }
+  }
+});
+
+test("a failed current-roster activation restores legacy profiles deleted earlier in the same transaction", async () => {
+  class FailingMigrationRoster extends Roster {
+    protected override async applyChange(change: { path: string; content?: string }, index: number): Promise<void> {
+      if (index === 2) throw new Error("injected mixed-migration failure");
+      await super.applyChange(change, index);
+    }
+  }
+  const root = await mkdtemp(join(tmpdir(), "harbor-legacy-rollback-"));
+  const spec = harnessSpec("copilot", join(root, "home"), join(root, "project"));
+  const activeRoot = join(spec.project, spec.activeDir);
+  await mkdir(activeRoot, { recursive: true });
+  const legacyBefore = new Map<string, Buffer>();
+  for (const id of legacyBundledPlayerIds.slice(0, 2)) {
+    const content = spec.renderPlayer({
+      name: id,
+      description: `Legacy bundled player ${id}`,
+      prompt: `Legacy ${id} instructions`,
+      tools: ["read"],
+    }, "sdlc");
+    const path = join(activeRoot, `${id}${spec.extension}`);
+    await writeFile(path, content, "utf8");
+    legacyBefore.set(id, await readFile(path));
+  }
+
+  await assert.rejects(
+    () => new FailingMigrationRoster(spec).bench("on portfolio-management", bundledPlayers),
+    /mixed-migration failure/,
+  );
+  for (const [id, before] of legacyBefore) {
+    assert.deepEqual(await readFile(join(activeRoot, `${id}${spec.extension}`)), before);
+  }
+  await assert.rejects(
+    () => readFile(join(activeRoot, `portfolio-management${spec.extension}`), "utf8"),
+    /ENOENT/,
+  );
+});
+
 test("bench preflights a whole batch before mutating any player", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-batch-"));
   const spec = harnessSpec("pi", join(root, "home"), join(root, "project"));
   const roster = new Roster(spec);
-  const sage = join(spec.project, spec.activeDir, `sage${spec.extension}`);
+  const design = join(spec.project, spec.activeDir, `design${spec.extension}`);
   await mkdir(join(spec.project, spec.activeDir), { recursive: true });
-  await writeFile(sage, "unmanaged", "utf8");
-  await assert.rejects(() => roster.bench("on scout sage", bundledPlayers), /unmanaged collision/);
-  await assert.rejects(() => readFile(join(spec.project, spec.activeDir, `scout${spec.extension}`), "utf8"), /ENOENT/);
-  assert.equal(await readFile(sage, "utf8"), "unmanaged");
+  await writeFile(design, "unmanaged", "utf8");
+  await assert.rejects(() => roster.bench("on portfolio-management design", bundledPlayers), /unmanaged collision/);
+  await assert.rejects(() => readFile(join(spec.project, spec.activeDir, `portfolio-management${spec.extension}`), "utf8"), /ENOENT/);
+  assert.equal(await readFile(design, "utf8"), "unmanaged");
 });
 
 test("a failed multi-file mutation restores the complete prior state", async () => {

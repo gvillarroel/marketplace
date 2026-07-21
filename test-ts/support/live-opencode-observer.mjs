@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
+import { classifyLiveToolTarget } from "./live-tool-targets.mjs";
 
 const schema = "agent-harbor/live-opencode-observer@1";
-const expectedAgents = ["scout", "sage", "smith", "probe", "guard", "pilot"];
+const expectedAgents = ["portfolio-management", "design", "build", "manage", "consume", "dispose"];
 
 function sha256(value) {
   return createHash("sha256").update(String(value), "utf8").digest("hex");
@@ -44,6 +45,16 @@ function commandClass(toolName, args) {
   if (toolName !== "bash") return null;
   const command = typeof args?.command === "string" ? args.command.trim() : "";
   return /^(?:npm(?:\.cmd)?\s+test)(?:\s+--\s*)?$/iu.test(command) ? "npm-test" : "other";
+}
+
+function errorClass(value) {
+  const text = (typeof value === "string" ? value : JSON.stringify(value ?? null)).toLowerCase();
+  if (text.includes("absolute")) return "absolute-path-required";
+  if (/not found|does not exist|enoent/u.test(text)) return "missing-path";
+  if (/permission|denied|not allowed/u.test(text)) return "permission";
+  if (/outside|external/u.test(text)) return "outside-scope";
+  if (/invalid|validation|expected|required/u.test(text)) return "invalid-input";
+  return "other";
 }
 
 export const AgentHarborLiveObserver = async () => {
@@ -108,6 +119,7 @@ export const AgentHarborLiveObserver = async () => {
         callSha256,
         tool: input.tool,
         commandClass: commandClass(input.tool, output.args),
+        targetClass: classifyLiveToolTarget(input.tool, output.args, process.cwd()),
         args: fingerprint(output.args),
       });
     },
@@ -169,7 +181,9 @@ export const AgentHarborLiveObserver = async () => {
           callSha256: sha256(part.callID),
           tool: part.tool,
           commandClass: commandClass(part.tool, part.state.input),
+          targetClass: classifyLiveToolTarget(part.tool, part.state.input, process.cwd()),
           outcome: part.state.status === "completed" ? "ok" : "error",
+          errorClass: part.state.status === "error" ? errorClass(part.state.error) : null,
           result: fingerprint(part.state.status === "completed" ? part.state.output : part.state.error),
         });
         return;
