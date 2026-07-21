@@ -1,3 +1,4 @@
+/** OpenCode plugin entrypoint and translation to Agent Harbor's shared core. */
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { assertInvocablePlayer, listInvocablePlayerIds, listManagedActiveIds, listOwnedActiveIds, loadManagedActivePlayer, requireInvocablePlayer } from "../core/active.js";
@@ -10,6 +11,10 @@ import { commandNames, type CommandName } from "../core/types.js";
 import { OpenCodeOrchestrator, type OpenCodeModel } from "../orchestrators/opencode.js";
 import { harborContext } from "./shared.js";
 
+/**
+ * Creates the OpenCode plugin configuration, command tools, named players, and
+ * bounded team-lead delegation for the current project directory.
+ */
 export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
   const teamLead = rolePlayers.get("team-lead")!;
   const repoCartographer = rolePlayers.get("repo-cartographer")!;
@@ -30,6 +35,8 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
     messageID: string,
     currentDirectory: string,
   ): Promise<{ readonly id: string; readonly model: OpenCodeModel }> => {
+    // SDK-created assistant messages do not reliably repeat the root model.
+    // Walk the bounded ancestry and recover the explicit originating user turn.
     const seen = new Set<string>();
     let cursor = messageID;
     for (let depth = 0; depth < 64; depth += 1) {
@@ -131,6 +138,8 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
         },
       };
       const managedIds = new Set(listManagedActiveIds("opencode", directory));
+      // Owned-but-stale profiles must be removed from host discovery. Leaving
+      // an old host entry could silently retain broader tools than revision 4.
       for (const id of listOwnedActiveIds("opencode", directory)) {
         if (!managedIds.has(id)) delete config.agent[id];
       }

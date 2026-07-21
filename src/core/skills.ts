@@ -1,3 +1,9 @@
+/**
+ * Loading and invocation-scoped isolation of configured repository and GitHub skills.
+ * Only each referenced `SKILL.md` body crosses the boundary: sibling files and ambient skills are
+ * deliberately excluded, and remote content is loaded from an allowlisted pinned commit.
+ */
+
 import { Buffer } from "node:buffer";
 import { mkdtemp, lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -15,19 +21,27 @@ const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const segmentPattern = /^[A-Za-z0-9._-]+$/;
 const maximumCombinedBodyBytes = 30_000;
 
+/** Validated skill guidance loaded from its configured source. */
 export interface LoadedConfiguredSkill {
+  /** Canonical source coordinates supplied by the player definition. */
   readonly reference: SkillReference;
+  /** Instruction body with validated frontmatter removed. */
   readonly body: string;
+  /** Immutable source commit for GitHub skills; absent for project-local skills. */
   readonly commit?: string;
 }
 
+/** Loaded skill plus the isolated `SKILL.md` path exposed to a child invocation. */
 export interface MaterializedConfiguredSkill extends LoadedConfiguredSkill {
   readonly filePath: string;
 }
 
+/** Temporary, invocation-scoped collection of exact configured skill documents. */
 export interface SkillCapsule {
+  /** Unique root under the operating-system temporary directory; absent for an empty capsule. */
   readonly root?: string;
   readonly skills: readonly MaterializedConfiguredSkill[];
+  /** Idempotently removes the entire capsule after validating its cleanup boundary. */
   cleanup(): Promise<void>;
 }
 
@@ -38,6 +52,7 @@ function safeRepositoryPath(value: string): boolean {
     segmentPattern.test(segment) && !segment.toLowerCase().endsWith(".lock"));
 }
 
+/** Validates a project-relative reference to one traversal-safe `SKILL.md` file. */
 export function validateRepositorySkill(value: unknown): RepositorySkill {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid repository skill reference");
   const skill = value as Record<string, unknown>;
@@ -51,6 +66,7 @@ export function validateRepositorySkill(value: unknown): RepositorySkill {
   return skill as unknown as RepositorySkill;
 }
 
+/** Dispatches strict validation according to the skill reference discriminator. */
 export function validateSkillReference(value: unknown): SkillReference {
   if (value && typeof value === "object" && !Array.isArray(value) && (value as { kind?: unknown }).kind === "repo") {
     return validateRepositorySkill(value);
@@ -66,6 +82,8 @@ function contained(root: string, target: string): string {
   return child;
 }
 
+// Lexical containment, component-by-component symlink rejection, and final realpath containment are
+// all required: no project-local skill may redirect the loader outside the supplied project root.
 async function readRepositorySkill(skill: RepositorySkill, project: string): Promise<LoadedConfiguredSkill> {
   const root = resolve(project);
   const target = contained(root, join(root, ...skill.path.split("/")));
@@ -89,6 +107,11 @@ async function readRepositorySkill(skill: RepositorySkill, project: string): Pro
   return { reference: skill, body: parseSkillBody(await readFile(target), skill.name, "repository") };
 }
 
+/**
+ * Loads every explicitly configured skill after validating unique names and source trust.
+ * Repository sources are confined to the project, GitHub sources are pinned by the resolver, and
+ * the combined instruction bodies are capped before being exposed to a child.
+ */
 export async function loadConfiguredSkills(
   definition: PlayerDefinition,
   project: string,
@@ -143,6 +166,12 @@ function safeTemporaryRoot(root: string): boolean {
   return Boolean(rel) && !rel.startsWith("..") && !isAbsolute(rel) && rel.startsWith("agent-harbor-skills-");
 }
 
+/**
+ * Materializes configured skills into a private, uniquely named temporary capsule.
+ * Each skill receives only its canonical `SKILL.md`; no source siblings are copied. Preparation is
+ * all-or-cleaned-up, and the returned cleanup is idempotent and refuses paths outside the expected
+ * operating-system temporary-root prefix.
+ */
 export async function createSkillCapsule(
   definition: PlayerDefinition,
   project: string,
@@ -178,6 +207,11 @@ export async function createSkillCapsule(
   }
 }
 
+/**
+ * Inlines already validated skill guidance into a player prompt for runtimes without capsules.
+ * The original `skills` references are removed from the returned executable definition so loaders
+ * cannot fetch them again, and the final prompt has its own UTF-8 size bound.
+ */
 export function withLoadedSkillGuidance<T extends PlayerDefinition>(
   definition: T,
   loaded: readonly LoadedConfiguredSkill[],
@@ -204,6 +238,7 @@ export function withLoadedSkillGuidance<T extends PlayerDefinition>(
   return { ...prepared, prompt } as T;
 }
 
+/** Formats loaded skills as a deterministic, provenance-labelled bootstrap response. */
 export function formatLoadedSkillGroup(loaded: readonly LoadedConfiguredSkill[]): string {
   if (!loaded.length) throw new Error("player has no configured skills");
   return loaded.map((skill) => [

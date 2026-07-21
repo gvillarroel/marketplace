@@ -1,4 +1,11 @@
 #!/usr/bin/env node
+/**
+ * Portable command-line entrypoint for Agent Harbor.
+ *
+ * Lifecycle commands use the deterministic core directly. A programmatic
+ * contract is allowed only for Copilot, whose SDK can be constructed without
+ * an enclosing host; OpenCode and Pi contracts must inherit their host model.
+ */
 import { executeCommand } from "./core/commands.js";
 import type { CommandName, HarnessName } from "./core/types.js";
 import { deterministicCommandNames } from "./core/types.js";

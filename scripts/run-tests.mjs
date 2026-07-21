@@ -1,3 +1,4 @@
+/** Clean-build test gate that rejects false-green child or TAP outcomes. */
 import { spawn } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";

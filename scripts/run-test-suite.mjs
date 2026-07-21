@@ -1,3 +1,4 @@
+/** Native Node test runner wrapper with an explicit, non-empty TAP contract. */
 import { spawn } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";

@@ -1,3 +1,4 @@
+/** Runs or verifies authenticated OpenCode/Pi team-lead acceptance reports. */
 import { spawn } from "node:child_process";
 import { readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";

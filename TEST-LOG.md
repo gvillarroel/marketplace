@@ -1,21 +1,22 @@
 # Test log — 2026-07-20
 
-Validation was completed in the working tree from base commit
-`7bacf654ab3a73920bdad795a868b93ad08882cb`. This file records only bounded,
+Validation was completed in the working tree from the published baseline
+commit `b3f6923e16f5e5de22065945850d4c2e0da63b77`. This file records only bounded,
 sanitized evidence. It intentionally excludes prompts, responses, hidden fixture
 values, temporary paths, commands selected by a model, raw errors and
 credentials.
 
 ## Final offline gate
 
-Recorded at `2026-07-20T19:13:25-04:00`.
+Recorded at `2026-07-20T22:30:16-04:00`.
 
 | Command | Result |
 | --- | --- |
-| `npm test` | Passed: 66 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 12,887.626 ms |
+| `npm test` | Passed: 82 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 23,549.546 ms |
 | Native CLI discovery inside `npm test` | Passed: Copilot CLI, OpenCode and Pi |
+| `npm run typecheck` | Passed |
 | `npm audit --audit-level=high` | Passed: 0 vulnerabilities |
-| `npm pack --dry-run --json` | Passed: 69 entries, 62,886 bytes packed, 300,616 bytes unpacked |
+| `npm pack --dry-run --json` | Passed: 84 entries, 70,492 bytes packed, 409,147 bytes unpacked |
 | `node scripts/run-live-codex-leads.mjs all --verify-report-only` | Passed: both Codex live reports have the expected schema, status and freshness |
 | `node scripts/run-live-lead.mjs --verify-report-only` | Passed: the Copilot v2 live report has the expected schema, status and freshness |
 | `git diff --check` | Passed |

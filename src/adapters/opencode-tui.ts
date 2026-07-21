@@ -1,3 +1,4 @@
+/** Direct OpenCode TUI palette commands for zero-model lifecycle operations. */
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui";
 import type { DeterministicCommandName } from "../core/types.js";
 import { runDeterministicCommand } from "./direct.js";
@@ -16,6 +17,7 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Creates palette commands that call the deterministic backend directly. */
 export function openCodeDirectCommands(api: TuiPluginApi): DirectTuiCommand[] {
   const execute = async (command: DeterministicCommandName, args: string): Promise<void> => {
     try {
@@ -56,4 +58,5 @@ const plugin: TuiPluginModule & { id: string } = {
   tui: async (api) => { api.keymap.registerLayer({ commands: openCodeDirectCommands(api) }); },
 };
 
+/** OpenCode TUI plugin entrypoint. */
 export default plugin;

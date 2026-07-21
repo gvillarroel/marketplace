@@ -1,3 +1,9 @@
+/**
+ * Read-only discovery and validation of project-active player profiles.
+ * Ownership markers identify Agent Harbor files; canonical validation separately decides whether
+ * their complete executable representation is current and therefore invocable.
+ */
+
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { bundledPlayers, rolePlayers } from "./defaults.js";
@@ -14,8 +20,11 @@ const activeLocations: Record<HarnessName, { directory: string; extension: strin
   pi: { directory: ".pi/agents", extension: ".md" },
 };
 
+/** Resolved player identity returned only after its definition is safe to invoke. */
 export interface InvocablePlayerIdentity {
+  /** Stable player identifier used by harness delegation tools. */
   id: string;
+  /** Whether the definition is built in or recovered from an active managed profile. */
   source: "fixed" | "active";
   /** Validated definition recovered from a fixed role or revision-4 managed profile. */
   definition: PlayerDefinition;
@@ -62,6 +71,8 @@ function expectedRoster(id: string): "personal" | "sdlc" {
   return bundledPlayers.has(id) ? "sdlc" : "personal";
 }
 
+// Reading proves only ownership and basic filesystem safety. Canonicality is intentionally a
+// separate step so callers can distinguish stale Agent Harbor files from unmanaged collisions.
 function readManagedActiveProfile(harness: HarnessName, project: string, id: string): string | undefined {
   const projectRoot = resolve(project);
   const path = activePath(harness, projectRoot, id);
@@ -79,6 +90,8 @@ function readManagedActiveProfile(harness: HarnessName, project: string, id: str
   }
 }
 
+// A managed definition must decode from the profile and reproduce the complete revision-4 profile.
+// Merely carrying an Agent Harbor ownership marker is insufficient for execution.
 function validatedDefinition(content: string, id: string, harness: HarnessName, project: string): PlayerDefinition {
   const definition = validatePlayer(decodePlayer(content, id), bundledPlayers.has(id));
   if (!isCanonicalPlayerProfile(content, harness, definition, expectedRoster(id), project)) {
@@ -87,7 +100,11 @@ function validatedDefinition(content: string, id: string, harness: HarnessName, 
   return definition;
 }
 
-/** Lists project profiles that are owned by Agent Harbor and safe to invoke. */
+/**
+ * Lists active files carrying a structurally valid Agent Harbor ownership marker.
+ * The result may include stale revision-3 or modified revision-4 profiles; use
+ * {@link listManagedActiveIds} when selecting an invocation target.
+ */
 export function listOwnedActiveIds(harness: HarnessName, project: string): string[] {
   const projectRoot = resolve(project);
   const { directory, extension } = locationFor(harness);
@@ -117,7 +134,7 @@ export function listOwnedActiveIds(harness: HarnessName, project: string): strin
   }
 }
 
-/** Lists owned profiles whose entire executable representation is canonical and safe to invoke. */
+/** Lists owned revision-4 profiles whose complete executable representation is canonical. */
 export function listManagedActiveIds(harness: HarnessName, project: string): string[] {
   const projectRoot = resolve(project);
   return listOwnedActiveIds(harness, projectRoot).filter((id) => {
@@ -128,13 +145,14 @@ export function listManagedActiveIds(harness: HarnessName, project: string): str
   });
 }
 
-/** Fixed roles first, followed by ownership-verified project profiles. */
+/** Lists fixed roles first, followed by canonical project profiles that are safe to invoke. */
 export function listInvocablePlayerIds(harness: HarnessName, project: string): string[] {
   const ids = new Set(rolePlayers.keys());
   for (const id of listManagedActiveIds(harness, project)) ids.add(id);
   return [...ids];
 }
 
+/** Loads one active player only if it is owned, revision-4, validated, and canonical. */
 export function loadManagedActivePlayer(harness: HarnessName, project: string, id: unknown): PlayerDefinition {
   const validId = requireValidId(id);
   const content = readManagedActiveProfile(harness, project, validId);
@@ -142,10 +160,12 @@ export function loadManagedActivePlayer(harness: HarnessName, project: string, i
   return validatedDefinition(content, validId, harness, resolve(project));
 }
 
+/** Pi-specific convenience wrapper for loading a canonical active player. */
 export function loadPiActivePlayer(project: string, id: unknown): PlayerDefinition {
   return loadManagedActivePlayer("pi", project, id);
 }
 
+/** Resolves a fixed role or canonical active profile and returns its validated definition. */
 export function requireInvocablePlayer(harness: HarnessName, project: string, id: unknown): InvocablePlayerIdentity {
   locationFor(harness);
   const validId = requireValidId(id);
@@ -154,10 +174,12 @@ export function requireInvocablePlayer(harness: HarnessName, project: string, id
   return { id: validId, source: "active", definition: loadManagedActivePlayer(harness, project, validId) };
 }
 
+/** Narrows an unknown identifier to a string after proving the corresponding player is invocable. */
 export function assertInvocablePlayer(harness: HarnessName, project: string, id: unknown): asserts id is string {
   requireInvocablePlayer(harness, project, id);
 }
 
+/** Returns whether an identifier resolves to a fixed role or canonical active profile. */
 export function isInvocablePlayer(harness: HarnessName, project: string, id: unknown): boolean {
   try { requireInvocablePlayer(harness, project, id); return true; }
   catch { return false; }

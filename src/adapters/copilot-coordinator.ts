@@ -1,13 +1,19 @@
+/**
+ * Copilot hook guard that constrains native `task` delegation and correlates
+ * host lifecycle events into privacy-preserving Agent Harbor evidence.
+ */
 import { resolve } from "node:path";
 import { listManagedActiveIds } from "../core/active.js";
 import { emitHarborEvidence, fingerprintHarborEvidence, type HarborEvidenceHook } from "../core/evidence.js";
 
+/** Minimal host identity needed to resolve a logical Harbor player. */
 export interface CopilotAgentIdentity {
   id: string;
   path?: string;
   userInvocable?: boolean;
 }
 
+/** Narrow RPC surface used to refresh Copilot's selected and available agents. */
 export interface CopilotCoordinatorSession {
   rpc: {
     agent: {
@@ -27,12 +33,14 @@ interface PreToolDecision {
   permissionDecision: "allow" | "deny";
   permissionDecisionReason?: string;
 }
+/** Hook callbacks installed into the Copilot extension session. */
 export interface CopilotCoordinatorHooks {
   onUserPromptSubmitted(input: UserPromptHookInput, invocation: HookInvocation): Promise<void>;
   onPreToolUse(input: ToolHookInput, invocation: HookInvocation): Promise<PreToolDecision | void>;
   onPostToolUse(input: PostToolHookInput, invocation: HookInvocation): Promise<void>;
   onPostToolUseFailure(input: PostToolFailureHookInput, invocation: HookInvocation): Promise<void>;
 }
+/** Stateful guard plus host-event observer used by the Copilot extension. */
 export interface CopilotCoordinatorGuard {
   hooks: CopilotCoordinatorHooks;
   refresh(): Promise<void>;
@@ -52,6 +60,7 @@ export interface CopilotCoordinatorGuard {
   }): void;
 }
 
+/** Maps stable Harbor role IDs to Copilot's plugin-qualified runtime IDs. */
 export const copilotFixedAgentIds: ReadonlyMap<string, string> = new Map([
   ["team-lead", "agent-foundry:team-lead"],
   ["repo-cartographer", "repo-cartographer:repo-cartographer"],
@@ -67,11 +76,12 @@ function activePath(project: string, id: string): string {
   return resolve(project, ".github", "agents", `${id}.agent.md`);
 }
 
+/** Lists canonical active project profile IDs without trusting arbitrary files. */
 export function listCopilotActiveProfileIds(project: string): string[] {
   return listManagedActiveIds("copilot", project);
 }
 
-/** Resolve one logical Harbor ID to the exact Copilot agent exposed by the host. */
+/** Resolves one logical ID to exactly one currently invocable Copilot identity. */
 export function resolveCopilotPlayer(id: string, agents: readonly CopilotAgentIdentity[], project: string): CopilotAgentIdentity {
   const fixedId = copilotFixedAgentIds.get(id);
   if (fixedId) {
@@ -138,6 +148,8 @@ export function createCopilotCoordinatorGuard(
   } = { ready: false, agents: [] };
   let selectionEpoch = 0;
   let guard = Promise.resolve();
+  // Hook callbacks and asynchronous refreshes share state. A tiny promise lock
+  // makes their ordering deterministic without blocking the host event loop.
   const locked = <T>(action: () => Promise<T> | T): Promise<T> => {
     const result = guard.then(action, action);
     guard = result.then(() => undefined, () => undefined);

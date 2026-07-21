@@ -1,3 +1,8 @@
+/**
+ * Performs the single canonical build and mirrors the generated Copilot
+ * runtime into both plugins. Each plugin needs its own physical copy because
+ * Copilot resolves `${PLUGIN_ROOT}` relative to the selected plugin.
+ */
 import { cp, mkdir, readdir, rm } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";

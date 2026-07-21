@@ -1,3 +1,4 @@
+/** Runs or verifies the authenticated Copilot team-lead acceptance report. */
 import { spawn } from "node:child_process";
 import { readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";

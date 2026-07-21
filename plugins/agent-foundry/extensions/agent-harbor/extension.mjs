@@ -1,3 +1,8 @@
+/**
+ * Copilot extension bootstrap. It registers zero-model lifecycle commands,
+ * direct player invocations, and the coordinator hook guard while delegating
+ * all business rules to the generated TypeScript runtime.
+ */
 import { joinSession } from "@github/copilot-sdk/extension";
 import {
   copilotFixedAgentIds,
@@ -19,6 +24,8 @@ function activeProfileIds(project) { return listCopilotActiveProfileIds(project)
 
 let selectionQueue = Promise.resolve();
 function withSelectionLock(action) {
+  // Direct invocations temporarily change the host's selected agent. Serialize
+  // them so every call can restore the selection it actually observed.
   const result = selectionQueue.then(action, action);
   selectionQueue = result.then(() => undefined, () => undefined);
   return result;
@@ -54,6 +61,8 @@ async function runPlayer(id, rawTask) {
     }
 
     if (selectionAttempted) {
+      // Restoring host selection is part of the operation. Preserve both the
+      // task and restoration failures when they happen together.
       try {
         if (previous.agent) await session.rpc.agent.select({ name: previous.agent.id });
         else await session.rpc.agent.deselect();
@@ -73,6 +82,8 @@ const callableIds = [...new Set([...knownPlayers.keys(), ...startupActiveIds])];
 const guardEvidenceQueue = [];
 let guardEvidenceLogging = Promise.resolve();
 const coordinator = createCopilotCoordinatorGuard(() => session, (event) => {
+  // Only bounded fingerprints and correlation metadata are logged; raw tasks
+  // and child responses never enter the extension evidence stream.
   if (event.phase !== "target.resolved") return;
   guardEvidenceQueue.push({
     schema: event.schema,

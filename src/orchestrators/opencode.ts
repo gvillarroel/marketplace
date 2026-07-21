@@ -1,3 +1,4 @@
+/** OpenCode child-session orchestration for named agents and contracts. */
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { ContractDefinition, GithubResolver, Orchestrator } from "../core/types.js";
 import { GhResolver } from "../core/github.js";
@@ -8,12 +9,14 @@ import { loadConfiguredSkills, withLoadedSkillGuidance } from "../core/skills.js
 
 type Client = PluginInput["client"];
 
+/** Explicit OpenCode model identity inherited from the originating user turn. */
 export interface OpenCodeModel {
   readonly providerID: string;
   readonly modelID: string;
   readonly variant?: string;
 }
 
+/** Executes each OpenCode delegation or contract in one disposable session. */
 export class OpenCodeOrchestrator implements Orchestrator {
   readonly harness = "opencode" as const;
   constructor(
@@ -23,6 +26,7 @@ export class OpenCodeOrchestrator implements Orchestrator {
     private readonly evidenceHook?: HarborEvidenceHook,
   ) {}
 
+  /** Runs an exact named OpenCode agent using an explicit inherited model. */
   async runAgent(
     agent: string,
     task: string,
@@ -98,6 +102,8 @@ export class OpenCodeOrchestrator implements Orchestrator {
         error: fingerprintHarborEvidence(String(error)),
       });
     } finally {
+      // Deleting the child is part of correctness, not best-effort telemetry;
+      // execution and cleanup failures are therefore reported together.
       let cleanupError: unknown;
       try {
         const removed = await this.client.session.delete({ path: { id }, query: { directory: this.directory }, throwOnError: true });
@@ -121,6 +127,7 @@ export class OpenCodeOrchestrator implements Orchestrator {
     return output;
   }
 
+  /** Runs one portable contract using a closed OpenCode tool policy. */
   async run(definition: ContractDefinition, signal?: AbortSignal): Promise<string> {
     signal?.throwIfAborted();
     const loaded = await loadConfiguredSkills(definition, this.directory, this.github, trustedSkills, signal);

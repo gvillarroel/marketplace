@@ -1,3 +1,4 @@
+/** Zero-model adapter shared by CLI and native deterministic controls. */
 import { executeCommand } from "../core/commands.js";
 import type { DeterministicCommandName, HarnessName, Orchestrator } from "../core/types.js";
 import { harborContext } from "./shared.js";
@@ -9,7 +10,11 @@ function noModelOrchestrator(harness: HarnessName): Orchestrator {
   };
 }
 
-/** Execute a lifecycle control without creating a model session or child. */
+/**
+ * Executes a lifecycle control without creating a model session or child.
+ * The injected orchestrator is a tripwire: deterministic commands must never
+ * cross the inference boundary, even if command routing regresses.
+ */
 export function runDeterministicCommand(
   harness: HarnessName,
   command: DeterministicCommandName,

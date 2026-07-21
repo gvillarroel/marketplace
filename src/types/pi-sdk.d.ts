@@ -1,3 +1,8 @@
+/**
+ * Narrow ambient declaration for the Pi SDK surface Agent Harbor consumes.
+ * Keeping this contract explicit makes host-version assumptions reviewable
+ * without duplicating Pi's complete public type model.
+ */
 declare module "@earendil-works/pi-coding-agent" {
   export interface Model {
     readonly id: string;

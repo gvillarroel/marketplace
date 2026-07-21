@@ -1,3 +1,4 @@
+/** Pi in-memory child orchestration with a fail-closed skill registry. */
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { ContractDefinition, GithubResolver, Orchestrator } from "../core/types.js";
@@ -15,6 +16,7 @@ type PiThinkingLevel = import("@earendil-works/pi-coding-agent").ThinkingLevel;
 type PiSkill = import("@earendil-works/pi-coding-agent").Skill;
 type PiSkillLoadResult = import("@earendil-works/pi-coding-agent").SkillLoadResult;
 
+/** Optional host model and reasoning settings inherited by a Pi child. */
 export interface PiSessionOptions {
   readonly model?: PiModel;
   readonly thinkingLevel?: PiThinkingLevel;
@@ -29,6 +31,8 @@ function assertIsolatedSkills(
   result: PiSkillLoadResult,
   expectedSkills: readonly MaterializedConfiguredSkill[],
 ): PiSkill[] {
+  // Pi's loader remains the parser of record, but every discovered name and
+  // physical file must exactly match the invocation capsule allowlist.
   if (result.diagnostics.length) {
     const details = result.diagnostics.map((diagnostic) =>
       `${diagnostic.type}: ${diagnostic.message}${diagnostic.path ? ` (${diagnostic.path})` : ""}`,
@@ -61,6 +65,7 @@ async function cleanupCapsuleAfterPreparationFailure(capsule: SkillCapsule, fail
   throw failure;
 }
 
+/** Executes each contract in one isolated, in-memory Pi SDK session. */
 export class PiOrchestrator implements Orchestrator {
   readonly harness = "pi" as const;
   constructor(
@@ -72,6 +77,10 @@ export class PiOrchestrator implements Orchestrator {
     private readonly evidenceHook?: HarborEvidenceHook,
     private readonly sessionOptions: PiSessionOptions = {},
   ) {}
+  /**
+   * Loads only the invocation capsule, creates one child, captures text
+   * evidence, and disposes every session/capsule resource on all exit paths.
+   */
   async run(definition: ContractDefinition, signal?: AbortSignal): Promise<string> {
     signal?.throwIfAborted();
     const capsule = await createSkillCapsule(definition, this.directory, this.github, trustedSkills, signal);
@@ -166,6 +175,8 @@ export class PiOrchestrator implements Orchestrator {
         error: fingerprintHarborEvidence(String(error)),
       });
     } finally {
+      // Preserve all cleanup failures, and combine them with a prompt failure
+      // when both occur so callers never receive a misleading single cause.
       const cleanupErrors: unknown[] = [];
       signal?.removeEventListener("abort", abort);
       if (abortPromise) {

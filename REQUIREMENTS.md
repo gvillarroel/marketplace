@@ -1,6 +1,6 @@
 # Requisitos normativos de Agent Harbor
 
-Este documento define el alcance de Agent Harbor 0.11. Las palabras **DEBE**,
+Este documento define el alcance de Agent Harbor 0.12. Las palabras **DEBE**,
 **NO DEBE** y **PUEDE** son normativas. Un requisito sólo se considera cumplido
 cuando existe una prueba indicada en la matriz de trazabilidad.
 
