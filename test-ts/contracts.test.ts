@@ -64,8 +64,9 @@ for (const harness of ["copilot", "opencode", "pi"] as const) {
   });
 }
 
-test("bench tokenizes commas and spaces, deduplicates IDs, and preserves first-seen output order", async () => {
+test("bench tokenizes commas and spaces, deduplicates IDs, and preserves first-seen output order", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "harbor-bench-tokenization-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
   const roster = new Roster(harnessSpec("pi", join(root, "home"), join(root, "project")));
   assert.equal(
     await roster.bench("on design, portfolio-management, design", bundledPlayers),
@@ -97,9 +98,10 @@ test("revision 3 personal profiles remain removable but cannot be reactivated wi
   }
 });
 
-test("bench off preserves an owned active profile when its personal registration is missing or corrupt", async () => {
+test("bench off preserves an owned active profile when its personal registration is missing or corrupt", async (t) => {
   for (const registrationState of ["missing", "corrupt"] as const) {
     const root = await mkdtemp(join(tmpdir(), `harbor-bench-registration-${registrationState}-`));
+    t.after(() => rm(root, { recursive: true, force: true }));
     const spec = harnessSpec("pi", join(root, "home"), join(root, "project"));
     const roster = new Roster(spec);
     await roster.join({ name: "worker", description: "Worker", prompt: "Work", tools: ["read"] });

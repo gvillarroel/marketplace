@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { AgentHarborPlugin } from "../src/adapters/opencode.js";
 import { listInvocablePlayerIds, listManagedActiveIds, loadPiActivePlayer, requireInvocablePlayer } from "../src/core/active.js";
 import { bundledPlayers, rolePlayers } from "../src/core/defaults.js";
+import { harnessProfileLayout } from "../src/core/harnesses.js";
 import { Roster } from "../src/core/lifecycle.js";
 import { harnessSpec, nativeTools, openCodeToolPolicy } from "../src/core/profiles.js";
 import type { HarnessName, Orchestrator } from "../src/core/types.js";
@@ -19,6 +20,11 @@ const fullCycle = cycleDataset.cycles.find((cycle) => cycle.id === "full-sdlc")!
 const fixedIds = cycleDataset.roster.fixed.map((player) => player.id);
 const sdlcIds = cycleDataset.roster.bundled.map((player) => player.id);
 const openCodeModel = { providerID: "openai", modelID: "gpt-5.3-codex-spark", variant: "low" } as const;
+const expectedProfileLayouts = {
+  copilot: { activeDir: ".github/agents", extension: ".agent.md" },
+  opencode: { activeDir: ".opencode/agents", extension: ".md" },
+  pi: { activeDir: ".pi/agents", extension: ".md" },
+} as const satisfies Record<HarnessName, { activeDir: string; extension: string }>;
 
 async function runMission(orchestrator: Orchestrator): Promise<string> {
   let evidence = "";
@@ -50,6 +56,22 @@ test("the factory roster has exactly three active roles and six opt-in SDLC play
     assert.equal(player.name.length > 0, true);
     assert.equal(player.description.length > 0, true);
     assert.equal(player.prompt.trim().length > 0, true);
+  }
+});
+
+test("each harness keeps its literal active-profile layout and join writes exactly there", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-layout-matrix-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const harness of ["copilot", "opencode", "pi"] as const satisfies readonly HarnessName[]) {
+    const expected = expectedProfileLayouts[harness];
+    const home = join(root, harness, "home");
+    const project = join(root, harness, "project");
+    const spec = harnessSpec(harness, home, project);
+    assert.deepEqual(harnessProfileLayout(harness), expected);
+    assert.deepEqual({ activeDir: spec.activeDir, extension: spec.extension }, expected);
+    await new Roster(spec).join({ name: "layout-worker", description: "Layout worker", prompt: "Verify layout", tools: ["read"] });
+    const profile = await readFile(join(project, expected.activeDir, `layout-worker${expected.extension}`), "utf8");
+    assert.match(profile, /agent-foundry:profile id=layout-worker revision=4/);
   }
 });
 
