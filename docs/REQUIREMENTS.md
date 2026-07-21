@@ -184,10 +184,17 @@ ruta cero modelo.
 ### 3.2 Mutaciones
 
 - Una operación multiarchivo **DEBE** completar todo el preflight antes de
-  escribir, tomar un lock administrado exclusivo por roster, capturar los bytes
-  anteriores, escribir cada archivo mediante reemplazo atómico, verificar cada
-  efecto y restaurar el lote byte por byte si falla un paso. Un lock ajeno o
-  ambiguo se trata como colisión y nunca se elimina.
+  escribir, tomar un lock administrado exclusivo por roster y capturar bytes e
+  identidad de los archivos anteriores. Cada directorio de mutación **DEBE**
+  permanecer ligado como capability por un worker Node efímero que sólo acepte
+  operaciones relativas de un segmento; el path canónico y su `dev/ino`
+  **DEBEN** revalidarse antes y después de cada efecto. El journal **DEBE**
+  conservar por hardlink el inode anterior, verificar cada publicación o
+  ausencia y restaurar el lote byte por byte sobre el directorio originalmente
+  ligado si falla un paso. Intercambiar el padre/ancestro durante create,
+  replace, delete, lock, rollback o cleanup **DEBE** fallar cerrado y nunca
+  redirigir escritura o eliminación al padre sustituto. Un lock o reemplazo
+  ajeno/ambiguo se trata como colisión y nunca se elimina.
 - Repetir una operación con el mismo estado **DEBE** ser idempotente.
 - Nunca se elimina un directorio.
 - Un perfil administrado diferente sólo se reemplaza con `replace: true`.
@@ -855,6 +862,11 @@ capacidades ordinarias que el usuario le declaró.
 ## 6. Portabilidad e instalación
 
 - Node.js `>=22.19.0` es el único runtime de implementación y pruebas requerido.
+- Un host empaquetado cuyo `process.execPath` no sea Node **DEBE** seleccionar
+  un ejecutable Node absoluto `>=22.19.0` mediante candidatos acotados,
+  canonicalizados y probados fuera del proyecto/home; no puede pedir al shell
+  que resuelva un nombre, aceptar entradas PATH relativas ni heredar
+  `NODE_OPTIONS`/`NODE_PATH` al worker lifecycle.
 - El código **NO DEBE** asumir shell, separador de paths ni sufijo ejecutable.
 - `npm run build` **DEBE** eliminar artefactos previos y producir `dist` y el
   runtime Copilot desde la misma fuente sin red ni credenciales; un error de

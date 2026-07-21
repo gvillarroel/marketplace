@@ -92,8 +92,9 @@ function reservationMatches(reservation: OpenCodeTeamReservationSnapshot, filter
   if (query.field === "member") return includes([reservation.agent], query.value);
   if (query.field === "status") return equals([reservation.phase], query.value);
   if (query.field === "mode") return equals([reservation.invocation], query.value);
+  if (query.field === "run") return includes([reservation.id], query.value);
   if (query.field) return false;
-  return includes([reservation.agent], query.value)
+  return includes([reservation.agent, reservation.id], query.value)
     || equals([reservation.phase, reservation.invocation], query.value);
 }
 
@@ -220,8 +221,10 @@ function renderActivity(runs: readonly OpenCodeTeamRunSnapshot[], hasOtherActive
 
 function renderReservationActivity(reservations: readonly OpenCodeTeamReservationSnapshot[]): string[] {
   return reservations.flatMap((reservation) => [
-    `◐ ${reservation.agent} · ${reservation.invocation} lifecycle · ${reservation.phase} · ${formatElapsed(reservation.elapsedMs)}`,
-    "  Native run telemetry is not yet verified; wait for a run ID before using stop.",
+    `◐ ${reservation.agent} · run ${reservation.id} · ${reservation.invocation} lifecycle · ${reservation.phase} · ${formatElapsed(reservation.elapsedMs)}`,
+    reservation.stopAvailable
+      ? "  Cross-isolate owner claim verified in this OpenCode process; /team stop <run-id|all> waits for terminal cleanup."
+      : "  Another OpenCode process owns this claim; inspect or stop it from that process.",
   ]);
 }
 
@@ -230,7 +233,7 @@ function compactActivityLine(run: OpenCodeTeamRunSnapshot): string {
 }
 
 function compactReservationLine(reservation: OpenCodeTeamReservationSnapshot): string {
-  return `◐ ${reservation.agent} · ${reservation.invocation} lifecycle · ${reservation.phase} · ${formatElapsed(reservation.elapsedMs)}`;
+  return `◐ ${reservation.agent} · run ${reservation.id} · ${reservation.invocation} lifecycle · ${reservation.phase} · ${formatElapsed(reservation.elapsedMs)}`;
 }
 
 function compactLeadAccess(

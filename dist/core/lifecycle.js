@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
-import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { bundledPlayers, trustedSkills } from "./defaults.js";
 import { isHarborId } from "./identity.js";
@@ -31,6 +31,8 @@ const maximumTransactionFileBytes = 30_000;
 const lifecycleWorkerRpcTimeoutMs = 5_000;
 const lifecycleWorkerExitTimeoutMs = 2_000;
 const lifecycleRuntimeProbeTimeoutMs = 2_000;
+const lifecycleRuntimeResolutionTimeoutMs = 4_500;
+const maximumLifecycleRuntimeCandidates = 64;
 const lifecycleRuntimeProbeMarker = "agent-harbor-node-runtime-v1";
 const minimumLifecycleNodeVersion = "22.19.0";
 /** Parses bench syntax without touching roster state or the filesystem. */
@@ -128,7 +130,7 @@ function isWithinAnyRoot(path, roots) {
         if (dirname(absoluteRoot) === absoluteRoot)
             return false;
         const rel = relative(absoluteRoot, target);
-        return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+        return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
     });
 }
 function sanitizedLifecycleWorkerEnvironment(source) {
@@ -140,14 +142,14 @@ function sanitizedLifecycleWorkerEnvironment(source) {
     }
     return environment;
 }
-function lifecycleNodeCandidates(hostExecutable, environment, platform = process.platform) {
+function lifecycleNodeCandidates(hostExecutable, environment, forbiddenRoots, platform = process.platform) {
     const candidates = [];
     const seen = new Set();
     const executableNames = platform === "win32" ? ["node.exe"] : ["node", "nodejs"];
     const addExecutable = (value) => {
         if (typeof value !== "string" || value.length === 0 || value.length > 32_768 || value.includes("\0"))
             return;
-        if (!isAbsolute(value) || !isNodeExecutableName(value))
+        if (!isAbsolute(value) || !isNodeExecutableName(value) || isWithinAnyRoot(value, forbiddenRoots))
             return;
         const key = platform === "win32" ? value.toLowerCase() : value;
         if (!seen.has(key)) {
@@ -187,32 +189,68 @@ function lifecycleNodeCandidates(hostExecutable, environment, platform = process
             addExecutable(candidate);
     }
     // Never ask the OS to search PATH. Empty entries mean cwd and relative
-    // entries are cwd-relative, so both are intentionally ignored.
+    // entries are cwd-relative, so both are intentionally ignored. Absolute
+    // entries are still rejected later when they fall inside a protected root.
+    // Fixed install roots stay ahead so an oversized PATH cannot starve them.
     const pathValue = environment.PATH ?? environment.Path;
     if (typeof pathValue === "string" && pathValue.length <= 1_000_000) {
-        for (const entry of pathValue.split(delimiter).slice(0, 256)) {
+        for (const entry of pathValue.split(delimiter).slice(0, maximumLifecycleRuntimeCandidates)) {
             const directory = entry.trim();
             if (!directory || !isAbsolute(directory))
                 continue;
             addDirectory(directory);
         }
     }
-    return candidates.slice(0, 512);
+    return candidates.slice(0, maximumLifecycleRuntimeCandidates);
 }
-async function probeLifecycleNodeRuntime(candidate, environment, forbiddenRoots) {
+async function terminateRuntimeProbe(child) {
+    if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined)
+        return;
+    child.kill();
+    const exited = await Promise.race([
+        new Promise((resolveExit) => child.once("close", () => resolveExit(true))),
+        delay(250).then(() => false),
+    ]);
+    if (exited || child.exitCode !== null || child.signalCode !== null)
+        return;
+    child.kill("SIGKILL");
+    await Promise.race([
+        new Promise((resolveExit) => child.once("close", () => resolveExit())),
+        delay(250).then(() => undefined),
+    ]);
+}
+async function canonicalLifecycleNodeExecutable(candidate, forbiddenRoots, timeoutMs) {
+    let timeout;
+    const resolved = (async () => {
+        try {
+            const executable = await realpath(candidate);
+            const stat = await lstat(executable);
+            if (!stat.isFile() || isWithinAnyRoot(executable, forbiddenRoots))
+                return undefined;
+            return executable;
+        }
+        catch {
+            return undefined;
+        }
+    })();
+    const result = await Promise.race([
+        resolved,
+        new Promise((resolveTimeout) => {
+            timeout = setTimeout(() => resolveTimeout(undefined), Math.max(1, timeoutMs));
+        }),
+    ]);
+    if (timeout)
+        clearTimeout(timeout);
+    return result;
+}
+async function probeLifecycleNodeRuntime(candidate, environment, forbiddenRoots, timeoutMs) {
     if (!isAbsolute(candidate) || !isNodeExecutableName(candidate) || isWithinAnyRoot(candidate, forbiddenRoots)) {
         return undefined;
     }
-    let canonicalCandidate;
-    try {
-        canonicalCandidate = await realpath(candidate);
-        const stat = await lstat(canonicalCandidate);
-        if (!stat.isFile() || isWithinAnyRoot(canonicalCandidate, forbiddenRoots))
-            return undefined;
-    }
-    catch {
+    const deadline = Date.now() + Math.max(1, timeoutMs);
+    const canonicalCandidate = await canonicalLifecycleNodeExecutable(candidate, forbiddenRoots, deadline - Date.now());
+    if (!canonicalCandidate || Date.now() >= deadline)
         return undefined;
-    }
     const probeSource = `process.stdout.write(JSON.stringify({marker:${JSON.stringify(lifecycleRuntimeProbeMarker)},version:process.versions.node,execPath:process.execPath}))`;
     const child = spawn(canonicalCandidate, ["--input-type=module", "--eval", probeSource], {
         env: environment,
@@ -226,23 +264,31 @@ async function probeLifecycleNodeRuntime(candidate, environment, forbiddenRoots)
         if (output.length > 2_048)
             child.kill();
     });
-    const exited = await new Promise((resolveProbe) => {
+    const completion = new Promise((resolveProbe) => {
         let settled = false;
         const finish = (ok) => {
             if (settled)
                 return;
             settled = true;
-            clearTimeout(timer);
             resolveProbe(ok);
         };
-        const timer = setTimeout(() => {
-            child.kill();
-            finish(false);
-        }, lifecycleRuntimeProbeTimeoutMs);
         child.once("error", () => finish(false));
-        child.once("exit", (code, signal) => finish(code === 0 && signal === null));
+        child.once("close", (code, signal) => finish(code === 0 && signal === null));
     });
-    if (!exited || output.length > 2_048)
+    let timeout;
+    const exited = await Promise.race([
+        completion,
+        new Promise((resolveTimeout) => {
+            timeout = setTimeout(() => resolveTimeout(undefined), Math.max(1, deadline - Date.now()));
+        }),
+    ]);
+    if (timeout)
+        clearTimeout(timeout);
+    if (exited !== true) {
+        await terminateRuntimeProbe(child);
+        return undefined;
+    }
+    if (output.length > 2_048)
         return undefined;
     let result;
     try {
@@ -255,21 +301,18 @@ async function probeLifecycleNodeRuntime(candidate, environment, forbiddenRoots)
         || typeof result.execPath !== "string" || !isAbsolute(result.execPath) || !isNodeExecutableName(result.execPath)) {
         return undefined;
     }
-    try {
-        const executable = await realpath(result.execPath);
-        const stat = await lstat(executable);
-        if (!stat.isFile() || isWithinAnyRoot(executable, forbiddenRoots))
-            return undefined;
-        return executable;
-    }
-    catch {
+    if (Date.now() >= deadline)
         return undefined;
-    }
+    return canonicalLifecycleNodeExecutable(result.execPath, forbiddenRoots, deadline - Date.now());
 }
 async function resolveLifecycleNodeRuntime(hostExecutable, sourceEnvironment, forbiddenRoots) {
     const environment = sanitizedLifecycleWorkerEnvironment(sourceEnvironment);
-    for (const candidate of lifecycleNodeCandidates(hostExecutable, sourceEnvironment)) {
-        const executable = await probeLifecycleNodeRuntime(candidate, environment, forbiddenRoots);
+    const deadline = Date.now() + lifecycleRuntimeResolutionTimeoutMs;
+    for (const candidate of lifecycleNodeCandidates(hostExecutable, sourceEnvironment, forbiddenRoots)) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0)
+            break;
+        const executable = await probeLifecycleNodeRuntime(candidate, environment, forbiddenRoots, Math.min(lifecycleRuntimeProbeTimeoutMs, remaining));
         if (executable)
             return { executable, environment };
     }
@@ -681,6 +724,8 @@ class LifecycleDirectoryWorker {
     identityValue;
     sequence = 0;
     closed = false;
+    processClosed = false;
+    termination;
     pending = new Map();
     constructor(child, canonicalPath, identityValue) {
         this.child = child;
@@ -692,6 +737,7 @@ class LifecycleDirectoryWorker {
             if (!this.closed)
                 this.fail(new Error(`lifecycle worker exited unexpectedly (${code ?? signal ?? "unknown"})`));
         });
+        child.on("close", () => { this.processClosed = true; });
     }
     get identity() { return this.identityValue; }
     get pid() {
@@ -842,27 +888,35 @@ class LifecycleDirectoryWorker {
             await this.terminate();
         }
     }
-    async terminate() {
-        if (this.closed)
-            return;
-        this.closed = true;
-        this.fail(new Error("lifecycle worker closed"));
-        if (this.child.connected)
-            this.child.disconnect();
-        if (this.child.exitCode !== null || this.child.signalCode !== null)
-            return;
-        this.child.kill();
-        const exited = await Promise.race([
-            new Promise((resolveExit) => this.child.once("exit", () => resolveExit(true))),
+    terminate() {
+        this.termination ??= this.terminateOnce();
+        return this.termination;
+    }
+    async waitForProcessClose() {
+        if (this.processClosed)
+            return true;
+        return Promise.race([
+            new Promise((resolveClose) => this.child.once("close", () => resolveClose(true))),
             delay(lifecycleWorkerExitTimeoutMs).then(() => false),
         ]);
-        if (exited || this.child.exitCode !== null || this.child.signalCode !== null)
+    }
+    async terminateOnce() {
+        this.closed = true;
+        this.fail(new Error("lifecycle worker closed"));
+        if (this.processClosed)
             return;
-        this.child.kill("SIGKILL");
-        await Promise.race([
-            new Promise((resolveExit) => this.child.once("exit", () => resolveExit())),
-            delay(lifecycleWorkerExitTimeoutMs).then(() => undefined),
-        ]);
+        // Do not call child.disconnect() before termination. With a dedicated IPC
+        // stdio slot Node may then omit ChildProcess's `close` event on Windows,
+        // which is the only public signal that every inherited handle is released.
+        if (this.child.exitCode === null && this.child.signalCode === null)
+            this.child.kill();
+        if (await this.waitForProcessClose())
+            return;
+        if (this.child.exitCode === null && this.child.signalCode === null)
+            this.child.kill("SIGKILL");
+        if (!await this.waitForProcessClose()) {
+            throw new Error("lifecycle worker did not close after termination");
+        }
     }
 }
 async function rejectSymlinkTraversal(root, target) {

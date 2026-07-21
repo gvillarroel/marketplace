@@ -329,20 +329,33 @@ metadata outside revisions 4 and 5 is an unmanaged collision.
 
 Toda mutación entra por `Roster.withMutationLock`:
 
-1. rechaza traversal/symlinks y abre
-   `<home>/agent-foundry/bench/.roster.lock` con `wx`, modo `0600`;
-2. escribe y sincroniza `{owner, pid, token}`;
-3. ante `EEXIST`, sólo espera un lock administrado con proceso vivo; elimina
+1. resuelve un Node absoluto `>=22.19.0` —también cuando el host es un
+   ejecutable empaquetado—, elimina `NODE_OPTIONS`/`NODE_PATH` y crea workers
+   locales efímeros con IPC privado;
+2. cada worker arranca desde un ancestro existente, crea sólo segmentos
+   relativos y fija su `cwd` al directorio administrado; ese `cwd`, junto con
+   la identidad `dev/ino`, es la capability que usa durante toda la mutación;
+3. rechaza traversal/symlinks, crea
+   `<home>/agent-foundry/bench/.roster.lock` con `wx`, modo `0600`, y escribe y
+   sincroniza `{owner, pid, token}` usando el PID real del worker;
+4. ante `EEXIST`, sólo espera un lock administrado con proceso vivo; elimina
    uno huérfano únicamente si su contenido no cambió; un lock ambiguo o ajeno
    es una colisión;
-4. al salir, verifica tipo y token antes de retirar el lock.
+5. al salir, verifica bytes e inode antes de retirar el lock, vacía el journal
+   y espera el evento `close` de cada worker para que ningún `cwd` quede vivo.
 
 `Roster.transaction` hace preflight de todos los paths y captura `Buffer`s
-exactos. Cada escritura usa un temporal exclusivo en el mismo directorio,
-modo `0600`, seguido de `rename`; cada eliminación afecta sólo el archivo.
-Después verifica bytes o ausencia. Si algo falla, restaura el lote en orden
-inverso; si también falla el rollback lanza un `AggregateError` que conserva
-todos los errores. Nunca elimina directorios.
+exactos más su identidad. El worker acepta sólo nombres de un segmento y
+operaciones relativas a su `cwd`; prepara un journal privado y usa hardlinks
+para conservar el inode anterior antes de publicar o retirar una entrada.
+Después de cada paso, el proceso padre vuelve a probar que el path canónico
+sigue apuntando al mismo directorio y el worker verifica bytes, tipo e inode.
+Si un atacante intercambia un padre, la operación permanece sobre la capability
+original y falla cerrado al comprobar el path; rollback restaura el inode
+original en ese mismo directorio, no en el sustituto. Un reemplazo concurrente
+ajeno nunca se sobreescribe ni elimina. Si también falla el rollback o el
+cleanup, un `AggregateError` conserva todos los errores. Nunca elimina
+directorios administrados; sólo retira su propio anchor vacío al cerrar.
 
 `join` y `retire` son transacciones de dos archivos. `Roster.bench` separa
 parsing, inventario y planificación; un `bench on|off` de varios IDs toma un

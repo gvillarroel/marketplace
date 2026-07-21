@@ -171,7 +171,7 @@ interface ChildLifecycle {
   readonly task: string;
   readonly buildPromptBody: () => PromptBody;
   readonly signal?: AbortSignal;
-  readonly lifecyclePhaseHook?: (phase: OpenCodeChildLifecyclePhase) => void;
+  readonly lifecyclePhaseHook?: (phase: OpenCodeChildLifecyclePhase, childSessionID?: string) => void;
 }
 
 /** Explicit OpenCode model identity inherited from the originating user turn. */
@@ -207,7 +207,7 @@ export class OpenCodeOrchestrator implements Orchestrator {
     private readonly evidenceHook?: HarborEvidenceHook,
     private readonly cleanupTimeoutMs = openCodeCleanupTimeoutMs,
     private readonly claimHome = defaultHome("opencode"),
-    private readonly lifecyclePhaseHook?: (phase: OpenCodeChildLifecyclePhase) => void,
+    private readonly lifecyclePhaseHook?: (phase: OpenCodeChildLifecyclePhase, childSessionID?: string) => void,
   ) {}
 
   /** Runs an exact named OpenCode agent using an explicit inherited model. */
@@ -217,7 +217,7 @@ export class OpenCodeOrchestrator implements Orchestrator {
     parentID: string | undefined,
     model: OpenCodeModel,
     signal?: AbortSignal,
-    lifecyclePhaseHook?: (phase: OpenCodeChildLifecyclePhase) => void,
+    lifecyclePhaseHook?: (phase: OpenCodeChildLifecyclePhase, childSessionID?: string) => void,
   ): Promise<string> {
     signal?.throwIfAborted();
     if (!isHarborId(agent)) throw new Error("OpenCode agent id is invalid");
@@ -419,7 +419,10 @@ export class OpenCodeOrchestrator implements Orchestrator {
       });
       throw error;
     }
-    lifecyclePhaseHook?.("working");
+    // Publish the exact disposable child identity before making the claim
+    // stoppable as working. The initial starting claim remains tied only to
+    // its owner session and can never cause that parent to be interrupted.
+    lifecyclePhaseHook?.("working", id);
     emitHarborEvidence(this.evidenceHook, { ...evidenceBase, phase: "child.started", outcome: "ok", childId: id });
     let failed = false;
     let failure: unknown;
@@ -453,7 +456,7 @@ export class OpenCodeOrchestrator implements Orchestrator {
     } finally {
       // Deleting the child is part of correctness, not best-effort telemetry;
       // execution and cleanup failures are therefore reported together.
-      lifecyclePhaseHook?.("cleaning");
+      lifecyclePhaseHook?.("cleaning", id);
       let cleanupError: unknown;
       try {
         await this.deleteUnclaimedChild(id, "OpenCode child cleanup");

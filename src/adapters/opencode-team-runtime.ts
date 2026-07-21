@@ -80,11 +80,14 @@ export interface OpenCodeTeamRunSnapshot {
 }
 
 export interface OpenCodeTeamReservationSnapshot {
+  readonly id: string;
   readonly agent: string;
   readonly invocation: "direct" | "delegated";
   readonly phase: OpenCodeAgentActivityPhase;
   readonly startedAt: number;
   readonly elapsedMs: number;
+  /** True only for a fresh owner claim created by this OpenCode OS process. */
+  readonly stopAvailable: boolean;
 }
 
 export interface OpenCodeTeamSnapshot {
@@ -183,6 +186,16 @@ interface ClassifiedRun extends Omit<OpenCodeTeamRunSnapshot, "parentRunId" | "p
 }
 
 const privateRunSessionIDs = new WeakMap<OpenCodeTeamRunSnapshot, string>();
+interface PrivateActivityClaim {
+  readonly sessionID: string;
+  readonly processID: number;
+  readonly claimToken: string;
+  readonly agent: string;
+  readonly kind: "direct" | "delegated";
+  readonly phase: OpenCodeAgentActivityPhase;
+}
+const privateRunClaims = new WeakMap<OpenCodeTeamRunSnapshot, PrivateActivityClaim>();
+const privateReservationClaims = new WeakMap<OpenCodeTeamReservationSnapshot, PrivateActivityClaim>();
 const privateSnapshotProjects = new WeakMap<OpenCodeTeamSnapshot, string>();
 
 interface ActiveRead {
@@ -576,8 +589,10 @@ function parseSessionList(value: unknown, project: string, maximum: number): {
     const session = parseSession(value, project);
     if (session) sessions.push(session); else malformed += 1;
   }
-  const cursor = object(page.cursor);
-  return { sessions, truncated: page.data.length > maximum || Boolean(cursor?.next || cursor?.previous), malformed };
+  // OpenCode 1.18.3 emits both cursor directions even when following either
+  // token produces an empty page. The only truthful proof of truncation is an
+  // over-read item from this page; callers therefore request maximum + 1.
+  return { sessions, truncated: page.data.length > maximum, malformed };
 }
 
 function parseActive(value: unknown, maximum: number, preferred: readonly string[]): ActiveRead {
@@ -970,7 +985,7 @@ export async function collectOpenCodeTeamSnapshot(
   }
   const sessionListPromise = withDeadline(
     (signal) => api.client.v2.session.list(
-      { directory: project, limit: runtime.maximumSessions, order: "desc" }, { signal },
+      { directory: project, limit: runtime.maximumSessions + 1, order: "desc" }, { signal },
     ), runtime.rpcDeadlineMs, runtime.signal,
   );
   const activePromise = withDeadline(
@@ -987,7 +1002,7 @@ export async function collectOpenCodeTeamSnapshot(
     try {
       const page = parseSessionList(listed.value, project, runtime.maximumSessions);
       sessions = page.sessions;
-      sessionListTruncated = page.truncated || page.sessions.length >= runtime.maximumSessions;
+      sessionListTruncated = page.truncated;
       if (page.malformed) degraded.push(`${page.malformed} session record(s) were ignored because ownership or project scope was invalid`);
     } catch { degraded.push("OpenCode session inventory returned an incompatible response"); }
   } else degraded.push(`OpenCode session inventory ${listed.timedOut ? "timed out" : "is unavailable"}`);
@@ -1097,16 +1112,42 @@ export async function collectOpenCodeTeamSnapshot(
     degraded.push("usage telemetry exceeded numeric safety bounds and is shown as a lower bound");
   }
 
-  const runningAgents = new Set(runs.filter(({ kind }) => kind !== "contractor").map(({ agent }) => agent));
-  const reservations = readOpenCodeAgentActivities(project)
-    .filter(({ agent }) => !runningAgents.has(agent))
-    .map(({ agent, kind, phase, startedAt }): OpenCodeTeamReservationSnapshot => ({
-      agent,
-      invocation: kind,
-      phase,
-      startedAt,
-      elapsedMs: Math.max(0, runtime.now() - startedAt),
-    }));
+  let observedClaims: ReturnType<typeof readOpenCodeAgentActivities> = [];
+  try { observedClaims = readOpenCodeAgentActivities(project); }
+  catch { degraded.push("Agent Harbor cross-isolate activity claims are unavailable; lifecycle activity and claim-based stop are disabled"); }
+  const runsByClaimIdentity = new Map(runs.map((run) => [
+    `${run.agent}\u0000${privateRunSessionIDs.get(run) ?? ""}`,
+    run,
+  ]));
+  const reservations = observedClaims.flatMap((claim): OpenCodeTeamReservationSnapshot[] => {
+      const privateClaim: PrivateActivityClaim = {
+        sessionID: claim.sessionID,
+        processID: claim.processID,
+        claimToken: claim.claimToken,
+        agent: claim.agent,
+        kind: claim.kind,
+        phase: claim.phase,
+      };
+      const matchingRun = runsByClaimIdentity.get(`${claim.agent}\u0000${claim.sessionID}`);
+      if (matchingRun) {
+        privateRunClaims.set(matchingRun, privateClaim);
+        return [];
+      }
+      const reservation: OpenCodeTeamReservationSnapshot = {
+        // The public selector is stable across the delegated parent→child
+        // handoff and reveals neither the native session nor the claim token.
+        id: publicSessionID(`claim:${claim.agent}:${claim.claimToken}`)!,
+        agent: claim.agent,
+        invocation: claim.kind,
+        phase: claim.phase,
+        startedAt: claim.startedAt,
+        elapsedMs: Math.max(0, runtime.now() - claim.startedAt),
+        stopAvailable: claim.processID === process.pid &&
+          (claim.kind === "direct" || claim.phase !== "starting"),
+      };
+      privateReservationClaims.set(reservation, privateClaim);
+      return [reservation];
+    });
   const snapshot: OpenCodeTeamSnapshot = {
     projectName: openCodePublicLabel(basename(project), 80) ?? "project",
     ...(hostDefaultModel(api) ? { hostDefaultModel: hostDefaultModel(api) } : {}),

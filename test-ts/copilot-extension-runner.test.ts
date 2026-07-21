@@ -22,10 +22,11 @@ function runScenario(scenario: string): Promise<ScenarioResult> {
       env: {
         ...process.env,
         AGENT_HARBOR_COPILOT_TIMEOUT_MS: "1000",
-        AGENT_HARBOR_COPILOT_SETTLE_MS: "250",
+        AGENT_HARBOR_COPILOT_SETTLE_MS: scenario === "native-postcommit-join-abort" ? "2000" : "250",
         AGENT_HARBOR_COPILOT_RPC_TIMEOUT_MS: scenario === "send-timeout-buffered-terminal"
           ? "750"
-          : scenario === "accepting-terminal-default" ? "15000" : "250",
+          : scenario === "accepting-terminal-default" ? "15000"
+            : scenario === "native-custom-tools" ? "5000" : "250",
         AGENT_HARBOR_COPILOT_LOG_TIMEOUT_MS: scenario === "log-hang-default" ? "3000" : "100",
         ...(scenario.startsWith("team-") && scenario !== "team-default-budget"
           ? { AGENT_HARBOR_COPILOT_TEAM_BUDGET_MS: "700" }

@@ -980,8 +980,10 @@ class LifecycleDirectoryWorker {
   private async terminateOnce(): Promise<void> {
     this.closed = true;
     this.fail(new Error("lifecycle worker closed"));
-    if (this.child.connected) this.child.disconnect();
     if (this.processClosed) return;
+    // Do not call child.disconnect() before termination. With a dedicated IPC
+    // stdio slot Node may then omit ChildProcess's `close` event on Windows,
+    // which is the only public signal that every inherited handle is released.
     if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill();
     if (await this.waitForProcessClose()) return;
     if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill("SIGKILL");

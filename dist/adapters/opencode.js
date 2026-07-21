@@ -363,6 +363,7 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                     if (!Number.isSafeInteger(status.attempt) || status.attempt < 0 ||
                         typeof status.next !== "number" || !Number.isFinite(status.next) || status.next < 0 ||
                         typeof status.message !== "string" ||
+                        status.message.length > maximumOpenCodeActivityRetryMessageBytes ||
                         Buffer.byteLength(status.message, "utf8") > maximumOpenCodeActivityRetryMessageBytes) {
                         throw new OpenCodeActivityError("OpenCode active-session retry telemetry was incompatible; team availability remains unknown");
                     }

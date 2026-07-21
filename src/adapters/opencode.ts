@@ -521,7 +521,7 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
       throw new Error(`Agent Harbor allows at most ${maximumOpenCodeProjectReservations} active runs per project; wait for work to finish or use /team stop`);
     }
     let activity: OpenCodeAgentActivityClaim;
-    try { activity = claimOpenCodeAgentActivity(projectKey, agent, reservation.kind); }
+    try { activity = claimOpenCodeAgentActivity(projectKey, agent, reservation.kind, reservation.sessionID); }
     catch (error) {
       if (error instanceof Error && /busy in another direct or delegated run/u.test(error.message)) {
         throw new Error(busyMessage);
@@ -1104,7 +1104,10 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
               execution.sessionID,
               model,
               execution.abort,
-              (phase) => reservationRecord.record.activity.setPhase(phase),
+              (phase, childSessionID) => {
+                if (childSessionID) reservationRecord.record.activity.setSessionID(childSessionID);
+                reservationRecord.record.activity.setPhase(phase);
+              },
             );
           }
           finally {

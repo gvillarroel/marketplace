@@ -101,7 +101,9 @@ bound loader for each skilled fixed role or canonical active profile. It does
 not register loaders for benched players. Copilot lead delegation remains
 native guard behavior; the roster custom tool is principal-bound to the scout,
 read-only and bounded. This surface uses no external server, transport
-configuration, or helper process.
+configuration, or custom-tool helper process. Roster mutations themselves use
+short-lived local Node workers whose current directory is the filesystem
+capability being changed; they exit before the command returns.
 
 Start a new session after installing, updating, or changing project agents.
 Copilot's public extension API fixes the registered tool set at `joinSession`,

@@ -63,11 +63,8 @@ if (scenario === "startup-skill-replace") {
   });
 }
 if (scenario === "scout-truncated-roster") {
-  const [{ Roster }, { harnessSpec }] = await Promise.all([
-    import(pathToFileURL(join(root, "dist", "core", "lifecycle.js")).href),
-    import(pathToFileURL(join(root, "dist", "core", "profiles.js")).href),
-  ]);
-  const roster = new Roster(harnessSpec("copilot", process.env.COPILOT_HOME, project));
+  const { harnessSpec } = await import(pathToFileURL(join(root, "dist", "core", "profiles.js")).href);
+  const spec = harnessSpec("copilot", process.env.COPILOT_HOME, project);
   const definitions = [
     ...Array.from({ length: 34 }, (_, index) => ({
       name: `aa-roster-filler-${String(index).padStart(2, "0")}`,
@@ -82,8 +79,17 @@ if (scenario === "scout-truncated-roster") {
       tools: ["read"],
     },
   ];
+  const registrationRoot = join(spec.home, spec.registrationDir);
+  const activeRoot = join(spec.project, spec.activeDir);
+  await Promise.all([mkdir(registrationRoot, { recursive: true }), mkdir(activeRoot, { recursive: true })]);
+  await Promise.all(definitions.flatMap((definition) => {
+    const content = spec.renderPlayer(definition, "personal");
+    return [
+      writeFile(join(registrationRoot, `${definition.name}${spec.extension}`), content, "utf8"),
+      writeFile(join(activeRoot, `${definition.name}${spec.extension}`), content, "utf8"),
+    ];
+  }));
   for (const definition of definitions) {
-    await roster.join(definition);
     agents.push({
       id: definition.name,
       name: definition.name,
