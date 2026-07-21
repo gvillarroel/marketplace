@@ -4,7 +4,9 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { bundledPlayers, legacyBundledPlayerIds, trustedSkills } from "./defaults.js";
-import { validateGithubSkill } from "./github.js";
+import { isTrustedGithubSkill } from "./github.js";
+import { decodePlayer, isCanonicalPlayerProfile } from "./profiles.js";
+import { validateSkillReference } from "./skills.js";
 const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const legacyBundledIds = new Set(legacyBundledPlayerIds);
 const reserved = new Set([...bundledPlayers.keys(), ...legacyBundledPlayerIds, "team-lead", "repo-cartographer", "crafter", "bench", "join", "retire", "contract", "list-skills"]);
@@ -64,29 +66,38 @@ async function rejectSymlinkTraversal(root, target) {
         }
     }
 }
-export function isOwnedProfile(content, id, expectedRoster) {
+function ownedProfileRevision(content, id, expectedRoster) {
     if (!content?.startsWith("---\n"))
-        return false;
+        return undefined;
     const end = content.indexOf("\n---\n", 4);
-    if (end < 0 || !content.slice(end + 5).startsWith(`<!-- agent-foundry:profile id=${id} revision=3 -->\n`))
-        return false;
+    if (end < 0)
+        return undefined;
+    const marker = /^<!-- agent-foundry:profile id=([a-z0-9-]+) revision=(3|4) -->\n/.exec(content.slice(end + 5));
+    if (!marker || marker[1] !== id)
+        return undefined;
+    const revision = marker[2];
     const lines = content.slice(4, end).split("\n");
     if (lines.filter((line) => line === `name: ${JSON.stringify(id)}`).length !== 1)
-        return false;
+        return undefined;
     const roster = expectedRoster ?? (lines.includes("  roster: personal") ? "personal" : lines.includes("  roster: sdlc") ? "sdlc" : undefined);
     if (!roster)
-        return false;
+        return undefined;
     const metadata = [
         "metadata:",
         "  owner: agent-foundry",
         `  roster: ${roster}`,
         `  player: ${JSON.stringify(id)}`,
-        '  revision: "3"',
+        `  revision: "${revision}"`,
     ];
     if (lines.slice(-metadata.length).join("\n") !== metadata.join("\n"))
-        return false;
+        return undefined;
     return metadata.every((expected) => lines.filter((line) => line === expected).length === 1) &&
-        lines.filter((line) => line === "  roster: personal" || line === "  roster: sdlc").length === 1;
+        lines.filter((line) => line === "  roster: personal" || line === "  roster: sdlc").length === 1
+        ? revision
+        : undefined;
+}
+export function isOwnedProfile(content, id, expectedRoster) {
+    return ownedProfileRevision(content, id, expectedRoster) !== undefined;
 }
 export function validatePlayer(value, allowReserved = false) {
     if (!value || typeof value !== "object" || Array.isArray(value))
@@ -112,19 +123,25 @@ export function validatePlayer(value, allowReserved = false) {
         throw new Error("invalid replace");
     if (input.skills !== undefined) {
         if (!Array.isArray(input.skills) || input.skills.length > 3)
-            throw new Error("skills must be an array of at most three GitHub references");
-        const seen = new Set();
+            throw new Error("skills must be an array of at most three repository or GitHub references");
+        const seenIdentities = new Set();
+        const seenNames = new Set();
         for (const value of input.skills) {
-            const skill = validateGithubSkill(value);
-            const identity = `${skill.repo}\0${skill.path}\0${skill.track}`;
-            if (seen.has(identity))
-                throw new Error("duplicate GitHub skill reference");
-            if (!trustedSkills.some((trusted) => trusted.name === skill.name && trusted.repo.toLowerCase() === skill.repo.toLowerCase() && trusted.path === skill.path && trusted.track === skill.track))
+            const skill = validateSkillReference(value);
+            const identity = skill.kind === "repo"
+                ? `repo\0${skill.path}`
+                : `github\0${skill.repo.toLowerCase()}\0${skill.path}\0${skill.track}`;
+            if (seenIdentities.has(identity))
+                throw new Error("duplicate skill reference");
+            if (seenNames.has(skill.name))
+                throw new Error(`duplicate configured skill name: ${skill.name}`);
+            if (skill.kind === "github" && !isTrustedGithubSkill(skill, trustedSkills))
                 throw new Error("untrusted GitHub skill reference");
-            seen.add(identity);
+            seenIdentities.add(identity);
+            seenNames.add(skill.name);
         }
-        if (input.skills.length && !input.tools.includes("execute"))
-            throw new Error("GitHub skills require execute");
+        if (input.skills.length && !input.tools.includes("read"))
+            throw new Error("configured skills require read");
     }
     return input;
 }
@@ -297,8 +314,10 @@ export class Roster {
             for (const collision of current)
                 if (collision !== undefined && !isOwnedProfile(collision, player.name, "personal"))
                     throw new Error("unmanaged collision");
-            if (!player.replace && current.some((value) => value !== undefined && value !== content))
+            if (!player.replace && current.some((value) => value !== undefined &&
+                !isCanonicalPlayerProfile(value, this.spec.name, player, "personal", this.spec.project))) {
                 throw new Error("replace:true required");
+            }
             await this.transaction([{ path: paths.registration, content }, { path: paths.active, content }]);
             return `joined ${player.name}\nregistration: ${paths.registration}\nactive: ${paths.active}`;
         });
@@ -312,8 +331,10 @@ export class Roster {
                 const { active } = this.paths(id);
                 await rejectSymlinkTraversal(this.spec.project, active);
                 const content = await existing(active);
-                const canonical = this.spec.renderPlayer(definition, "sdlc");
-                const state = content === undefined ? "bench" : !isOwnedProfile(content, id, "sdlc") ? "conflict" : content === canonical ? "on" : "stale";
+                const state = content === undefined
+                    ? "bench"
+                    : !isOwnedProfile(content, id, "sdlc") ? "conflict"
+                        : isCanonicalPlayerProfile(content, this.spec.name, definition, "sdlc", this.spec.project) ? "on" : "stale";
                 if (!filter || id.includes(filter))
                     rows.push(`${id} | bundled | ${state}`);
             }
@@ -346,11 +367,26 @@ export class Roster {
                 await Promise.all([rejectSymlinkTraversal(this.spec.home, paths.registration), rejectSymlinkTraversal(this.spec.project, paths.active)]);
                 const registration = await existing(paths.registration);
                 const active = await existing(paths.active);
-                if (!isOwnedProfile(registration, id, "personal")) {
+                const registrationRevision = ownedProfileRevision(registration, id, "personal");
+                if (!registrationRevision) {
                     rows.push(`${id} | personal | conflict`);
                     continue;
                 }
-                const state = active === undefined ? "bench" : !isOwnedProfile(active, id, "personal") ? "conflict" : active === registration ? "on" : "stale";
+                const activeRevision = ownedProfileRevision(active, id, "personal");
+                let definition;
+                if (registrationRevision === "4") {
+                    try {
+                        definition = validatePlayer(decodePlayer(registration, id));
+                    }
+                    catch {
+                        definition = undefined;
+                    }
+                }
+                const state = active !== undefined && !activeRevision
+                    ? "conflict"
+                    : !definition || (active !== undefined && !isCanonicalPlayerProfile(active, this.spec.name, definition, "personal", this.spec.project))
+                        ? "stale"
+                        : active === undefined ? "bench" : "on";
                 rows.push(`${id} | personal | ${state}`);
             }
             return rows.join("\n");
@@ -382,9 +418,21 @@ export class Roster {
                 }
                 if (legacy)
                     throw new Error(`retired bundled player: ${id}; use bench off ${id}`);
-                const source = definition ? this.spec.renderPlayer(definition, "sdlc") : await existing(paths.registration);
-                if (!source || (!definition && !isOwnedProfile(source, id, "personal")))
+                const registration = definition ? undefined : await existing(paths.registration);
+                if (!definition && (!registration || !isOwnedProfile(registration, id, "personal")))
                     throw new Error(`unknown player: ${id}`);
+                if (!definition && ownedProfileRevision(registration, id, "personal") !== "4") {
+                    throw new Error(`stale personal profile: ${id}; re-run join with replace:true`);
+                }
+                let source;
+                try {
+                    source = definition
+                        ? this.spec.renderPlayer(definition, "sdlc")
+                        : this.spec.renderPlayer(validatePlayer(decodePlayer(registration, id)), "personal");
+                }
+                catch {
+                    throw new Error(`stale personal profile: ${id}; re-run join with replace:true`);
+                }
                 changes.push({ path: paths.active, content: source });
             }
             if (expanded.some((id) => bundled.has(id))) {

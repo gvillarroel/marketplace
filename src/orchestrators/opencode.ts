@@ -1,9 +1,10 @@
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { ContractDefinition, GithubResolver, Orchestrator } from "../core/types.js";
-import { GhResolver, materializeGithubSkills } from "../core/github.js";
+import { GhResolver } from "../core/github.js";
 import { trustedSkills } from "../core/defaults.js";
 import { emitHarborEvidence, fingerprintHarborEvidence, type HarborEvidenceHook } from "../core/evidence.js";
 import { composeContractPrompt, openCodeToolPolicy } from "../core/profiles.js";
+import { loadConfiguredSkills, withLoadedSkillGuidance } from "../core/skills.js";
 
 type Client = PluginInput["client"];
 
@@ -122,7 +123,8 @@ export class OpenCodeOrchestrator implements Orchestrator {
 
   async run(definition: ContractDefinition, signal?: AbortSignal): Promise<string> {
     signal?.throwIfAborted();
-    definition = await materializeGithubSkills(definition, this.github, trustedSkills, signal);
+    const loaded = await loadConfiguredSkills(definition, this.directory, this.github, trustedSkills, signal);
+    definition = withLoadedSkillGuidance(definition, loaded);
     signal?.throwIfAborted();
     const agent = definition.tools.some((tool) => tool === "edit" || tool === "execute") ? "general" : "explore";
     const evidenceBase = { harness: this.harness, agent: definition.name, runtimeAgent: agent } as const;

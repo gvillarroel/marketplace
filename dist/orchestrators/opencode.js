@@ -1,7 +1,8 @@
-import { GhResolver, materializeGithubSkills } from "../core/github.js";
+import { GhResolver } from "../core/github.js";
 import { trustedSkills } from "../core/defaults.js";
 import { emitHarborEvidence, fingerprintHarborEvidence } from "../core/evidence.js";
 import { composeContractPrompt, openCodeToolPolicy } from "../core/profiles.js";
+import { loadConfiguredSkills, withLoadedSkillGuidance } from "../core/skills.js";
 export class OpenCodeOrchestrator {
     client;
     directory;
@@ -119,7 +120,8 @@ export class OpenCodeOrchestrator {
     }
     async run(definition, signal) {
         signal?.throwIfAborted();
-        definition = await materializeGithubSkills(definition, this.github, trustedSkills, signal);
+        const loaded = await loadConfiguredSkills(definition, this.directory, this.github, trustedSkills, signal);
+        definition = withLoadedSkillGuidance(definition, loaded);
         signal?.throwIfAborted();
         const agent = definition.tools.some((tool) => tool === "edit" || tool === "execute") ? "general" : "explore";
         const evidenceBase = { harness: this.harness, agent: definition.name, runtimeAgent: agent };

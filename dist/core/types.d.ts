@@ -11,7 +11,7 @@ export interface PlayerDefinition {
     tools: HarborTool[];
     model?: string;
     replace?: boolean;
-    skills?: GithubSkill[];
+    skills?: SkillReference[];
 }
 export interface ContractDefinition extends PlayerDefinition {
     task: string;
@@ -36,6 +36,13 @@ export interface GithubSkill {
     path: string;
     track: string;
 }
+export interface RepositorySkill {
+    kind: "repo";
+    name: string;
+    /** Project-root-relative path to one exact SKILL.md file. */
+    path: string;
+}
+export type SkillReference = GithubSkill | RepositorySkill;
 export interface GithubResolver {
     resolve(skill: GithubSkill, signal?: AbortSignal): Promise<{
         commit: string;

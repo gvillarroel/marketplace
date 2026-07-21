@@ -1,8 +1,8 @@
 ---
 name: repo-cartographer
 description: Compact evidence-based repository mapper for orientation before planning or changing unfamiliar code.
-tools: ["read", "search", "skill"]
+tools: ["read", "search"]
 disable-model-invocation: false
 ---
 
-Load `harbor-repository-map` by exact name with the native skill tool and apply it. Map only the relevant area with read-only discovery tools. Do not edit. zx and TypeScript command examples belong to `repo-cartographer:crafter`.
+Discover files before searching content. Map only the relevant area with read-only discovery tools. Report entrypoints, package boundaries, tests, generated artifacts, repository instructions, and the shortest relevant validation command. Do not edit. zx and TypeScript command examples belong to `repo-cartographer:crafter`.

@@ -1,10 +1,11 @@
 import { CopilotClient, approveAll } from "@github/copilot-sdk";
 import type { CopilotSession } from "@github/copilot-sdk";
 import type { ContractDefinition, GithubResolver, Orchestrator } from "../core/types.js";
-import { GhResolver, materializeGithubSkills } from "../core/github.js";
+import { GhResolver } from "../core/github.js";
 import { trustedSkills } from "../core/defaults.js";
 import { emitHarborEvidence, fingerprintHarborEvidence, type HarborEvidenceHook } from "../core/evidence.js";
 import { composePlayerInstructions, nativeTools } from "../core/profiles.js";
+import { createSkillCapsule } from "../core/skills.js";
 
 export class CopilotOrchestrator implements Orchestrator {
   readonly harness = "copilot" as const;
@@ -16,8 +17,7 @@ export class CopilotOrchestrator implements Orchestrator {
   ) {}
   async run(definition: ContractDefinition, signal?: AbortSignal): Promise<string> {
     signal?.throwIfAborted();
-    definition = await materializeGithubSkills(definition, this.github, trustedSkills, signal);
-    signal?.throwIfAborted();
+    const capsule = await createSkillCapsule(definition, this.directory, this.github, trustedSkills, signal);
     const evidenceBase = { harness: this.harness, agent: definition.name, runtimeAgent: definition.name } as const;
     emitHarborEvidence(this.evidenceHook, {
       ...evidenceBase,
@@ -33,16 +33,21 @@ export class CopilotOrchestrator implements Orchestrator {
     let failure: unknown;
     let output = "";
     try {
+      signal?.throwIfAborted();
       client = this.createClient();
       session = await client.createSession({
         model: definition.model ?? "auto",
         workingDirectory: this.directory,
+        enableConfigDiscovery: false,
+        enableSkills: capsule.skills.length > 0,
+        skillDirectories: capsule.root ? [capsule.root] : [],
         customAgents: [{
           name: definition.name,
           displayName: definition.name,
           description: definition.description,
           prompt: composePlayerInstructions(definition),
           tools: nativeTools("copilot", definition.tools),
+          skills: capsule.skills.map((skill) => skill.reference.name),
         }],
         agent: definition.name,
         onPermissionRequest: approveAll,
@@ -102,6 +107,7 @@ export class CopilotOrchestrator implements Orchestrator {
       if (client) {
         try { await client.stop(); } catch (error) { cleanupErrors.push(error); }
       }
+      try { await capsule.cleanup(); } catch (error) { cleanupErrors.push(error); }
       if (session) {
         const cleanupError = cleanupErrors.length === 0
           ? undefined

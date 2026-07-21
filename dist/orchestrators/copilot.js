@@ -1,8 +1,9 @@
 import { CopilotClient, approveAll } from "@github/copilot-sdk";
-import { GhResolver, materializeGithubSkills } from "../core/github.js";
+import { GhResolver } from "../core/github.js";
 import { trustedSkills } from "../core/defaults.js";
 import { emitHarborEvidence, fingerprintHarborEvidence } from "../core/evidence.js";
 import { composePlayerInstructions, nativeTools } from "../core/profiles.js";
+import { createSkillCapsule } from "../core/skills.js";
 export class CopilotOrchestrator {
     createClient;
     directory;
@@ -17,8 +18,7 @@ export class CopilotOrchestrator {
     }
     async run(definition, signal) {
         signal?.throwIfAborted();
-        definition = await materializeGithubSkills(definition, this.github, trustedSkills, signal);
-        signal?.throwIfAborted();
+        const capsule = await createSkillCapsule(definition, this.directory, this.github, trustedSkills, signal);
         const evidenceBase = { harness: this.harness, agent: definition.name, runtimeAgent: definition.name };
         emitHarborEvidence(this.evidenceHook, {
             ...evidenceBase,
@@ -34,16 +34,21 @@ export class CopilotOrchestrator {
         let failure;
         let output = "";
         try {
+            signal?.throwIfAborted();
             client = this.createClient();
             session = await client.createSession({
                 model: definition.model ?? "auto",
                 workingDirectory: this.directory,
+                enableConfigDiscovery: false,
+                enableSkills: capsule.skills.length > 0,
+                skillDirectories: capsule.root ? [capsule.root] : [],
                 customAgents: [{
                         name: definition.name,
                         displayName: definition.name,
                         description: definition.description,
                         prompt: composePlayerInstructions(definition),
                         tools: nativeTools("copilot", definition.tools),
+                        skills: capsule.skills.map((skill) => skill.reference.name),
                     }],
                 agent: definition.name,
                 onPermissionRequest: approveAll,
@@ -122,6 +127,12 @@ export class CopilotOrchestrator {
                 catch (error) {
                     cleanupErrors.push(error);
                 }
+            }
+            try {
+                await capsule.cleanup();
+            }
+            catch (error) {
+                cleanupErrors.push(error);
             }
             if (session) {
                 const cleanupError = cleanupErrors.length === 0

@@ -1,10 +1,11 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
-import { assertInvocablePlayer, listInvocablePlayerIds } from "../core/active.js";
+import { assertInvocablePlayer, listInvocablePlayerIds, listManagedActiveIds, listOwnedActiveIds, loadManagedActivePlayer, requireInvocablePlayer } from "../core/active.js";
 import { executeCommand } from "../core/commands.js";
 import { bundledPlayers, rolePlayers, trustedSkills } from "../core/defaults.js";
-import { GhResolver, loadTrustedGithubSkill } from "../core/github.js";
-import { composePlayerInstructions, normalizeDelegatedTaskPaths, openCodePermissionPolicy, openCodeToolPolicy, scopedOpenCodeExternalDirectoryPolicy } from "../core/profiles.js";
+import { GhResolver } from "../core/github.js";
+import { composePlayerInstructions, normalizeDelegatedTaskPaths, openCodePermissionPolicy, openCodeToolPolicy } from "../core/profiles.js";
+import { formatLoadedSkillGroup, loadConfiguredSkills } from "../core/skills.js";
 import { commandNames, type CommandName } from "../core/types.js";
 import { OpenCodeOrchestrator, type OpenCodeModel } from "../orchestrators/opencode.js";
 import { harborContext } from "./shared.js";
@@ -23,7 +24,6 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
   const delegationsInFlight = new Set<string>();
   const directAgentCommands = new Map<string, string>();
   const turnModels = new Map<string, OpenCodeModel>();
-  const scopedExternalDirectory = scopedOpenCodeExternalDirectoryPolicy(directory);
   for (const id of [...rolePlayers.keys(), ...bundledPlayers.keys()]) directAgentCommands.set(`harbor-${id}`, id);
   const originatingUserMessage = async (
     sessionID: string,
@@ -126,16 +126,25 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
           description: crafter.description, mode: "subagent",
           steps: 4,
           prompt: composePlayerInstructions(crafter, "opencode"),
-          tools: { ...openCodeToolPolicy(crafter.tools, ["agent_harbor_skill"]), harbor_delegate: false },
-          permission: openCodePermissionPolicy(crafter.tools, ["agent_harbor_skill"], directory),
+          tools: { ...openCodeToolPolicy(crafter.tools, ["agent_harbor_skills"]), harbor_delegate: false },
+          permission: openCodePermissionPolicy(crafter.tools, ["agent_harbor_skills"], directory),
         },
       };
-      for (const id of listInvocablePlayerIds("opencode", directory)) {
-        const agent = config.agent[id] as any;
-        if (!agent) continue;
-        agent.permission = {
-          ...(agent.permission && typeof agent.permission === "object" ? agent.permission : {}),
-          external_directory: scopedExternalDirectory,
+      const managedIds = new Set(listManagedActiveIds("opencode", directory));
+      for (const id of listOwnedActiveIds("opencode", directory)) {
+        if (!managedIds.has(id)) delete config.agent[id];
+      }
+      for (const id of managedIds) {
+        const player = loadManagedActivePlayer("opencode", directory, id);
+        const additional = player.skills?.length ? ["agent_harbor_skills"] : [];
+        config.agent[id] = {
+          description: player.description,
+          mode: "subagent",
+          steps: 4,
+          ...(player.model ? { model: player.model } : {}),
+          prompt: composePlayerInstructions(player, "opencode"),
+          tools: openCodeToolPolicy(player.tools, additional),
+          permission: openCodePermissionPolicy(player.tools, additional, directory),
         };
       }
     },
@@ -201,12 +210,14 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
           finally { delegationsInFlight.delete(key); }
         },
       }),
-      agent_harbor_skill: tool({
-        description: "Resolve one exact allowlisted GitHub SKILL.md snapshot, validate it, and return invocation-local guidance.",
-        args: { reference: tool.schema.string() },
-        execute: async ({ reference }, execution) => {
-          const loaded = await loadTrustedGithubSkill(JSON.parse(reference), trustedSkills, new GhResolver(), execution.abort);
-          return `HARBOR-COMMIT ${loaded.commit}\nHARBOR-SKILL ${loaded.skill.name}\n${loaded.body}`;
+      agent_harbor_skills: tool({
+        description: "Load only the complete skill group configured for the current Agent Harbor player.",
+        args: {},
+        execute: async (_args, execution) => {
+          const currentDirectory = execution.directory || directory;
+          const player = requireInvocablePlayer("opencode", currentDirectory, execution.agent).definition;
+          const loaded = await loadConfiguredSkills(player, currentDirectory, new GhResolver(), trustedSkills, execution.abort);
+          return formatLoadedSkillGroup(loaded);
         },
       }),
     },

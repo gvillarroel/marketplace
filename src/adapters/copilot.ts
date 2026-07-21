@@ -1,8 +1,9 @@
 import { harborContext } from "./shared.js";
 import { executeCommand, parseContractDefinition } from "../core/commands.js";
 import { trustedSkills } from "../core/defaults.js";
-import { GhResolver, materializeGithubSkills } from "../core/github.js";
+import { GhResolver } from "../core/github.js";
 import { composeContractPrompt } from "../core/profiles.js";
+import { loadConfiguredSkills, withLoadedSkillGuidance } from "../core/skills.js";
 import type { CommandName, Orchestrator } from "../core/types.js";
 
 const unavailable: Orchestrator = {
@@ -12,7 +13,9 @@ const unavailable: Orchestrator = {
 
 export async function runCopilotControl(command: CommandName, args: string, cwd = process.cwd(), signal?: AbortSignal): Promise<string> {
   if (command !== "contract") return executeCommand(command, args, harborContext("copilot", cwd, unavailable), signal);
-  const definition = await materializeGithubSkills(parseContractDefinition(args), new GhResolver(), trustedSkills, signal);
+  let definition = parseContractDefinition(args);
+  const loaded = await loadConfiguredSkills(definition, cwd, new GhResolver(), trustedSkills, signal);
+  definition = withLoadedSkillGuidance(definition, loaded);
   const agentType = definition.tools.includes("edit") ? "general-purpose" : definition.tools.includes("execute") ? "task" : "explore";
   return JSON.stringify({ agent_type: agentType, description: definition.description, prompt: composeContractPrompt(definition) });
 }

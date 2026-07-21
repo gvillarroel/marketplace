@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { copilotFixedAgentIds, createCopilotCoordinatorGuard } from "../src/adapters/copilot-coordinator.js";
 import { AgentHarborPlugin } from "../src/adapters/opencode.js";
@@ -34,6 +34,19 @@ const definition = { name: "worker", description: "Worker", prompt: "Work", tool
 const cycleDataset = loadHarborCycleDataset();
 const defaultCycle = cycleDataset.cycles.find((cycle) => cycle.id === "default-specialists")!;
 const fullCycle = cycleDataset.cycles.find((cycle) => cycle.id === "full-sdlc")!;
+
+function emptyPiResourceSdk() {
+  return {
+    DefaultResourceLoader: class {
+      private readonly options: any;
+      private result = { skills: [], diagnostics: [] };
+      constructor(options: any) { this.options = options; }
+      async reload() { this.result = this.options.skillsOverride?.({ skills: [], diagnostics: [] }) ?? this.result; }
+      getSkills() { return this.result; }
+    },
+    getAgentDir: () => "pi-agent-home",
+  };
+}
 
 function datasetTask(cycle: HarborCycle, index: number, priorEvidence?: string): string {
   const step = cycle.steps[index];
@@ -320,8 +333,14 @@ test("Pi orchestrator uses one in-memory SDK session", async () => {
   };
   const sdk = {
     DefaultResourceLoader: class {
-      constructor(options: any) { loaders.push(options); }
-      async reload() { events.push("reload"); }
+      private readonly options: any;
+      private result = { skills: [], diagnostics: [] };
+      constructor(options: any) { this.options = options; loaders.push(options); }
+      async reload() {
+        events.push("reload");
+        this.result = this.options.skillsOverride({ skills: [], diagnostics: [] });
+      }
+      getSkills() { return this.result; }
     },
     getAgentDir: () => "pi-agent-home",
     SessionManager: { inMemory: (cwd: string) => { events.push(`memory:${cwd === process.cwd()}`); return {}; } },
@@ -336,18 +355,209 @@ test("Pi orchestrator uses one in-memory SDK session", async () => {
   );
   assert.equal(await orchestrator.run(definition as any), "done");
   assert.deepEqual(events, ["reload", "memory:true", "create:true:read", "prompt:true", "unsubscribe", "dispose"]);
-  assert.deepEqual(loaders, [{
-    cwd: process.cwd(),
-    agentDir: "pi-agent-home",
-    noExtensions: true,
-    noSkills: true,
-    noPromptTemplates: true,
-    noThemes: true,
-    noContextFiles: true,
-  }]);
+  assert.equal(loaders.length, 1);
+  assert.deepEqual({ ...loaders[0], skillsOverride: undefined }, {
+    cwd: process.cwd(), agentDir: "pi-agent-home", additionalSkillPaths: [],
+    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    skillsOverride: undefined,
+  });
+  assert.equal(typeof loaders[0].skillsOverride, "function");
   assert.equal(createOptions.model, model);
   assert.equal(createOptions.thinkingLevel, "minimal");
   assert.equal(createOptions.resourceLoader instanceof sdk.DefaultResourceLoader, true);
+});
+
+test("Pi gives a child exactly its invocation-scoped skill allowlist", async () => {
+  const project = await mkdtemp(join(tmpdir(), "harbor-pi-skills-"));
+  const repositorySkill = join(project, "skills", "allowed", "SKILL.md");
+  await mkdir(dirname(repositorySkill), { recursive: true });
+  await writeFile(repositorySkill, [
+    "---", "name: allowed-skill", "description: Bounded test skill", "---", "", "Use the bounded fixture.", "",
+  ].join("\n"));
+  const events: string[] = [];
+  let loaderOptions: any;
+  let loaded: any = { skills: [], diagnostics: [] };
+  let capsuleFile = "";
+  const sdk = {
+    DefaultResourceLoader: class {
+      private readonly options: any;
+      constructor(options: any) { this.options = options; loaderOptions = options; capsuleFile = options.additionalSkillPaths[0]; }
+      async reload() {
+        events.push("reload");
+        const base = {
+          skills: this.options.additionalSkillPaths.map((filePath: string) => ({
+            name: basename(dirname(filePath)), description: "isolated", filePath, baseDir: dirname(filePath),
+            sourceInfo: {}, disableModelInvocation: true,
+          })),
+          diagnostics: [],
+        };
+        loaded = this.options.skillsOverride(base);
+      }
+      getSkills() { events.push("getSkills"); return loaded; }
+    },
+    getAgentDir: () => join(project, "ambient-pi-home"),
+    SessionManager: { inMemory: () => ({}) },
+    createAgentSession: async () => {
+      events.push("create");
+      assert.deepEqual(loaded.skills.map((skill: any) => ({ name: skill.name, filePath: skill.filePath, disabled: skill.disableModelInvocation })), [
+        { name: "allowed-skill", filePath: capsuleFile, disabled: false },
+      ]);
+      let handler = (_event: unknown) => {};
+      return { session: {
+        subscribe: (next: (event: unknown) => void) => { handler = next; return () => events.push("unsubscribe"); },
+        prompt: async () => handler({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "isolated" } }),
+        abort: async () => {}, dispose: () => events.push("dispose"),
+      } };
+    },
+  };
+  const skillDefinition = {
+    ...definition,
+    skills: [{ kind: "repo", name: "allowed-skill", path: "skills/allowed/SKILL.md" }],
+  };
+  assert.equal(await new PiOrchestrator(project, async () => sdk as any).run(skillDefinition as any), "isolated");
+  assert.deepEqual(events, ["reload", "getSkills", "create", "unsubscribe", "dispose"]);
+  assert.equal(loaderOptions.noSkills, true);
+  assert.deepEqual(loaderOptions.additionalSkillPaths, [capsuleFile]);
+  assert.equal(basename(capsuleFile), "SKILL.md");
+  assert.notEqual(resolve(capsuleFile), resolve(repositorySkill));
+  await assert.rejects(access(dirname(dirname(capsuleFile))), (error: any) => error?.code === "ENOENT");
+});
+
+test("Pi fails closed on ambient, malformed, or post-reload skill discovery and cleans the capsule", async (t) => {
+  for (const variant of ["ambient", "diagnostic", "post-reload"] as const) {
+    await t.test(variant, async () => {
+      const project = await mkdtemp(join(tmpdir(), `harbor-pi-${variant}-`));
+      const source = join(project, "skills", "allowed", "SKILL.md");
+      await mkdir(dirname(source), { recursive: true });
+      await writeFile(source, "---\nname: allowed-skill\ndescription: bounded\n---\n\nDo bounded work.\n");
+      let capsuleFile = ""; let children = 0; let result: any = { skills: [], diagnostics: [] };
+      const sdk = {
+        DefaultResourceLoader: class {
+          private readonly options: any;
+          constructor(options: any) { this.options = options; capsuleFile = options.additionalSkillPaths[0]; }
+          async reload() {
+            const expected = {
+              name: "allowed-skill", description: "isolated", filePath: capsuleFile, baseDir: dirname(capsuleFile),
+              sourceInfo: {}, disableModelInvocation: true,
+            };
+            const skills = variant === "ambient"
+              ? [expected, { ...expected, name: "ambient-skill", filePath: join(project, "ambient", "SKILL.md") }]
+              : [expected];
+            const diagnostics = variant === "diagnostic"
+              ? [{ type: "warning", message: "malformed skill", path: capsuleFile }]
+              : [];
+            result = this.options.skillsOverride({ skills, diagnostics });
+          }
+          getSkills() {
+            return variant === "post-reload"
+              ? { skills: [{ ...result.skills[0], filePath: join(project, "ambient", "SKILL.md") }], diagnostics: [] }
+              : result;
+          }
+        },
+        getAgentDir: () => join(project, "ambient-pi-home"),
+        SessionManager: { inMemory: () => ({}) },
+        createAgentSession: async () => { children += 1; throw new Error("child must not start"); },
+      };
+      const skillDefinition = {
+        ...definition,
+        skills: [{ kind: "repo", name: "allowed-skill", path: "skills/allowed/SKILL.md" }],
+      };
+      await assert.rejects(
+        () => new PiOrchestrator(project, async () => sdk as any).run(skillDefinition as any),
+        /isolated skill|outside the configured allowlist/,
+      );
+      assert.equal(children, 0);
+      await assert.rejects(access(dirname(dirname(capsuleFile))), (error: any) => error?.code === "ENOENT");
+    });
+  }
+});
+
+test("Pi cancellation during skill reload creates no child and cleans the capsule", async () => {
+  const project = await mkdtemp(join(tmpdir(), "harbor-pi-reload-abort-"));
+  const source = join(project, "skills", "allowed", "SKILL.md");
+  await mkdir(dirname(source), { recursive: true });
+  await writeFile(source, "---\nname: allowed-skill\ndescription: bounded\n---\n\nDo bounded work.\n");
+  const controller = new AbortController();
+  let capsuleFile = ""; let children = 0; let result: any = { skills: [], diagnostics: [] };
+  const sdk = {
+    DefaultResourceLoader: class {
+      private readonly options: any;
+      constructor(options: any) { this.options = options; capsuleFile = options.additionalSkillPaths[0]; }
+      async reload() {
+        result = this.options.skillsOverride({
+          skills: [{
+            name: "allowed-skill", description: "isolated", filePath: capsuleFile, baseDir: dirname(capsuleFile),
+            sourceInfo: {}, disableModelInvocation: true,
+          }],
+          diagnostics: [],
+        });
+        controller.abort();
+      }
+      getSkills() { return result; }
+    },
+    getAgentDir: () => join(project, "ambient-pi-home"),
+    SessionManager: { inMemory: () => ({}) },
+    createAgentSession: async () => { children += 1; throw new Error("child must not start"); },
+  };
+  const skillDefinition = {
+    ...definition,
+    skills: [{ kind: "repo", name: "allowed-skill", path: "skills/allowed/SKILL.md" }],
+  };
+
+  await assert.rejects(
+    () => new PiOrchestrator(project, async () => sdk as any).run(skillDefinition as any, controller.signal),
+    (error: any) => error?.name === "AbortError",
+  );
+  assert.equal(children, 0);
+  await assert.rejects(access(dirname(dirname(capsuleFile))), (error: any) => error?.code === "ENOENT");
+});
+
+test("Pi cleans an isolated skill capsule after loader, child-creation, and session failures", async (t) => {
+  for (const variant of ["reload", "create", "session"] as const) {
+    await t.test(variant, async () => {
+      const project = await mkdtemp(join(tmpdir(), `harbor-pi-cleanup-${variant}-`));
+      const source = join(project, "skills", "allowed", "SKILL.md");
+      await mkdir(dirname(source), { recursive: true });
+      await writeFile(source, "---\nname: allowed-skill\ndescription: bounded\n---\n\nDo bounded work.\n");
+      let capsuleFile = ""; let result: any = { skills: [], diagnostics: [] }; let disposed = false;
+      const sdk = {
+        DefaultResourceLoader: class {
+          private readonly options: any;
+          constructor(options: any) { this.options = options; capsuleFile = options.additionalSkillPaths[0]; }
+          async reload() {
+            if (variant === "reload") throw new Error("reload failed");
+            result = this.options.skillsOverride({
+              skills: [{
+                name: "allowed-skill", description: "isolated", filePath: capsuleFile, baseDir: dirname(capsuleFile),
+                sourceInfo: {}, disableModelInvocation: true,
+              }],
+              diagnostics: [],
+            });
+          }
+          getSkills() { return result; }
+        },
+        getAgentDir: () => join(project, "ambient-pi-home"),
+        SessionManager: { inMemory: () => ({}) },
+        createAgentSession: async () => {
+          if (variant === "create") throw new Error("create failed");
+          return { session: {
+            subscribe: () => () => {}, prompt: async () => { throw new Error("session failed"); },
+            abort: async () => {}, dispose: () => { disposed = true; },
+          } };
+        },
+      };
+      const skillDefinition = {
+        ...definition,
+        skills: [{ kind: "repo", name: "allowed-skill", path: "skills/allowed/SKILL.md" }],
+      };
+      await assert.rejects(
+        () => new PiOrchestrator(project, async () => sdk as any).run(skillDefinition as any),
+        new RegExp(`${variant} failed`),
+      );
+      assert.equal(disposed, variant === "session");
+      await assert.rejects(access(dirname(dirname(capsuleFile))), (error: any) => error?.code === "ENOENT");
+    });
+  }
 });
 
 test("SDK orchestrators clean up child sessions when prompting fails", async () => {
@@ -371,6 +581,7 @@ test("SDK orchestrators clean up child sessions when prompting fails", async () 
 
   const piEvents: string[] = [];
   const pi = new PiOrchestrator(process.cwd(), async () => ({
+    ...emptyPiResourceSdk(),
     SessionManager: { inMemory: () => ({}) },
     createAgentSession: async () => ({ session: {
       subscribe: () => () => { piEvents.push("unsubscribe"); },
@@ -408,6 +619,7 @@ test("SDK orchestrators preserve execution and cleanup failures together", async
 
   const piEvents: string[] = [];
   const pi = new PiOrchestrator(process.cwd(), async () => ({
+    ...emptyPiResourceSdk(),
     SessionManager: { inMemory: () => ({}) },
     createAgentSession: async () => ({ session: {
       subscribe: () => () => { piEvents.push("unsubscribe"); throw new Error("pi unsubscribe failed"); },
@@ -425,10 +637,11 @@ test("SDK orchestrators preserve execution and cleanup failures together", async
 });
 
 test("contract skills are validated and materialized before any SDK child is created", async () => {
-  let children = 0; let childPrompt = "";
+  let children = 0; let childConfig: any;
   const client = {
     createSession: async (config: any) => {
-      children += 1; childPrompt = config.customAgents[0].prompt;
+      children += 1; childConfig = config;
+      assert.match(await readFile(join(config.skillDirectories[0], "zx-example-author", "SKILL.md"), "utf8"), /Use verified guidance/);
       return { sessionId: "skill-child", abort: async () => {}, sendAndWait: async () => ({ data: { content: "done" } }) };
     },
     deleteSession: async () => {}, stop: async () => {},
@@ -437,11 +650,16 @@ test("contract skills are validated and materialized before any SDK child is cre
     resolve: async () => ({ commit: "a".repeat(40), blob: "b".repeat(40) }),
     load: async () => ({ commit: "c".repeat(40), body: "Use verified guidance." }),
   };
-  const withSkill = { ...definition, tools: ["read", "execute"], skills: [trustedSkills[0]] };
+  const withSkill = { ...definition, tools: ["read"], skills: [trustedSkills[0]] };
   assert.equal(await new CopilotOrchestrator(() => client as any, process.cwd(), github).run(withSkill as any), "done");
   assert.equal(children, 1);
-  assert.match(childPrompt, /Use verified guidance/);
-  assert.match(childPrompt, /cannot broaden tools/);
+  assert.equal(childConfig.enableConfigDiscovery, false);
+  assert.equal(childConfig.enableSkills, true);
+  assert.deepEqual(childConfig.customAgents[0].skills, ["zx-example-author"]);
+  assert.deepEqual(childConfig.customAgents[0].tools, ["read"]);
+  assert.match(childConfig.customAgents[0].prompt, /Only these skills are assigned/);
+  assert.doesNotMatch(childConfig.customAgents[0].prompt, /Use verified guidance/);
+  await assert.rejects(() => access(childConfig.skillDirectories[0]), /ENOENT/);
 
   const rejected = new CopilotOrchestrator(() => {
     children += 1; return client as any;
@@ -490,28 +708,61 @@ test("OpenCode plugin exposes five commands and the deterministic harbor tool", 
   assert.equal(config.agent["repo-cartographer"].permission.edit, "deny");
   assert.equal(config.agent.crafter.tools.apply_patch, true);
   assert.equal(config.agent.crafter.permission.edit, "allow");
-  assert.equal(config.agent.crafter.tools.agent_harbor_skill, true);
+  assert.equal(config.agent.crafter.tools.agent_harbor_skills, true);
+  assert.equal(config.agent.crafter.tools.skill, false);
   assert.ok(plugin.tool?.harbor);
   assert.ok(plugin.tool?.harbor_contract);
   assert.ok(plugin.tool?.harbor_delegate);
-  assert.ok(plugin.tool?.agent_harbor_skill);
+  assert.ok(plugin.tool?.agent_harbor_skills);
   const directPreflight = plugin["command.execute.before"]!;
   await assert.rejects(() => directPreflight(
     { command: "harbor-team-lead", sessionID: "session", arguments: "   " }, { parts: [] },
   ), /non-empty/);
   await directPreflight({ command: "harbor-team-lead", sessionID: "session", arguments: "coordinate" }, { parts: [] });
   await directPreflight({ command: "bench", sessionID: "session", arguments: "list" }, { parts: [] });
-  await assert.rejects(() => plugin.tool!.agent_harbor_skill.execute(
-    { reference: JSON.stringify({ ...trustedSkills[0], repo: "someone/else" }) },
-    { directory: current, abort: new AbortController().signal } as any,
-  ), /untrusted GitHub skill reference/);
+  await mkdir(join(current, "skills", "native"), { recursive: true });
+  await writeFile(join(current, "skills", "native", "SKILL.md"), [
+    "---", "name: native-guidance", "description: Native guidance", "---", "", "NATIVE-ONLY-GUIDANCE",
+  ].join("\n"), "utf8");
   const result = await plugin.tool!.harbor.execute(
-    { command: "join", args: JSON.stringify({ name: "native", description: "Native", prompt: "Work", tools: ["read"] }) },
+    { command: "join", args: JSON.stringify({
+      name: "native", description: "Native", prompt: "Work", tools: ["read"],
+      skills: [{ kind: "repo", name: "native-guidance", path: "skills/native/SKILL.md" }],
+    }) },
     { directory: current, abort: new AbortController().signal } as any,
   );
   assert.match(String(result), /joined native/);
   assert.match(String(result), new RegExp(current.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  const guidance = await plugin.tool!.agent_harbor_skills.execute(
+    {},
+    { directory: current, agent: "native", abort: new AbortController().signal } as any,
+  );
+  assert.match(String(guidance), /HARBOR-SKILL native-guidance/);
+  assert.match(String(guidance), /NATIVE-ONLY-GUIDANCE/);
+  await assert.rejects(() => plugin.tool!.agent_harbor_skills.execute(
+    {},
+    { directory: current, agent: "team-lead", abort: new AbortController().signal } as any,
+  ), /no configured skills/);
   if (previous === undefined) delete process.env.OPENCODE_CONFIG_DIR; else process.env.OPENCODE_CONFIG_DIR = previous;
+});
+
+test("OpenCode removes an owned stale profile from host discovery instead of inheriting expanded tools", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-opencode-stale-profile-"));
+  const project = join(root, "project"); const home = join(root, "home");
+  const previous = process.env.OPENCODE_CONFIG_DIR;
+  process.env.OPENCODE_CONFIG_DIR = home;
+  try {
+    const spec = harnessSpec("opencode", home, project);
+    await new Roster(spec).join({ name: "worker", description: "Worker", prompt: "Work", tools: ["read"] });
+    const active = join(project, spec.activeDir, `worker${spec.extension}`);
+    await writeFile(active, (await readFile(active, "utf8")).replace("  skill: false", "  skill: true"), "utf8");
+    const plugin = await AgentHarborPlugin({ client: { session: {} }, directory: project } as any, {});
+    const config: any = { agent: { worker: { tools: { skill: true } } } };
+    await plugin.config?.(config);
+    assert.equal(Object.hasOwn(config.agent, "worker"), false);
+  } finally {
+    if (previous === undefined) delete process.env.OPENCODE_CONFIG_DIR; else process.env.OPENCODE_CONFIG_DIR = previous;
+  }
 });
 
 test("OpenCode team lead dispatches exact active agents sequentially without a router", async () => {

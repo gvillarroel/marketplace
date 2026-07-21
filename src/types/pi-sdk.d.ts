@@ -35,16 +35,36 @@ declare module "@earendil-works/pi-coding-agent" {
     getThinkingLevel(): ThinkingLevel;
   }
   export class SessionManager { static inMemory(cwd?: string): SessionManager }
+  export interface ResourceDiagnostic {
+    type: "warning" | "error" | "collision";
+    message: string;
+    path?: string;
+  }
+  export interface Skill {
+    name: string;
+    description: string;
+    filePath: string;
+    baseDir: string;
+    sourceInfo: unknown;
+    disableModelInvocation: boolean;
+  }
+  export interface SkillLoadResult {
+    skills: Skill[];
+    diagnostics: ResourceDiagnostic[];
+  }
   export class DefaultResourceLoader {
     constructor(options: {
       cwd: string;
       agentDir: string;
+      additionalSkillPaths?: string[];
       noExtensions?: boolean;
       noSkills?: boolean;
       noPromptTemplates?: boolean;
       noThemes?: boolean;
       noContextFiles?: boolean;
+      skillsOverride?: (base: SkillLoadResult) => SkillLoadResult;
     });
+    getSkills(): SkillLoadResult;
     reload(): Promise<void>;
   }
   export function getAgentDir(): string;

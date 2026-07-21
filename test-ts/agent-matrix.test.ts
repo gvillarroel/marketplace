@@ -273,8 +273,13 @@ test("Pi reuses one orchestrator to dispatch every SDLC identity in isolated ses
   const sdk = {
     DefaultResourceLoader: class {
       private readonly record: { options: any; reloaded: boolean };
+      private result = { skills: [], diagnostics: [] };
       constructor(options: any) { this.record = { options, reloaded: false }; loaders.push(this.record); }
-      async reload() { this.record.reloaded = true; }
+      async reload() {
+        this.record.reloaded = true;
+        this.result = this.record.options.skillsOverride({ skills: [], diagnostics: [] });
+      }
+      getSkills() { return this.result; }
     },
     getAgentDir: () => "pi-agent-home",
     SessionManager: { inMemory: () => ({}) },

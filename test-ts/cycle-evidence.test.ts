@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { copilotFixedAgentIds } from "../src/adapters/copilot-coordinator.js";
 import { listInvocablePlayerIds, requireInvocablePlayer } from "../src/core/active.js";
@@ -204,6 +204,20 @@ async function runPiCycle(cycle: HarborCycle): Promise<void> {
   const collector = new HarborEvidenceCollector(harness, cycle.id);
   let childSequence = 0;
   const sdk = {
+    DefaultResourceLoader: class {
+      private readonly options: any;
+      private result = { skills: [] as any[], diagnostics: [] as any[] };
+      constructor(options: any) { this.options = options; }
+      async reload() {
+        const skills = this.options.additionalSkillPaths.map((filePath: string) => ({
+          name: basename(dirname(filePath)), description: "isolated", filePath,
+          baseDir: dirname(filePath), sourceInfo: {}, disableModelInvocation: true,
+        }));
+        this.result = this.options.skillsOverride({ skills, diagnostics: [] });
+      }
+      getSkills() { return this.result; }
+    },
+    getAgentDir: () => "pi-agent-home",
     SessionManager: { inMemory: () => ({}) },
     createAgentSession: async () => {
       const childId = `pi-${++childSequence}`;

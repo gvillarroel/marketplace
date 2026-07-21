@@ -2,7 +2,7 @@ import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { bundledPlayers, rolePlayers } from "./defaults.js";
 import { isOwnedProfile, validatePlayer } from "./lifecycle.js";
-import { decodePlayer } from "./profiles.js";
+import { decodePlayer, isCanonicalPlayerProfile } from "./profiles.js";
 import type { HarnessName, PlayerDefinition } from "./types.js";
 
 const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
@@ -17,8 +17,8 @@ const activeLocations: Record<HarnessName, { directory: string; extension: strin
 export interface InvocablePlayerIdentity {
   id: string;
   source: "fixed" | "active";
-  /** Available for fixed roles and every validated Pi active player. */
-  definition?: PlayerDefinition;
+  /** Validated definition recovered from a fixed role or revision-4 managed profile. */
+  definition: PlayerDefinition;
 }
 
 function locationFor(harness: HarnessName): { directory: string; extension: string } {
@@ -79,12 +79,16 @@ function readManagedActiveProfile(harness: HarnessName, project: string, id: str
   }
 }
 
-function validatedPiDefinition(content: string, id: string): PlayerDefinition {
-  return validatePlayer(decodePlayer(content, id), bundledPlayers.has(id));
+function validatedDefinition(content: string, id: string, harness: HarnessName, project: string): PlayerDefinition {
+  const definition = validatePlayer(decodePlayer(content, id), bundledPlayers.has(id));
+  if (!isCanonicalPlayerProfile(content, harness, definition, expectedRoster(id), project)) {
+    throw new Error(`active managed player is stale: ${id}`);
+  }
+  return definition;
 }
 
 /** Lists project profiles that are owned by Agent Harbor and safe to invoke. */
-export function listManagedActiveIds(harness: HarnessName, project: string): string[] {
+export function listOwnedActiveIds(harness: HarnessName, project: string): string[] {
   const projectRoot = resolve(project);
   const { directory, extension } = locationFor(harness);
   const activeRoot = contained(projectRoot, join(projectRoot, directory));
@@ -104,10 +108,6 @@ export function listManagedActiveIds(harness: HarnessName, project: string): str
       if (!entry.isFile()) continue;
       const content = readManagedActiveProfile(harness, projectRoot, id);
       if (!content) continue;
-      if (harness === "pi") {
-        try { validatedPiDefinition(content, id); }
-        catch { continue; }
-      }
       ids.push(id);
     }
     return ids;
@@ -117,6 +117,17 @@ export function listManagedActiveIds(harness: HarnessName, project: string): str
   }
 }
 
+/** Lists owned profiles whose entire executable representation is canonical and safe to invoke. */
+export function listManagedActiveIds(harness: HarnessName, project: string): string[] {
+  const projectRoot = resolve(project);
+  return listOwnedActiveIds(harness, projectRoot).filter((id) => {
+    const content = readManagedActiveProfile(harness, projectRoot, id);
+    if (!content) return false;
+    try { validatedDefinition(content, id, harness, projectRoot); return true; }
+    catch { return false; }
+  });
+}
+
 /** Fixed roles first, followed by ownership-verified project profiles. */
 export function listInvocablePlayerIds(harness: HarnessName, project: string): string[] {
   const ids = new Set(rolePlayers.keys());
@@ -124,11 +135,15 @@ export function listInvocablePlayerIds(harness: HarnessName, project: string): s
   return [...ids];
 }
 
-export function loadPiActivePlayer(project: string, id: unknown): PlayerDefinition {
+export function loadManagedActivePlayer(harness: HarnessName, project: string, id: unknown): PlayerDefinition {
   const validId = requireValidId(id);
-  const content = readManagedActiveProfile("pi", project, validId);
+  const content = readManagedActiveProfile(harness, project, validId);
   if (!content) throw new Error(`active managed player not found: ${validId}`);
-  return validatedPiDefinition(content, validId);
+  return validatedDefinition(content, validId, harness, resolve(project));
+}
+
+export function loadPiActivePlayer(project: string, id: unknown): PlayerDefinition {
+  return loadManagedActivePlayer("pi", project, id);
 }
 
 export function requireInvocablePlayer(harness: HarnessName, project: string, id: unknown): InvocablePlayerIdentity {
@@ -136,9 +151,7 @@ export function requireInvocablePlayer(harness: HarnessName, project: string, id
   const validId = requireValidId(id);
   const fixed = rolePlayers.get(validId);
   if (fixed) return { id: validId, source: "fixed", definition: fixed };
-  if (harness === "pi") return { id: validId, source: "active", definition: loadPiActivePlayer(project, validId) };
-  if (!readManagedActiveProfile(harness, project, validId)) throw new Error(`active managed player not found: ${validId}`);
-  return { id: validId, source: "active" };
+  return { id: validId, source: "active", definition: loadManagedActivePlayer(harness, project, validId) };
 }
 
 export function assertInvocablePlayer(harness: HarnessName, project: string, id: unknown): asserts id is string {

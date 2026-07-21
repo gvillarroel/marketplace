@@ -1,40 +1,49 @@
 import { Buffer } from "node:buffer";
 import { createInterface } from "node:readline";
 import { runCopilotControl } from "./copilot.js";
+import { requireInvocablePlayer } from "../core/active.js";
 import { trustedSkills } from "../core/defaults.js";
-import { GhResolver, loadTrustedGithubSkill } from "../core/github.js";
+import { GhResolver } from "../core/github.js";
+import { formatLoadedSkillGroup, loadConfiguredSkills } from "../core/skills.js";
 import { commandNames } from "../core/types.js";
 const maximumMessageBytes = 1_000_000;
 const serverName = "agent-harbor";
-const serverVersion = "0.11.0";
+const serverVersion = "0.12.0";
 const supportedProtocolVersions = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const activeRequests = new Map();
 let initializeSeen = false;
 let initialized = false;
-const tools = [{
-        name: "control",
-        description: "Execute one deterministic Agent Harbor lifecycle control or prepare one validated Copilot contract.",
-        inputSchema: {
-            type: "object",
-            properties: {
-                command: { type: "string", enum: commandNames },
-                args: { type: "string", description: "Complete literal command arguments" },
-            },
-            required: ["command", "args"],
-            additionalProperties: false,
+const idPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
+function scopedPlayerArgument(args) {
+    if (!args.length)
+        return undefined;
+    if (args.length !== 2 || args[0] !== "--skills-player" || !idPattern.test(args[1])) {
+        throw new Error("usage: copilot-mcp.js [--skills-player <player-id>]");
+    }
+    return args[1];
+}
+const scopedPlayer = scopedPlayerArgument(process.argv.slice(2));
+const controlTool = {
+    name: "control",
+    description: "Execute one deterministic Agent Harbor lifecycle control or prepare one validated Copilot contract.",
+    inputSchema: {
+        type: "object",
+        properties: {
+            command: { type: "string", enum: commandNames },
+            args: { type: "string", description: "Complete literal command arguments" },
         },
-    }, {
-        name: "skill",
-        description: "Resolve one exact allowlisted GitHub SKILL.md snapshot and return validated invocation-local guidance.",
-        inputSchema: {
-            type: "object",
-            properties: {
-                reference: { type: "string", description: "Complete canonical GitHub skill reference JSON" },
-            },
-            required: ["reference"],
-            additionalProperties: false,
-        },
-    }];
+        required: ["command", "args"],
+        additionalProperties: false,
+    },
+};
+const isolatedSkillTool = {
+    name: "skills",
+    description: "Load only the complete configured skill group bound to this Agent Harbor player server.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+};
+function listedTools() {
+    return scopedPlayer ? [isolatedSkillTool] : [controlTool];
+}
 function write(message) {
     process.stdout.write(`${JSON.stringify(message)}\n`);
 }
@@ -63,26 +72,28 @@ async function callTool(params, signal) {
     const request = object(params);
     if (typeof request.name !== "string")
         throw new Error("tool name must be a string");
-    const args = object(request.arguments);
-    if (request.name === "control") {
+    const args = request.arguments === undefined ? {} : object(request.arguments);
+    if (!scopedPlayer && request.name === "control") {
         requireKeys(args, ["command", "args"]);
         if (!commandNames.includes(args.command) || typeof args.args !== "string")
             throw new Error("invalid Agent Harbor control input");
         const text = await runCopilotControl(args.command, args.args, process.cwd(), signal);
         return { content: [{ type: "text", text }], isError: false };
     }
-    if (request.name === "skill") {
-        requireKeys(args, ["reference"]);
-        if (typeof args.reference !== "string")
-            throw new Error("reference must be one JSON string");
+    const playerId = scopedPlayer && request.name === "skills"
+        ? scopedPlayer
+        : undefined;
+    if (playerId) {
+        requireKeys(args, []);
         try {
-            const loaded = await loadTrustedGithubSkill(JSON.parse(args.reference), trustedSkills, new GhResolver(), signal);
-            const text = `HARBOR-COMMIT ${loaded.commit}\nHARBOR-SKILL ${loaded.skill.name}\n${loaded.body}`;
+            const player = requireInvocablePlayer("copilot", process.cwd(), playerId).definition;
+            const loaded = await loadConfiguredSkills(player, process.cwd(), new GhResolver(), trustedSkills, signal);
+            const text = formatLoadedSkillGroup(loaded);
             return { content: [{ type: "text", text }], isError: false };
         }
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            throw new Error(`external-skill-bootstrap: blocked (${message})`);
+            throw new Error(`configured-skill-bootstrap: blocked (${message})`);
         }
     }
     throw new Error(`unknown Agent Harbor tool: ${request.name}`);
@@ -134,7 +145,7 @@ async function handle(request) {
         return;
     }
     if (request.method === "tools/list") {
-        response(id, { tools });
+        response(id, { tools: listedTools() });
         return;
     }
     if (request.method === "tools/call") {

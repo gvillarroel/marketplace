@@ -10,5 +10,6 @@ export declare function composePlayerInstructions(player: PlayerDefinition, harn
 export declare function composeContractPrompt(definition: ContractDefinition, additionalTools?: readonly string[]): string;
 export declare function decodePlayer(content: string, id: string): unknown;
 export declare function renderPlayer(harness: HarnessName, player: PlayerDefinition, roster: "personal" | "sdlc", project?: string): string;
+export declare function isCanonicalPlayerProfile(content: string, harness: HarnessName, player: PlayerDefinition, roster: "personal" | "sdlc", project?: string): boolean;
 export declare function harnessSpec(name: HarnessName, home: string, project: string): HarnessSpec;
 export {};

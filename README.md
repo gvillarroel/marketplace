@@ -426,20 +426,42 @@ Here `current-folder` is the Copilot process working directory, resolved indepen
 
 Consequently the player is active where it joined and remains available from every other project through `bench on reviewer`. `bench off reviewer` removes only the active project copy. `retire reviewer` removes the user registration and the managed copy in the current project; copies in other projects remain intentionally untouched.
 
-The TypeScript implementation preserves canonical revision 3, so adopting it
-does not force a schema migration. Revisions 1 and 2 are not implicitly
-migrated; re-register their original definition explicitly. Agent Harbor never
-uses an unverifiable legacy marker as permission to overwrite or delete.
+Version 0.12 renders canonical revision 4 profiles. Revision 4 stores the
+validated definition in every harness profile so the adapter can recover and
+enforce that exact player's skill group. Owned revision 3 profiles remain safe
+to replace or remove, but are not invocable under the new isolation guarantee;
+run `bench on <id>` for bundled players or re-run `join` with `replace:true` for
+personal players. Revisions 1 and 2 are never treated as ownership.
 
-Version 0.11 accepts up to three validated GitHub skill references. Installed
-and local skill embedding is deliberately excluded to keep one portable,
-verifiable acquisition path:
+`skills` accepts at most three references with unique names. A repository
+reference points to one exact `SKILL.md` relative to the current project root;
+a GitHub reference must match the trusted exact-reference catalog. A portable
+player with skills must explicitly include `read`, but does not receive
+`execute` merely to load them. Omitted `skills` and `skills: []` both mean an
+empty skill group:
 
 ```text
-/join {"name":"zx-maker","description":"Minimal zx author","prompt":"Create the smallest runnable example.","tools":["read","search","edit","execute"],"skills":[{"kind":"github","name":"zx-example-author","repo":"gvillarroel/zx-harness","path":"skills/zx-example-author/SKILL.md","track":"refs/heads/main"}]}
+/join {"name":"reviewer","description":"Repository-guided reviewer","prompt":"Review the requested scope.","tools":["read","search"],"skills":[{"kind":"repo","name":"review-checklist","path":"skills/review-checklist/SKILL.md"}]}
+/join {"name":"zx-maker","description":"Minimal zx author","prompt":"Create the smallest runnable example.","tools":["read","search","edit","execute"],"skills":[{"kind":"repo","name":"project-conventions","path":".agents/skills/project-conventions/SKILL.md"},{"kind":"github","name":"zx-example-author","repo":"gvillarroel/zx-harness","path":"skills/zx-example-author/SKILL.md","track":"refs/heads/main"}]}
 ```
 
-Before each active-agent invocation, the profile calls the harness-native Agent Harbor loader. Copilot supplies `agent-harbor/skill` through its plugin-provided MCP server, OpenCode supplies `agent_harbor_skill` through its plugin API, and Pi materializes guidance before creating the child session. The shared loader makes exactly two authenticated read-only `gh api` calls, bounds each call to 20 seconds and propagates host cancellation, pins the moving branch to one commit, fetches only the immutable path, validates UTF-8 size/frontmatter/name, strips frontmatter, and returns the body only to that invocation. It never installs, caches, clones, persists, executes, or fetches sibling resources.
+Every source is revalidated before a child can start: 1..18,000 UTF-8 bytes,
+first-line YAML frontmatter, one matching top-level `name`, an exact contained
+repository path with no symlink traversal, or a trusted GitHub branch pinned to
+one commit. Only the instruction body is copied into an invocation-scoped
+capsule; sibling files are unavailable.
+
+Enforcement is harness-specific. Copilot SDK sessions disable config discovery,
+point `skillDirectories` at only that capsule, and preload only the configured
+names; persistent Copilot profiles expose one no-argument MCP tool bound to the
+player's complete group through a separate player-scoped server process; the
+global MCP server never lists any player skill group. OpenCode denies
+its ambient `skill` tool and exposes one no-argument group loader whose handler
+derives the exact managed definition from `execution.agent`; `/contract`
+injects only the prevalidated group while keeping `skill` disabled. Pi uses
+`noSkills: true`, exact `additionalSkillPaths`, and a fail-closed
+`skillsOverride`, so global and project-discovered skills never enter the child
+registry. A failure in any member creates zero children.
 
 ## Disposable players
 
@@ -451,7 +473,13 @@ Interactive Copilot `/contract` passes the literal JSON through the structured `
 
 ## Trusted skills
 
-Version 0.11 deliberately uses one explicit exact-reference allowlist in `src/core/defaults.ts`; it does not add repository-wide, folder-wide, installed, or local skill scopes. The included policy trusts `gvillarroel/zx-harness/skills/zx-example-author/SKILL.md` on `refs/heads/main`. List its current snapshot without downloading the body:
+The GitHub catalog remains an explicit exact-reference allowlist in
+`src/core/defaults.ts`. The included policy trusts
+`gvillarroel/zx-harness/skills/zx-example-author/SKILL.md` on
+`refs/heads/main`. Repository references are not global or folder-wide: each
+player names one project-relative `SKILL.md`, and that file is copied only for
+that player's invocation. List GitHub catalog snapshots without downloading
+their bodies:
 
 ```text
 /list-skills
@@ -467,7 +495,7 @@ opt-in SDLC companions:
 
 - `agent-foundry:team-lead`: derives the smallest sufficient sequence, preferring one specialist and permitting at most six sequential named delegations when distinct stages are necessary.
 - `repo-cartographer:repo-cartographer`: builds compact evidence-based repository maps.
-- `repo-cartographer:crafter`: refreshes the trusted external zx skill on every invocation, then creates a minimal self-contained zx or TypeScript command example.
+- `repo-cartographer:crafter`: loads only its player-scoped trusted zx skill group on every invocation, then creates a minimal self-contained zx or TypeScript command example.
 
 The six bundled companions start on the bench and represent the ordered SDLC
 when the full cycle is explicitly required. For ordinary work, `team-lead`
@@ -480,4 +508,9 @@ still selects only the smallest sufficient subset:
 - `consume`: validates correctness, safety, coverage, usability, and value from the consumer's perspective.
 - `dispose`: performs a non-destructive disposition review covering keep, evolve, eventual retirement, retention, rollback, and decommissioning; it never removes or undoes the delivered change.
 
-The marketplace relies on Copilot's native Markdown agents, user-invocable skills, and subagent tools. Its policies reduce accidental scope but cannot turn model instructions into an operating-system sandbox.
+The isolation guarantee applies to the skill registry and Agent Harbor loaders:
+only references configured for that player are revealed or materialized as
+skills. It is not a filesystem or network ACL. A player that already has
+`read` can still open another ordinary repository file if it knows the path,
+and a player explicitly granted `execute` can run authorized shell/network
+commands. Strong information isolation requires a separate harness sandbox.

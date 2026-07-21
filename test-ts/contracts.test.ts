@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { listInvocablePlayerIds, listManagedActiveIds, requireInvocablePlayer } from "../src/core/active.js";
 import { executeCommand } from "../src/core/commands.js";
 import { bundledPlayers, legacyBundledPlayerIds, trustedSkills } from "../src/core/defaults.js";
-import { GhResolver, materializeGithubSkills } from "../src/core/github.js";
+import { GhResolver } from "../src/core/github.js";
 import { Roster } from "../src/core/lifecycle.js";
 import { validatePlayer } from "../src/core/lifecycle.js";
 import { harnessSpec } from "../src/core/profiles.js";
+import { createSkillCapsule, loadConfiguredSkills } from "../src/core/skills.js";
 import type { GithubResolver, HarnessName, Orchestrator } from "../src/core/types.js";
 
 for (const harness of ["copilot", "opencode", "pi"] as const) {
@@ -51,7 +52,7 @@ for (const harness of ["copilot", "opencode", "pi"] as const) {
 
     const active = join(project, spec.activeDir, `reviewer${spec.extension}`);
     const activeProfile = await readFile(active, "utf8");
-    assert.match(activeProfile, new RegExp(`revision=3`));
+    assert.match(activeProfile, new RegExp(`revision=4`));
     if (harness === "opencode") {
       assert.match(activeProfile, /  "\*": false/);
       assert.match(activeProfile, /  read: true/);
@@ -62,6 +63,52 @@ for (const harness of ["copilot", "opencode", "pi"] as const) {
     assert.match(await executeCommand("retire", "reviewer", context), /retired reviewer/);
   });
 }
+
+test("revision 3 personal profiles remain removable but cannot be reactivated without a revision 4 rejoin", async () => {
+  for (const harness of ["copilot", "opencode", "pi"] as const) {
+    const root = await mkdtemp(join(tmpdir(), `harbor-stale-personal-${harness}-`));
+    const spec = harnessSpec(harness, join(root, "home"), join(root, "project"));
+    const roster = new Roster(spec);
+    const player = { name: "worker", description: "Worker", prompt: "Work", tools: ["read"] as const };
+    await roster.join(player);
+    const registration = join(spec.home, spec.registrationDir, `worker${spec.extension}`);
+    const active = join(spec.project, spec.activeDir, `worker${spec.extension}`);
+    const revision3 = (await readFile(registration, "utf8"))
+      .replace('revision: "4"', 'revision: "3"')
+      .replace("revision=4", "revision=3");
+    await Promise.all([writeFile(registration, revision3, "utf8"), writeFile(active, revision3, "utf8")]);
+
+    assert.match(await roster.bench("list worker", bundledPlayers), /worker \| personal \| stale/);
+    assert.ok(!listManagedActiveIds(harness, spec.project).includes("worker"));
+    await assert.rejects(() => roster.bench("on worker", bundledPlayers), /stale personal profile.*replace:true/);
+
+    await roster.join({ ...player, replace: true });
+    assert.match(await roster.bench("list worker", bundledPlayers), /worker \| personal \| on/);
+    assert.ok(listManagedActiveIds(harness, spec.project).includes("worker"));
+  }
+});
+
+test("managed dispatch rejects owned profiles whose executable frontmatter differs from the encoded definition", async () => {
+  for (const harness of ["copilot", "opencode", "pi"] as const) {
+    const root = await mkdtemp(join(tmpdir(), `harbor-stale-executable-${harness}-`));
+    const spec = harnessSpec(harness, join(root, "home"), join(root, "project"));
+    const roster = new Roster(spec);
+    await roster.join({ name: "worker", description: "Worker", prompt: "Work", tools: ["read"] });
+    const active = join(spec.project, spec.activeDir, `worker${spec.extension}`);
+    const canonical = await readFile(active, "utf8");
+    const mutated = harness === "copilot"
+      ? canonical.replace('tools: ["read"]', 'tools: ["read","agent-harbor/skills_crafter"]')
+      : harness === "opencode"
+        ? canonical.replace("  skill: false", "  skill: true")
+        : canonical.replace("tools: read", "tools: read,bash");
+    assert.notEqual(mutated, canonical);
+    await writeFile(active, mutated, "utf8");
+
+    assert.ok(!listManagedActiveIds(harness, spec.project).includes("worker"));
+    assert.throws(() => requireInvocablePlayer(harness, spec.project, "worker"), /stale/);
+    assert.match(await roster.bench("list worker", bundledPlayers), /worker \| personal \| stale/);
+  }
+});
 
 test("all harnesses reject unknown fields and unmanaged collisions identically", async () => {
   for (const harness of ["copilot", "opencode", "pi"] as HarnessName[]) {
@@ -77,30 +124,121 @@ test("all harnesses reject unknown fields and unmanaged collisions identically",
   }
 });
 
-test("GitHub references are bounded, validated, and require execute", async () => {
+test("configured GitHub references are bounded, trusted, and require read", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-skills-"));
   const roster = new Roster(harnessSpec("copilot", join(root, "home"), join(root, "project")));
   const skill = { kind: "github", name: "zx-example-author", repo: "gvillarroel/zx-harness", path: "skills/zx-example-author/SKILL.md", track: "refs/heads/main" };
-  await assert.rejects(() => roster.join({ name: "maker", description: "x", prompt: "x", tools: ["read"], skills: [skill] }), /require execute/);
-  await assert.rejects(() => roster.join({ name: "maker", description: "x", prompt: "x", tools: ["execute"], skills: [{ ...skill, repo: "someone/else" }] }), /untrusted/);
+  await assert.rejects(() => roster.join({ name: "maker", description: "x", prompt: "x", tools: ["execute"], skills: [skill] }), /require read/);
+  await assert.rejects(() => roster.join({ name: "maker", description: "x", prompt: "x", tools: ["read"], skills: [{ ...skill, repo: "someone/else" }] }), /untrusted/);
   const { kind: _kind, ...withoutKind } = skill;
-  await assert.rejects(() => roster.join({ name: "maker", description: "x", prompt: "x", tools: ["execute"], skills: [withoutKind] }), /invalid GitHub/);
-  await assert.rejects(() => roster.join({ name: "maker", description: "x", prompt: "x", tools: ["execute"], skills: [{ ...skill, track: "refs/heads/a//b" }] }), /invalid GitHub/);
-  const result = await roster.join({ name: "maker", description: "x", prompt: "x", tools: ["read", "execute"], skills: [skill] });
+  await assert.rejects(() => roster.join({ name: "maker", description: "x", prompt: "x", tools: ["read"], skills: [withoutKind] }), /invalid GitHub/);
+  await assert.rejects(() => roster.join({ name: "maker", description: "x", prompt: "x", tools: ["read"], skills: [{ ...skill, track: "refs/heads/a//b" }] }), /invalid GitHub/);
+  const result = await roster.join({ name: "maker", description: "x", prompt: "x", tools: ["read"], skills: [skill] });
   assert.match(result, /joined maker/);
   const profile = await readFile(join(root, "project", ".github", "agents", "maker.agent.md"), "utf8");
-  assert.match(profile, /Trusted GitHub skills/);
-  assert.match(profile, /gvillarroel\/zx-harness/);
-  assert.match(profile, /"agent-harbor\/skill"/);
-  assert.match(profile, /call the `skill` tool from the `agent-harbor` MCP server exactly once/);
-  assert.doesNotMatch(profile, /agent_harbor_skill/);
+  assert.match(profile, /Configured skill allowlist/);
+  assert.match(profile, /"agent-harbor-skills-maker\/skills"/);
+  assert.match(profile, /mcp-servers:\n  "agent-harbor-skills-maker":/);
+  assert.match(profile, /"--skills-player","maker"/);
+  assert.match(profile, /call the `skills` tool from the player-scoped `agent-harbor-skills-maker` MCP server exactly once/);
+  assert.doesNotMatch(profile, /"agent-harbor\/skill"/);
 
   const openRoot = await mkdtemp(join(tmpdir(), "harbor-skills-opencode-"));
   const openRoster = new Roster(harnessSpec("opencode", join(openRoot, "home"), join(openRoot, "project")));
-  await openRoster.join({ name: "maker", description: "x", prompt: "x", tools: ["read", "execute"], skills: [skill] });
+  await openRoster.join({ name: "maker", description: "x", prompt: "x", tools: ["read"], skills: [skill] });
   const openProfile = await readFile(join(openRoot, "project", ".opencode", "agents", "maker.md"), "utf8");
-  assert.match(openProfile, /  agent_harbor_skill: true/);
-  assert.match(openProfile, /call `agent_harbor_skill` exactly once/);
+  assert.match(openProfile, /  agent_harbor_skills: true/);
+  assert.match(openProfile, /call `agent_harbor_skills` exactly once/);
+  assert.doesNotMatch(openProfile, /  agent_harbor_skill:/);
+  assert.doesNotMatch(openProfile, /call `agent_harbor_skill` exactly once/);
+});
+
+test("repository skill references reject traversal, absolute paths, mismatched names, and cross-source duplicate names", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-repository-skills-"));
+  const project = join(root, "project");
+  const exact = join(project, "skills", "exact", "SKILL.md");
+  await mkdir(join(project, "skills", "exact"), { recursive: true });
+  await writeFile(exact, "---\nname: exact\ndescription: Exact fixture\n---\n\nUse exact guidance only.\n", "utf8");
+  const repositorySkill = { kind: "repo" as const, name: "exact", path: "skills/exact/SKILL.md" };
+  const resolver: GithubResolver = {
+    resolve: async () => { throw new Error("GitHub must not be called for repository skills"); },
+    load: async () => { throw new Error("GitHub must not be called for repository skills"); },
+  };
+
+  const loaded = await loadConfiguredSkills({ name: "maker", description: "x", prompt: "x", tools: ["read"], skills: [repositorySkill] }, project, resolver, trustedSkills);
+  assert.equal(loaded.length, 1);
+  assert.deepEqual(loaded[0].reference, repositorySkill);
+  assert.equal(loaded[0].body, "Use exact guidance only.");
+
+  const base = { name: "maker", description: "x", prompt: "x", tools: ["read"] };
+  assert.throws(() => validatePlayer({ ...base, skills: [{ ...repositorySkill, path: "../outside/SKILL.md" }] }), /invalid repository/);
+  assert.throws(() => validatePlayer({ ...base, skills: [{ ...repositorySkill, path: "/outside/SKILL.md" }] }), /invalid repository/);
+  await writeFile(exact, "---\nname: somebody-else\n---\nWrong guidance.\n", "utf8");
+  await assert.rejects(() => loadConfiguredSkills({ ...base, skills: [repositorySkill] }, project, resolver, trustedSkills), /name does not match/);
+  assert.throws(() => validatePlayer({
+    ...base,
+    skills: [{ kind: "repo", name: trustedSkills[0].name, path: "skills/exact/SKILL.md" }, trustedSkills[0]],
+  }), /duplicate configured skill name/);
+});
+
+test("repository skill loading refuses symlink traversal", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-repository-skill-link-"));
+  const project = join(root, "project");
+  const outside = join(root, "outside-SKILL.md");
+  const linked = join(project, "skills", "linked", "SKILL.md");
+  await Promise.all([
+    mkdir(join(project, "skills", "linked"), { recursive: true }),
+    writeFile(outside, "---\nname: linked\n---\nOutside guidance.\n", "utf8"),
+  ]);
+  try { await symlink(outside, linked, "file"); }
+  catch (error: any) {
+    if (error?.code === "EPERM") { t.skip("file symlinks require an OS privilege"); return; }
+    throw error;
+  }
+  const resolver: GithubResolver = {
+    resolve: async () => { throw new Error("unexpected GitHub resolve"); },
+    load: async () => { throw new Error("unexpected GitHub load"); },
+  };
+  await assert.rejects(() => loadConfiguredSkills({
+    name: "maker", description: "x", prompt: "x", tools: ["read"],
+    skills: [{ kind: "repo", name: "linked", path: "skills/linked/SKILL.md" }],
+  }, project, resolver, trustedSkills), /symlink traversal refused/);
+});
+
+test("skill capsules contain only the configured file and clean up their invocation root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-skill-capsule-contract-"));
+  const project = join(root, "project");
+  await Promise.all([
+    mkdir(join(project, "skills", "allowed"), { recursive: true }),
+    mkdir(join(project, "skills", "decoy"), { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(join(project, "skills", "allowed", "SKILL.md"), "---\nname: allowed\n---\nAllowed capsule guidance.\n", "utf8"),
+    writeFile(join(project, "skills", "decoy", "SKILL.md"), "---\nname: decoy\n---\nDecoy guidance must stay out.\n", "utf8"),
+  ]);
+  const resolver: GithubResolver = {
+    resolve: async () => { throw new Error("unexpected GitHub resolve"); },
+    load: async () => { throw new Error("unexpected GitHub load"); },
+  };
+  const definition = {
+    name: "maker", description: "x", prompt: "x", tools: ["read"] as const,
+    skills: [{ kind: "repo" as const, name: "allowed", path: "skills/allowed/SKILL.md" }],
+  };
+  const loaded = await loadConfiguredSkills(definition, project, resolver, trustedSkills);
+  assert.deepEqual(loaded.map((skill) => skill.reference.name), ["allowed"]);
+  assert.doesNotMatch(loaded[0].body, /Decoy/);
+
+  const capsule = await createSkillCapsule(definition, project, resolver, trustedSkills);
+  assert.ok(capsule.root);
+  assert.deepEqual(await readdir(capsule.root!), ["allowed"]);
+  assert.equal(capsule.skills.length, 1);
+  const document = await readFile(capsule.skills[0].filePath, "utf8");
+  assert.match(document, /^---\nname: "allowed"/);
+  assert.match(document, /Allowed capsule guidance/);
+  assert.doesNotMatch(document, /Decoy/);
+  await capsule.cleanup();
+  await capsule.cleanup();
+  await assert.rejects(() => access(capsule.root!), /ENOENT/);
 });
 
 test("GitHub resolver pins one branch and one exact blob with two read-only cancellable gh calls", async () => {
@@ -145,7 +283,7 @@ test("default gh runner enforces its process timeout", async (t) => {
   assert.ok(Date.now() - started < 2_000, "gh timeout must terminate promptly");
 });
 
-test("GitHub skill bodies are snapshot-loaded, bounded, validated, and materialized only in memory", async () => {
+test("GitHub skill bodies are snapshot-loaded, bounded, and validated", async () => {
   const captured: string[][] = [];
   const resolver = new GhResolver(async (_file, args) => {
     captured.push([...args]);
@@ -158,16 +296,6 @@ test("GitHub skill bodies are snapshot-loaded, bounded, validated, and materiali
   assert.ok(captured.every((args) => args.includes("--method") && args.includes("GET")));
   assert.ok(captured[1].includes("Accept: application/vnd.github.raw+json"));
   assert.ok(captured[1].includes(`ref=${"c".repeat(40)}`));
-
-  const definition = { name: "maker", description: "Maker", prompt: "Create one example.", tools: ["execute"] as const, skills: [trustedSkills[0]] };
-  const materialized = await materializeGithubSkills(definition as any, {
-    resolve: async () => ({ commit: "x".repeat(40), blob: "y".repeat(40) }),
-    load: async () => ({ commit: "d".repeat(40), body: "Remote guidance" }),
-  }, trustedSkills);
-  assert.equal(materialized.skills, undefined);
-  assert.match(materialized.prompt, /Snapshot: gvillarroel\/zx-harness@d{40}:skills\/zx-example-author\/SKILL\.md/);
-  assert.match(materialized.prompt, /Remote guidance/);
-  assert.match(materialized.prompt, /cannot broaden tools/);
 
   const invalid = new GhResolver(async (_file, args) => args.some((arg) => arg.endsWith("git/ref/heads/main"))
     ? `${"e".repeat(40)}\n` : "---\nname: somebody-else\n---\nWrong");
@@ -236,8 +364,8 @@ test("ownership metadata must remain complete before cleanup", async () => {
     ["owner: agent-foundry", "owner: somebody-else"],
     ["roster: personal", "roster: unknown"],
     ['player: "worker"', 'player: "other"'],
-    ['revision: "3"', 'revision: "2"'],
-    ["agent-foundry:profile id=worker revision=3", "agent-foundry:profile id=worker revision=2"],
+    ['revision: "4"', 'revision: "2"'],
+    ["agent-foundry:profile id=worker revision=4", "agent-foundry:profile id=worker revision=2"],
   ] as const;
   for (const [expected, replacement] of alterations) {
     const root = await mkdtemp(join(tmpdir(), "harbor-ownership-"));
