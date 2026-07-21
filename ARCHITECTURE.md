@@ -56,11 +56,11 @@ flowchart LR
 
 | Capa | Responsabilidad | Regla de imports |
 | --- | --- | --- |
-| `src/core` | Tipos, identidad/layout, catálogo, comandos, perfiles, roster, active discovery, GitHub, skills y evidencia normalizada. | Sólo Node y otros módulos del core; no importa SDKs ni adapters. `profiles.ts` calcula la ruta compilada de `copilot-mcp.js` para renderizar perfiles, pero no importa ese adapter. |
+| `src/core` | Tipos, identidad/layout, catálogo visible configurable, comandos, perfiles, roster, active discovery, GitHub, skills y evidencia normalizada. | Sólo Node y otros módulos del core; no importa SDKs ni adapters. `profiles.ts` calcula la ruta compilada de `copilot-mcp.js` para renderizar perfiles, pero no importa ese adapter. |
 | `src/adapters` | Registro nativo, superficies directas, traducción de tools/permisos y preflight específico del host. | Puede importar core, su SDK y orchestrators. No debe duplicar reglas de negocio del roster. |
 | `src/orchestrators` | Preparar, crear, ejecutar y limpiar un child con el SDK de un harness. | Importa core y un SDK; no registra ni muta players persistentes. |
 | `src/cli.ts` | Bin portable `agent-harbor`; despacha controles directos y el contrato programático de Copilot. | Importa el backend compartido y carga el orquestador Copilot sólo cuando hace falta. |
-| `plugins/` | Manifests y superficies Copilot estáticas: agentes, skills fallback, MCP y extensión client. | Consume copias compiladas bajo su propio `${PLUGIN_ROOT}`. |
+| `plugins/` | Manifests y superficies Copilot estáticas: agentes, skill de `/contract`, MCP y extensión client. | Consume copias compiladas bajo su propio `${PLUGIN_ROOT}`. |
 | `scripts/` | Build y runners offline/live. | Orquesta procesos; no es otro runtime del producto. |
 | `dist/` | JavaScript y declaraciones publicables. | Salida generada, no fuente. |
 
@@ -81,7 +81,7 @@ mismo layout.
 | Copilot marketplace | `.github/plugin/marketplace.json` y los `plugin.json` | Instala `agent-foundry` y `repo-cartographer`. |
 | Copilot extensión | `plugins/agent-foundry/extensions/agent-harbor/extension.mjs` | Comandos client deterministas, `/harbor-<id>`, cambio/restauración de agente y guard de `team-lead`. |
 | Copilot MCP | `plugins/agent-foundry/.mcp.json` → runtime generado `adapters/copilot-mcp.js` | Tool global `control`; un proceso `--skills-player <id>` publica sólo `skills` para ese player. |
-| Copilot fallback | `plugins/agent-foundry/skills/*/SKILL.md` | Wrappers mínimos de los cinco comandos cuando no está disponible la extensión directa. |
+| Copilot model-backed | `plugins/agent-foundry/skills/contract/SKILL.md` | Único wrapper Markdown: `/contract` hace preflight y crea exactamente un child. Los cuatro controles deterministas no tienen fallback skill. |
 | OpenCode server | export `.`/`./server` → `dist/adapters/opencode.js` | Plugin `AgentHarborPlugin`: commands, agents y tools `harbor`, `harbor_contract`, `harbor_delegate`, `agent_harbor_skills`. |
 | OpenCode TUI | export `./tui` → `dist/adapters/opencode-tui.js` | Paleta y diálogos directos sin modelo. |
 | Pi | manifest `package.json.pi.extensions` y export `./pi` → `dist/adapters/pi.js` | `ExtensionAPI.registerCommand`/`registerTool`; players reales mediante sesiones SDK en memoria. |
@@ -108,9 +108,10 @@ que falla si alguien intenta usarlo y llama a `executeCommand`:
 
 Copilot usa handlers client en `extension.mjs`; OpenCode usa
 `openCodeDirectCommands`; Pi usa handlers `registerCommand`; el CLI sirve como
-ruta portable. Los comandos canónicos fallback de Copilot/OpenCode pueden ser
-mediados por el modelo debido a la superficie del host, aunque el backend que
-finalmente ejecutan siga siendo determinista.
+ruta portable. Copilot no publica fallbacks skill para controles deterministas:
+si la extensión experimental no está activa se usa el CLI directo. Los comandos
+canónicos de OpenCode sí pueden ser mediados por el modelo debido a la superficie
+del host, aunque el backend que finalmente ejecutan siga siendo determinista.
 
 Semántica común:
 
@@ -119,8 +120,11 @@ Semántica común:
 - `join <json>` valida, renderiza y escribe registro + copia activa.
 - `retire <id>` elimina el registro personal y la copia activa del proyecto
   actual; otros proyectos quedan intactos.
-- `list-skills [filter]` filtra `trustedSkills` y reporta ref, commit y blob sin
-  descargar, mostrar, instalar o cachear el body.
+- `list-skills [filter]` carga el override cerrado
+  `.agent-harbor/skill-sources.json`, enumera scopes `repository`, `folder` o
+  `skill` desde una rama resuelta y muestra sólo repositorio, path y nombre. No
+  descarga, muestra, instala ni cachea bodies. El catálogo visible no amplía la
+  allowlist exacta `trustedSkills` usada para ejecución.
 
 ### `/contract`
 

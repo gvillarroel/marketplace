@@ -21,6 +21,8 @@ export function runDeterministicCommand(
   args: string,
   project = process.cwd(),
   signal?: AbortSignal,
+  color = false,
 ): Promise<string> {
-  return executeCommand(command, args, harborContext(harness, project, noModelOrchestrator(harness)), signal);
+  return harborContext(harness, project, noModelOrchestrator(harness), color)
+    .then((context) => executeCommand(command, args, context, signal));
 }

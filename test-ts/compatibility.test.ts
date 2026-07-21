@@ -337,9 +337,9 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
         try { await access(join(skillsDirectory, skill.name, "SKILL.md")); skillNames.add(skill.name); localSkills.add(skill.name); } catch { /* not a skill */ }
       }
     }
-    if (directory.endsWith(join("plugins", "agent-foundry"))) assert.deepEqual(localSkills, commands);
+    if (directory.endsWith(join("plugins", "agent-foundry"))) assert.deepEqual(localSkills, new Set(["contract"]));
   }
-  assert.ok([...commands].every((name) => skillNames.has(name)));
+  assert.deepEqual(skillNames, new Set(["contract", "harbor-repository-map"]));
   assert.deepEqual(new Set(manifests.map((manifest) => manifest.name)), new Set(["agent-foundry", "repo-cartographer"]));
   const marketplace = JSON.parse(await readFile(join(root, ".github", "plugin", "marketplace.json"), "utf8"));
   const marketplaceVersions = new Map<string, string>(marketplace.plugins.map((plugin: any) => [plugin.name, plugin.version]));
@@ -350,14 +350,12 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-mcp.js")),
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-coordinator.js")),
   ]);
-  for (const name of commands) {
-    const control = await readFile(join(plugins, "agent-foundry", "skills", name, "SKILL.md"), "utf8");
-    assert.match(control, /agent-harbor\(control\)/);
-    assert.match(control, /`control` tool from the `agent-harbor` MCP server/);
-    assert.doesNotMatch(control, /agent_harbor/);
-    assert.doesNotMatch(control, /\bnode\b|runtime\/dist/);
+  const contract = await readFile(join(plugins, "agent-foundry", "skills", "contract", "SKILL.md"), "utf8");
+  assert.match(contract, /agent-harbor\(control\)/);
+  assert.match(contract, /Call `task` exactly once/);
+  for (const name of deterministicCommandNames) {
+    await assert.rejects(() => access(join(plugins, "agent-foundry", "skills", name, "SKILL.md")), /ENOENT/);
   }
-  assert.match(await readFile(join(plugins, "agent-foundry", "skills", "contract", "SKILL.md"), "utf8"), /Call `task` exactly once/);
   const foundryManifest = JSON.parse(await readFile(join(plugins, "agent-foundry", "plugin.json"), "utf8"));
   assert.equal(foundryManifest.mcpServers, ".mcp.json");
   assert.deepEqual(foundryManifest.extensions, { paths: ["extensions/agent-harbor"], exclusive: false });
@@ -372,6 +370,7 @@ test("Copilot plugins expose canonical commands and one plugin-provided MCP serv
   const extension = await readFile(join(plugins, "agent-foundry", "extensions", "agent-harbor", "extension.mjs"), "utf8");
   assert.match(extension, /joinSession/);
   assert.match(extension, /runDeterministicCommand/);
+  assert.match(extension, /name === "list-skills"/);
   assert.match(extension, /createCopilotCoordinatorGuard/);
   assert.match(extension, /hooks: coordinator\.hooks/);
   assert.match(extension, /coordinator\.observeEvent/);

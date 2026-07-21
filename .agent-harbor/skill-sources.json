@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "kind": "github",
+      "scope": "skill",
+      "repo": "gvillarroel/zx-harness",
+      "path": "skills/zx-example-author/SKILL.md",
+      "name": "zx-example-author",
+      "track": "refs/heads/main"
+    }
+  ]
+}

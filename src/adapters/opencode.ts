@@ -169,7 +169,7 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
         args: { command: tool.schema.enum(commandNames), args: tool.schema.string() },
         execute: async ({ command, args }, execution) => {
           const currentDirectory = execution.directory || directory;
-          const context = harborContext("opencode", currentDirectory, new OpenCodeOrchestrator(client, currentDirectory));
+          const context = await harborContext("opencode", currentDirectory, new OpenCodeOrchestrator(client, currentDirectory));
           return executeCommand(command as CommandName, args, context, execution.abort);
         },
       }),
@@ -178,7 +178,7 @@ export const AgentHarborPlugin: Plugin = async ({ client, directory }) => {
         args: { definition: tool.schema.string() },
         execute: async ({ definition }, execution) => {
           const currentDirectory = execution.directory || directory;
-          const context = harborContext("opencode", currentDirectory, new OpenCodeOrchestrator(client, currentDirectory));
+          const context = await harborContext("opencode", currentDirectory, new OpenCodeOrchestrator(client, currentDirectory));
           return executeCommand("contract", definition, context, execution.abort);
         },
       }),

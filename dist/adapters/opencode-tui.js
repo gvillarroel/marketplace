@@ -6,7 +6,7 @@ function message(error) {
 export function openCodeDirectCommands(api) {
     const execute = async (command, args) => {
         try {
-            const result = await runDeterministicCommand("opencode", command, args, api.state.path.directory);
+            const result = await runDeterministicCommand("opencode", command, args, api.state.path.directory, undefined, command === "list-skills");
             api.ui.toast({ variant: "success", title: "Agent Harbor · 0 model tokens", message: result, duration: 10_000 });
         }
         catch (error) {

@@ -63,6 +63,25 @@ export interface GithubSkill {
   track: string;
 }
 
+/** Read-only GitHub scope whose `SKILL.md` entries may appear in the visible catalog. */
+export interface GithubSkillCatalogSource {
+  kind: "github";
+  scope: "repository" | "folder" | "skill";
+  repo: string;
+  track: string;
+  /** Required for folder/skill scopes and omitted for a whole repository. */
+  path?: string;
+  /** Optional display override for one exact skill; folder/repository names come from their paths. */
+  name?: string;
+}
+
+/** One discovered catalog row. Catalog visibility does not grant execution trust. */
+export interface GithubSkillCatalogEntry {
+  name: string;
+  repo: string;
+  path: string;
+}
+
 /** Reference to one exact, project-root-relative `SKILL.md` file. */
 export interface RepositorySkill {
   kind: "repo";
@@ -78,4 +97,5 @@ export type SkillReference = GithubSkill | RepositorySkill;
 export interface GithubResolver {
   resolve(skill: GithubSkill, signal?: AbortSignal): Promise<{ commit: string; blob: string }>;
   load(skill: GithubSkill, signal?: AbortSignal): Promise<{ commit: string; body: string }>;
+  listCatalog?(source: GithubSkillCatalogSource, signal?: AbortSignal): Promise<readonly GithubSkillCatalogEntry[]>;
 }

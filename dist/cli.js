@@ -23,11 +23,11 @@ else {
     const args = rest.join(" ");
     try {
         if (deterministicCommandNames.includes(command)) {
-            console.log(await runDeterministicCommand(harness, command, args));
+            console.log(await runDeterministicCommand(harness, command, args, process.cwd(), undefined, Boolean(process.stdout.isTTY && !process.env.NO_COLOR)));
         }
         else if (harness === "copilot") {
             const { CopilotOrchestrator } = await import("./orchestrators/copilot.js");
-            console.log(await executeCommand(command, args, harborContext(harness, process.cwd(), new CopilotOrchestrator())));
+            console.log(await executeCommand(command, args, await harborContext(harness, process.cwd(), new CopilotOrchestrator())));
         }
         else {
             throw new Error(`/contract must run inside ${harness}; the direct CLI never starts a hidden model session`);

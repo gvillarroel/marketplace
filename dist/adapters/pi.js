@@ -109,7 +109,7 @@ export default function agentHarbor(pi) {
             additionalProperties: false,
         },
         execute: async (_id, params, signal, _update, ctx) => {
-            const context = harborContext("pi", ctx.cwd, createOrchestrator(ctx.cwd, currentSessionOptions(ctx.model)));
+            const context = await harborContext("pi", ctx.cwd, createOrchestrator(ctx.cwd, currentSessionOptions(ctx.model)));
             const text = await executeCommand("contract", params.definition, context, signal);
             return { content: [{ type: "text", text }], details: { harness: "pi" } };
         },
@@ -120,8 +120,8 @@ export default function agentHarbor(pi) {
             handler: async (args, ctx) => {
                 try {
                     const result = name === "contract"
-                        ? await executeCommand(name, args, harborContext("pi", ctx.cwd, createOrchestrator(ctx.cwd, currentSessionOptions(ctx.model))))
-                        : await runDeterministicCommand("pi", name, args, ctx.cwd);
+                        ? await executeCommand(name, args, await harborContext("pi", ctx.cwd, createOrchestrator(ctx.cwd, currentSessionOptions(ctx.model))))
+                        : await runDeterministicCommand("pi", name, args, ctx.cwd, undefined, name === "list-skills");
                     if (name === "join" || name === "bench")
                         syncActivePlayers(ctx.cwd);
                     ctx.ui.notify(result, "info");

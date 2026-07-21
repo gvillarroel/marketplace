@@ -55,3 +55,24 @@ the time of this log were:
 | Copilot `live-team-lead-report.json` | `2026-07-20T23:12:09.416Z` | `14098d642edd018d56bf6410d935e98d53cc9ab6cd279327a68cc710fe92ae83` |
 | OpenCode `live-opencode-team-lead-report.json` | `2026-07-20T23:05:59.546Z` | `b3a7409908891b2e8443884ae5a4efda62639e41cdf8ddd34736bbe5f43f91bb` |
 | Pi `live-pi-team-lead-report.json` | `2026-07-20T23:06:42.592Z` | `d3d8f8048916752a657161466d2174565c891a0117376ef79c057d9ce2b8988` |
+
+## Skill catalog and zero-token control gate
+
+Recorded at `2026-07-20T23:21:04-04:00` from `main` working tree commit
+`33246d0a2a9a2d9b978cdfaab838a340ad2f7b1d` plus the catalog changes under
+review.
+
+| Command | Result |
+| --- | --- |
+| `npm test` | Passed: 90 tests, 0 failed, 0 skipped, 0 cancelled; TAP duration 17,524.575 ms |
+| Authenticated `node dist/cli.js pi list-skills` | Passed; compact `REPOSITORY`, `PATH`, `SKILL` output |
+| Authenticated `node dist/cli.js copilot list-skills zx` | Passed; same compact filtered output |
+| `npm audit --audit-level=high` | Passed: 0 vulnerabilities |
+| `npm pack --dry-run --json` | Passed: 94 entries, 99,403 bytes packed, 535,127 bytes unpacked; `/contract` is the only packaged `agent-foundry` skill |
+| `git diff --check` | Passed |
+
+The offline suite verifies project-local catalog replacement, repository/folder/
+exact-skill discovery, immutable GitHub branch resolution, no remote body
+download during listing, ANSI presentation in native terminal surfaces, and the
+absence of model-routed Copilot skill wrappers for all four deterministic
+controls.

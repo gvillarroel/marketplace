@@ -99,7 +99,7 @@ ruta cero modelo.
 
   | Harness | Superficie directa preferida | Fallback |
   | --- | --- | --- |
-  | Copilot CLI | comandos de extensión `client` para `/bench`, `/join`, `/retire` y `/list-skills` | CLI directo; skills + MCP mediadas por modelo si las extensiones experimentales están desactivadas |
+  | Copilot CLI | comandos de extensión `client` para `/bench`, `/join`, `/retire` y `/list-skills` | CLI directo; no existe fallback skill mediado por modelo para estos controles |
   | OpenCode | comandos TUI inequívocos y diálogos para los cuatro controles | CLI directo; comandos con argumentos mediados por modelo |
   | Pi | handlers `registerCommand` para los cuatro nombres canónicos | CLI directo |
 
@@ -437,9 +437,15 @@ ruta cero modelo.
 
 ### `/list-skills`
 
-- Filtra la allowlist explícita y resuelve cada rama mediante el `gh`
-  autenticado del usuario.
-- Reporta nombre, repo, path, tracking ref, commit SHA y blob SHA.
+- Lee opcionalmente `.agent-harbor/skill-sources.json` del proyecto. El archivo
+  cerrado versión 1 reemplaza los defaults y acepta hasta 32 fuentes GitHub de
+  scope `repository`, `folder` o `skill`.
+- Resuelve cada rama mediante el `gh` autenticado del usuario y enumera como
+  máximo 500 `SKILL.md` por scope desde ese snapshot.
+- Reporta una tabla compacta con sólo `REPOSITORY`, `PATH` y `SKILL`; las
+  superficies terminales **DEBEN** solicitar color ANSI cuando lo soporten.
+- La visibilidad **NO DEBE** ampliar `trustedSkills`: repositorios y folders son
+  discovery read-only; la ejecución conserva referencias exactas.
 - No clona, instala, cachea, escribe, ejecuta ni muestra el cuerpo remoto.
 
 ## 5. GitHub y skills privadas
@@ -511,15 +517,17 @@ capacidades ordinarias que el usuario le declaró.
 
 - No se implementa un framework de plugins propio encima de los tres SDKs.
 - No se duplican comandos como `toggle`, `lineup` o `leave`.
-- No se heredan skills instaladas, personales o ambientales. Sólo se soportan
-  archivos repo exactos y referencias GitHub exactas declaradas en el player;
-  nunca scopes de carpeta o repositorio completos.
+- No se heredan skills instaladas, personales o ambientales. Para ejecución
+  sólo se soportan archivos repo exactos y referencias GitHub exactas declaradas
+  en el player. Los scopes de carpeta o repositorio existen únicamente en el
+  catálogo visible y nunca otorgan confianza de ejecución.
 - No se promete aislamiento de sistema operativo.
 - Copilot CLI 1.0.71 requiere modo experimental para sus comandos de extensión.
   Con él, los cuatro controles deterministas **DEBEN** resolverse como comandos
-  `client`; sin él, los wrappers Markdown mínimos permanecen como fallback
-  mediado por modelo. Los cinco wrappers llaman una sola vez al tool
-  estructurado `control`; sólo `/contract` llama después al `task` nativo.
+  `client`. No se publican wrappers Markdown para esos controles: sin extensión
+  se usa el CLI directo y nunca un fallback que consuma tokens. Sólo `/contract`
+  conserva un wrapper que llama al `control` estructurado y después al `task`
+  nativo.
 - El MCP Copilot hereda el working directory al iniciar la sesión. La extensión
   directa **DEBE** leer el `workingDirectory` actual de los metadatos de sesión
   para respetar cambios de carpeta; ningún path elegido por el modelo se acepta

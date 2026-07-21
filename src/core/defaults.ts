@@ -3,7 +3,8 @@
  * These definitions are policy-bearing defaults consumed by every harness renderer.
  */
 
-import type { GithubSkill, PlayerDefinition } from "./types.js";
+import { exactCatalogSources } from "./catalog.js";
+import type { GithubSkill, GithubSkillCatalogSource, PlayerDefinition } from "./types.js";
 
 const honorOutputContract = " Honor every explicit completion and output-format contract literally, including required standalone final lines.";
 
@@ -58,6 +59,9 @@ export const trustedSkills: readonly GithubSkill[] = [{
   path: "skills/zx-example-author/SKILL.md",
   track: "refs/heads/main",
 }];
+
+/** Default visible catalog; a project's `.agent-harbor/skill-sources.json` replaces it. */
+export const skillCatalogSources: readonly GithubSkillCatalogSource[] = exactCatalogSources(trustedSkills);
 
 /** Fixed, always-invocable roles supplied by Agent Harbor rather than project profile files. */
 export const rolePlayers = new Map<string, PlayerDefinition>([

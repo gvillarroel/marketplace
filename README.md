@@ -60,13 +60,20 @@ Copilot may request one extension-capability approval when these coordinator
 hooks first attach. That host permission exchange is deterministic and does not
 send a model prompt.
 
-If experimental extensions are disabled, the same slash names remain available
-as model-routed skills backed by the stable MCP server. That compatibility path
-is not zero-token. The package CLI is the stable direct alternative when its
-bin is installed, for example `agent-harbor copilot bench list`.
+The four deterministic controls are deliberately **not** published as Copilot
+skills, so they cannot silently fall back to a model-routed path and spend
+tokens. If extensions are disabled, use the package CLI directly—for example
+`agent-harbor copilot bench list`—or enable extensions with `/experimental on`
+and keep `/extensions mode` on **Load Only** or **Load & Augment**. `/contract`
+remains the only command published as a skill because it intentionally creates
+one intelligent child.
 
-The `agent-foundry` plugin also contributes the `agent-harbor` MCP server with two bounded tools: `control` for deterministic lifecycle preflight and `skill` for allowlisted remote-skill materialization. The latter performs snapshot validation in code before returning invocation-local guidance.
-`repo-cartographer:crafter` therefore requires `agent-foundry` to remain enabled, as in the installation sequence above.
+The `agent-foundry` plugin also contributes the global `agent-harbor` MCP
+server with only the bounded `control` tool. A player that has configured
+skills receives a separate player-scoped `skills` tool; it performs snapshot
+validation in code before returning invocation-local guidance.
+`repo-cartographer:crafter` therefore requires `agent-foundry` to remain
+enabled, as in the installation sequence above.
 
 Start a new session after installing, updating, or changing project agents.
 The MCP process inherits the folder from which the Copilot session starts; start
@@ -212,8 +219,8 @@ command contracts. Harness modules contain only native translation and SDK
 integration:
 
 - Copilot consumes `plugins/` through its marketplace/plugin system; its client
-  extension executes deterministic controls directly, while lifecycle skills
-  and the plugin-provided MCP server provide the stable fallback;
+  extension executes deterministic controls directly, while only the
+  model-backed `/contract` keeps a skill wrapper and MCP preflight;
 - `src/adapters/opencode.ts` exposes server commands and tools, while
   `src/adapters/opencode-tui.ts` exposes direct TUI controls;
 - `src/adapters/pi.ts` registers native commands through Pi `ExtensionAPI`;
@@ -476,7 +483,49 @@ Interactive Copilot `/contract` passes the literal JSON through the structured `
 
 ## Trusted skills
 
-The GitHub catalog remains an explicit exact-reference allowlist in
+The visible catalog is controlled per project by
+`.agent-harbor/skill-sources.json`. A present file replaces the built-in list,
+so you can show a whole repository, one folder, or one exact skill:
+
+```json
+{
+  "version": 1,
+  "sources": [
+    {
+      "kind": "github",
+      "scope": "repository",
+      "repo": "owner/all-skills",
+      "track": "refs/heads/main"
+    },
+    {
+      "kind": "github",
+      "scope": "folder",
+      "repo": "owner/team-skills",
+      "path": "skills/frontend",
+      "track": "refs/heads/main"
+    },
+    {
+      "kind": "github",
+      "scope": "skill",
+      "repo": "gvillarroel/zx-harness",
+      "path": "skills/zx-example-author/SKILL.md",
+      "name": "zx-example-author",
+      "track": "refs/heads/main"
+    }
+  ]
+}
+```
+
+`/list-skills [filter]` displays only `REPOSITORY`, `PATH`, and `SKILL`; Pi,
+Copilot, the OpenCode TUI, and an interactive package CLI request colored
+terminal output. Repository and folder scopes enumerate `SKILL.md` paths from
+one immutable branch snapshot without downloading their bodies. The optional
+`name` field overrides the folder-derived name only for an exact `skill` scope.
+Use `"sources": []` to display an empty catalog.
+
+Catalog visibility is intentionally separate from execution trust. Showing a
+repository or folder does not authorize every discovered skill for a player.
+The execution allowlist remains a set of explicit exact references in
 `src/core/defaults.ts`. The included policy trusts
 `gvillarroel/zx-harness/skills/zx-example-author/SKILL.md` on
 `refs/heads/main`. Repository references are not global or folder-wide: each
@@ -489,7 +538,9 @@ their bodies:
 /list-skills zx
 ```
 
-The command uses the developer's authenticated `gh` CLI and reports repository, path, tracking ref, resolved commit, and blob SHA.
+The command uses the developer's authenticated `gh` CLI. It resolves the
+configured branch before listing but keeps commit/blob details out of the
+compact table.
 
 ## Agents
 

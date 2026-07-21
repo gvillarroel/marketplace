@@ -4,7 +4,8 @@
  */
 
 import { Roster, validatePlayer } from "./lifecycle.js";
-import type { CommandName, ContractDefinition, GithubResolver, GithubSkill, Orchestrator, PlayerDefinition } from "./types.js";
+import { exactCatalogSources, formatSkillCatalog } from "./catalog.js";
+import type { CommandName, ContractDefinition, GithubResolver, GithubSkill, GithubSkillCatalogEntry, GithubSkillCatalogSource, Orchestrator, PlayerDefinition } from "./types.js";
 
 /** Dependencies required to dispatch every public Agent Harbor command. */
 export interface HarborContext {
@@ -13,6 +14,8 @@ export interface HarborContext {
   orchestrator: Orchestrator;
   github: GithubResolver;
   trustedSkills: readonly GithubSkill[];
+  catalogSources?: readonly GithubSkillCatalogSource[];
+  color?: boolean;
 }
 
 /** Parses and validates the single JSON object accepted by `/contract`. */
@@ -37,12 +40,21 @@ export async function executeCommand(name: CommandName, args: string, context: H
     case "contract": return context.orchestrator.run(parseContractDefinition(args), signal);
     case "list-skills": {
       const filter = args.trim().toLowerCase();
-      const selected = context.trustedSkills.filter((skill) => !filter || skill.name.toLowerCase().includes(filter));
-      const rows = await Promise.all(selected.map(async (skill) => {
-        const snapshot = await context.github.resolve(skill, signal);
-        return `${skill.name} | ${skill.repo} | ${skill.path} | ${skill.track} | ${snapshot.commit} | ${snapshot.blob}`;
+      const sources = context.catalogSources ?? exactCatalogSources(context.trustedSkills);
+      const groups = await Promise.all(sources.map(async (source): Promise<readonly GithubSkillCatalogEntry[]> => {
+        if (context.github.listCatalog) return context.github.listCatalog(source, signal);
+        if (source.scope !== "skill" || !source.path || !source.name) throw new Error("GitHub resolver cannot enumerate catalog scopes");
+        await context.github.resolve({ kind: "github", name: source.name, repo: source.repo, path: source.path, track: source.track }, signal);
+        return [{ name: source.name, repo: source.repo, path: source.path }];
       }));
-      return rows.join("\n");
+      const unique = new Map<string, GithubSkillCatalogEntry>();
+      for (const entry of groups.flat()) {
+        const identity = `${entry.repo.toLowerCase()}\0${entry.path}`;
+        if (!unique.has(identity)) unique.set(identity, entry);
+      }
+      const entries = [...unique.values()].filter(({ name, repo, path }) => !filter || [name, repo, path].some((value) => value.toLowerCase().includes(filter)))
+        .sort((left, right) => left.repo.localeCompare(right.repo) || left.path.localeCompare(right.path) || left.name.localeCompare(right.name));
+      return formatSkillCatalog(entries, context.color);
     }
   }
 }

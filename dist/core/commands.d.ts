@@ -3,7 +3,7 @@
  * This layer contains no harness-specific rendering or lifecycle mutation logic.
  */
 import { Roster } from "./lifecycle.js";
-import type { CommandName, ContractDefinition, GithubResolver, GithubSkill, Orchestrator, PlayerDefinition } from "./types.js";
+import type { CommandName, ContractDefinition, GithubResolver, GithubSkill, GithubSkillCatalogSource, Orchestrator, PlayerDefinition } from "./types.js";
 /** Dependencies required to dispatch every public Agent Harbor command. */
 export interface HarborContext {
     roster: Roster;
@@ -11,6 +11,8 @@ export interface HarborContext {
     orchestrator: Orchestrator;
     github: GithubResolver;
     trustedSkills: readonly GithubSkill[];
+    catalogSources?: readonly GithubSkillCatalogSource[];
+    color?: boolean;
 }
 /** Parses and validates the single JSON object accepted by `/contract`. */
 export declare function parseContractDefinition(args: string): ContractDefinition;

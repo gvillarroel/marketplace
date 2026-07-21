@@ -107,7 +107,7 @@ session = await joinSession({
       handler: async ({ args }) => {
         try {
           const metadata = await session.rpc.metadata.snapshot();
-          const result = await runDeterministicCommand("copilot", name, args ?? "", metadata.workingDirectory ?? process.cwd());
+          const result = await runDeterministicCommand("copilot", name, args ?? "", metadata.workingDirectory ?? process.cwd(), undefined, name === "list-skills");
           const value = (args ?? "").trim();
           if (name === "join" || name === "retire" || (name === "bench" && /^(on|off)\b/.test(value))) {
             await coordinator.refresh();

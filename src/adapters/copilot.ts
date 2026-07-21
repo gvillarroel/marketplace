@@ -20,7 +20,7 @@ const unavailable: Orchestrator = {
  * Copilot extension to invoke exactly once through its native `task` tool.
  */
 export async function runCopilotControl(command: CommandName, args: string, cwd = process.cwd(), signal?: AbortSignal): Promise<string> {
-  if (command !== "contract") return executeCommand(command, args, harborContext("copilot", cwd, unavailable), signal);
+  if (command !== "contract") return executeCommand(command, args, await harborContext("copilot", cwd, unavailable), signal);
   let definition = parseContractDefinition(args);
   const loaded = await loadConfiguredSkills(definition, cwd, new GhResolver(), trustedSkills, signal);
   definition = withLoadedSkillGuidance(definition, loaded);

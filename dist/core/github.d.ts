@@ -3,9 +3,11 @@
  * Mutable branch references are resolved first and every subsequent content lookup uses the resulting
  * immutable commit SHA, preventing a branch movement from changing the loaded snapshot mid-operation.
  */
-import type { GithubResolver, GithubSkill } from "./types.js";
+import type { GithubResolver, GithubSkill, GithubSkillCatalogEntry, GithubSkillCatalogSource } from "./types.js";
 /** Validates the exact schema and traversal-safe coordinates of a GitHub skill reference. */
 export declare function validateGithubSkill(value: unknown): GithubSkill;
+/** Validates one repository, folder, or exact-skill scope used only for visible discovery. */
+export declare function validateGithubSkillCatalogSource(value: unknown): GithubSkillCatalogSource;
 type GhCommand = (file: string, args: readonly string[], signal?: AbortSignal, timeoutMs?: number) => Promise<string | Uint8Array>;
 /**
  * Validates a bounded UTF-8 `SKILL.md` document and returns its non-empty instruction body.
@@ -28,7 +30,7 @@ export declare class GhResolver implements GithubResolver {
     /** Creates a resolver with a bounded command timeout and injectable runner for testing. */
     constructor(run?: GhCommand, timeoutMs?: number, executable?: string);
     /** Validates a reference and resolves its mutable branch exactly once. */
-    private resolveCommit;
+    private resolveCoordinates;
     /** Resolves the tracked branch to a commit, then resolves the skill blob at that exact commit. */
     resolve(skill: GithubSkill, signal?: AbortSignal): Promise<{
         commit: string;
@@ -39,5 +41,7 @@ export declare class GhResolver implements GithubResolver {
         commit: string;
         body: string;
     }>;
+    /** Enumerates only `SKILL.md` blobs within one validated catalog scope. */
+    listCatalog(value: GithubSkillCatalogSource, signal?: AbortSignal): Promise<readonly GithubSkillCatalogEntry[]>;
 }
 export {};

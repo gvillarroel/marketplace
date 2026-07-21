@@ -18,7 +18,7 @@ const unavailable = {
  */
 export async function runCopilotControl(command, args, cwd = process.cwd(), signal) {
     if (command !== "contract")
-        return executeCommand(command, args, harborContext("copilot", cwd, unavailable), signal);
+        return executeCommand(command, args, await harborContext("copilot", cwd, unavailable), signal);
     let definition = parseContractDefinition(args);
     const loaded = await loadConfiguredSkills(definition, cwd, new GhResolver(), trustedSkills, signal);
     definition = withLoadedSkillGuidance(definition, loaded);

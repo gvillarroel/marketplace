@@ -5,8 +5,9 @@ import { join } from "node:path";
 import test from "node:test";
 import { listInvocablePlayerIds, listManagedActiveIds, requireInvocablePlayer } from "../src/core/active.js";
 import { executeCommand } from "../src/core/commands.js";
-import { bundledPlayers, legacyBundledPlayerIds, trustedSkills } from "../src/core/defaults.js";
-import { GhResolver, validateGithubSkill } from "../src/core/github.js";
+import { loadSkillCatalogSources, skillCatalogConfigPath } from "../src/core/catalog.js";
+import { bundledPlayers, legacyBundledPlayerIds, skillCatalogSources, trustedSkills } from "../src/core/defaults.js";
+import { GhResolver, validateGithubSkill, validateGithubSkillCatalogSource } from "../src/core/github.js";
 import { Roster } from "../src/core/lifecycle.js";
 import { validatePlayer } from "../src/core/lifecycle.js";
 import { harnessSpec } from "../src/core/profiles.js";
@@ -45,7 +46,10 @@ for (const harness of ["copilot", "opencode", "pi"] as const) {
     assert.match(await executeCommand("bench", "list portfolio-management", context), /portfolio-management \| bundled \| stale/);
     assert.match(await executeCommand("bench", "on portfolio-management", context), /turned on/);
     assert.match(await executeCommand("bench", "list portfolio-management", context), /portfolio-management \| bundled \| on/);
-    assert.match(await executeCommand("list-skills", "zx", context), new RegExp(`${"a".repeat(40)}.*${"b".repeat(40)}`));
+    const skills = await executeCommand("list-skills", "zx", context);
+    assert.match(skills, /^REPOSITORY\s+PATH\s+SKILL/mu);
+    assert.match(skills, /gvillarroel\/zx-harness\s+skills\/zx-example-author\/SKILL\.md\s+zx-example-author/);
+    assert.doesNotMatch(skills, new RegExp(`${"a".repeat(40)}|${"b".repeat(40)}`));
     assert.deepEqual(calls, [], "deterministic controls must not invoke an orchestrator or model");
     assert.equal(await executeCommand("contract", JSON.stringify({ ...JSON.parse(player), task: "one task" }), context), `${harness}:child`);
     assert.deepEqual(calls, ["one task"], "contract must create exactly one child");
@@ -289,6 +293,51 @@ test("GitHub resolver pins one branch and one exact blob with two read-only canc
   const aborted = new AbortController();
   aborted.abort();
   await assert.rejects(() => new GhResolver().resolve(trustedSkills[0], aborted.signal), (error: any) => error?.name === "AbortError" && error?.code === "ABORT_ERR");
+});
+
+test("skill catalog enumerates repository, folder, and exact-skill scopes without loading bodies", async () => {
+  const tree = [
+    `docs/guide.md\t${"1".repeat(40)}`,
+    `skills/alpha/SKILL.md\t${"2".repeat(40)}`,
+    `skills/nested/beta/SKILL.md\t${"3".repeat(40)}`,
+    `other/gamma/SKILL.md\t${"4".repeat(40)}`,
+  ].join("\n");
+  const calls: readonly string[][] = [];
+  const observed: string[][] = calls as string[][];
+  const resolver = new GhResolver(async (_file, args) => {
+    observed.push([...args]);
+    if (args.some((arg) => arg.includes("/git/ref/"))) return `${"a".repeat(40)}\n`;
+    if (args.some((arg) => arg.includes("/contents/"))) return `${"2".repeat(40)}\n`;
+    return tree;
+  });
+  const base = { kind: "github", repo: "owner/repo", track: "refs/heads/main" } as const;
+  assert.deepEqual((await resolver.listCatalog({ ...base, scope: "repository" })).map((entry) => entry.name), ["alpha", "beta", "gamma"]);
+  assert.deepEqual((await resolver.listCatalog({ ...base, scope: "folder", path: "skills" })).map((entry) => entry.name), ["alpha", "beta"]);
+  assert.deepEqual(await resolver.listCatalog({ ...base, scope: "skill", path: "skills/alpha/SKILL.md", name: "chosen-name" }), [{
+    repo: "owner/repo", path: "skills/alpha/SKILL.md", name: "chosen-name",
+  }]);
+  assert.equal(observed.length, 6);
+  assert.equal(observed.filter((args) => args.some((arg) => arg.includes("/git/trees/"))).length, 2);
+  assert.equal(observed.filter((args) => args.some((arg) => arg.includes("/contents/"))).length, 1);
+  assert.ok(observed.every((args) => !args.some((arg) => arg.includes("Accept: application/vnd.github.raw"))), "catalog listing must not download skill bodies");
+});
+
+test("project skill catalog config replaces defaults with a closed schema", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "harbor-catalog-config-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  assert.deepEqual(await loadSkillCatalogSources(project, skillCatalogSources), skillCatalogSources);
+  const config = skillCatalogConfigPath(project);
+  await mkdir(join(project, ".agent-harbor"), { recursive: true });
+  const sources = [
+    { kind: "github", scope: "repository", repo: "owner/all", track: "refs/heads/main" },
+    { kind: "github", scope: "folder", repo: "owner/some", path: "skills", track: "refs/heads/release" },
+    { kind: "github", scope: "skill", repo: "owner/one", path: "one/SKILL.md", name: "one", track: "refs/heads/main" },
+  ];
+  await writeFile(config, JSON.stringify({ version: 1, sources }), "utf8");
+  assert.deepEqual(await loadSkillCatalogSources(project, skillCatalogSources), sources);
+  assert.throws(() => validateGithubSkillCatalogSource({ ...sources[0], path: "skills" }), /cannot define path/);
+  await writeFile(config, JSON.stringify({ version: 1, sources, extra: true }), "utf8");
+  await assert.rejects(() => loadSkillCatalogSources(project, skillCatalogSources), /requires exactly version 1 and sources/);
 });
 
 test("GitHub skill loading stops after one invalid branch SHA without fetching content", async () => {

@@ -907,7 +907,7 @@ test("OpenCode TUI exposes direct controls that bypass sessions and models", asy
   process.env.OPENCODE_CONFIG_DIR = join(root, "home");
   const project = join(root, "project");
   const toasts: any[] = []; const layers: any[] = []; const prompts: any[] = [];
-  const originalResolve = GhResolver.prototype.resolve;
+  const originalListCatalog = GhResolver.prototype.listCatalog;
   const dialog = {
     replace: (render: () => unknown) => { prompts.push(render()); },
     clear: () => {}, setSize: () => {}, size: "medium", depth: 0, open: false,
@@ -921,7 +921,7 @@ test("OpenCode TUI exposes direct controls that bypass sessions and models", asy
     keymap: { registerLayer: (layer: unknown) => { layers.push(layer); return () => {}; } },
   };
   try {
-    GhResolver.prototype.resolve = async () => ({ commit: "a".repeat(40), blob: "b".repeat(40) });
+    GhResolver.prototype.listCatalog = async (source) => [{ repo: source.repo, path: source.path ?? "skills/zx-example-author/SKILL.md", name: source.name ?? "zx-example-author" }];
     const commands = openCodeDirectCommands(api);
     assert.deepEqual(commands.map((command) => command.slashName), [
       "bench-list", "bench-on", "bench-off", "harbor-join", "harbor-retire", "harbor-list-skills", "harbor-filter-skills",
@@ -946,7 +946,8 @@ test("OpenCode TUI exposes direct controls that bypass sessions and models", asy
     assert.match(toasts.at(-1).message, /retired native/);
 
     await commands.find((command) => command.name.endsWith("skills-list"))!.run();
-    assert.match(toasts.at(-1).message, new RegExp(`${"a".repeat(40)}.*${"b".repeat(40)}`));
+    assert.match(toasts.at(-1).message, /REPOSITORY.*PATH.*SKILL/);
+    assert.match(toasts.at(-1).message, /\x1b\[/);
     commands.find((command) => command.name.endsWith("skills-filter"))!.run();
     await prompts.at(-1).onConfirm("zx");
     assert.match(toasts.at(-1).message, /zx-example-author/);
@@ -957,7 +958,7 @@ test("OpenCode TUI exposes direct controls that bypass sessions and models", asy
     assert.equal(layers[0].commands.length, 7);
     assert.ok(!("server" in openCodeTui));
   } finally {
-    GhResolver.prototype.resolve = originalResolve;
+    GhResolver.prototype.listCatalog = originalListCatalog;
     if (previous === undefined) delete process.env.OPENCODE_CONFIG_DIR; else process.env.OPENCODE_CONFIG_DIR = previous;
   }
 });
@@ -1023,10 +1024,10 @@ test("Pi deterministic command handlers never enter the SDK orchestrator", async
   process.env.PI_CODING_AGENT_DIR = join(root, "home");
   const commands = new Map<string, any>(); const notices: string[] = [];
   const originalRun = PiOrchestrator.prototype.run;
-  const originalResolve = GhResolver.prototype.resolve;
+  const originalListCatalog = GhResolver.prototype.listCatalog;
   try {
     PiOrchestrator.prototype.run = async () => { throw new Error("model orchestrator was invoked"); };
-    GhResolver.prototype.resolve = async () => ({ commit: "a".repeat(40), blob: "b".repeat(40) });
+    GhResolver.prototype.listCatalog = async (source) => [{ repo: source.repo, path: source.path ?? "skills/zx-example-author/SKILL.md", name: source.name ?? "zx-example-author" }];
     piExtension({
       registerCommand: (name: string, options: any) => commands.set(name, options),
       registerTool: () => {},
@@ -1041,11 +1042,12 @@ test("Pi deterministic command handlers never enter the SDK orchestrator", async
     await commands.get("retire").handler("native", { cwd: join(root, "project"), ui: { notify: (value: string) => notices.push(value) } });
     assert.match(notices.at(-1)!, /retired native/);
     await commands.get("list-skills").handler("zx", { cwd: join(root, "project"), ui: { notify: (value: string) => notices.push(value) } });
-    assert.match(notices.at(-1)!, new RegExp(`${"a".repeat(40)}.*${"b".repeat(40)}`));
+    assert.match(notices.at(-1)!, /REPOSITORY.*PATH.*SKILL/);
+    assert.match(notices.at(-1)!, /\x1b\[/);
     assert.ok(notices.every((value) => !value.includes("model orchestrator was invoked")));
   } finally {
     PiOrchestrator.prototype.run = originalRun;
-    GhResolver.prototype.resolve = originalResolve;
+    GhResolver.prototype.listCatalog = originalListCatalog;
     if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousHome;
   }
 });

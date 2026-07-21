@@ -2,6 +2,7 @@
  * Built-in SDLC players, fixed coordination roles, and trusted remote skill references.
  * These definitions are policy-bearing defaults consumed by every harness renderer.
  */
+import { exactCatalogSources } from "./catalog.js";
 const honorOutputContract = " Honor every explicit completion and output-format contract literally, including required standalone final lines.";
 /** Retired bundled identifiers retained solely for safe discovery and cleanup. */
 export const legacyBundledPlayerIds = ["scout", "sage", "smith", "probe", "guard", "pilot"];
@@ -52,6 +53,8 @@ export const trustedSkills = [{
         path: "skills/zx-example-author/SKILL.md",
         track: "refs/heads/main",
     }];
+/** Default visible catalog; a project's `.agent-harbor/skill-sources.json` replaces it. */
+export const skillCatalogSources = exactCatalogSources(trustedSkills);
 /** Fixed, always-invocable roles supplied by Agent Harbor rather than project profile files. */
 export const rolePlayers = new Map([
     ["team-lead", {
