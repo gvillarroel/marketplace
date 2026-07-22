@@ -14,7 +14,13 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { HarnessSpec, PlayerDefinition } from "./types.js";
 import { bundledPlayers, trustedSkills } from "./defaults.js";
 import { isHarborId } from "./identity.js";
-import { decodePlayer, isCanonicalPlayerProfile } from "./profiles.js";
+import {
+  decodePlayer,
+  isCanonicalPlayerProfile,
+  isCanonicalPlayerRegistration,
+  isCompatiblePlayerRegistration,
+  renderPlayerRegistration,
+} from "./profiles.js";
 import { validateConfiguredSkillReferences } from "./skills.js";
 
 const piBuiltInCommands = [
@@ -37,7 +43,43 @@ type BenchCommand =
   | { kind: "list"; filter: string }
   | { kind: "mutate"; action: BenchAction; ids: string[] };
 type BenchChange = { path: string; content?: string };
+type BenchPlayerPlan = { changes: BenchChange[] };
 type BenchInventoryRow = { id: string; roster: "bundled" | "personal"; state: string };
+
+/** Truthful filesystem outcome reported by the identity-bound lifecycle worker. */
+export type LifecycleMutationStatus = "changed" | "already-current";
+
+/** Structured join outcome for native adapters; `join()` remains the text-compatible API. */
+export interface RosterJoinResult {
+  readonly kind: "join";
+  readonly player: string;
+  readonly status: LifecycleMutationStatus;
+  readonly text: string;
+}
+
+/** Structured retire outcome for native adapters; `retire()` remains the text-compatible API. */
+export interface RosterRetireResult {
+  readonly kind: "retire";
+  readonly player: string;
+  readonly status: LifecycleMutationStatus;
+  readonly text: string;
+}
+
+export interface RosterBenchMutationRow {
+  readonly id: string;
+  readonly action: BenchAction;
+  readonly status: LifecycleMutationStatus;
+}
+
+/** Structured bench outcome for native adapters; `bench()` remains the text-compatible API. */
+export type RosterBenchResult =
+  | { readonly kind: "list"; readonly text: string }
+  | {
+      readonly kind: "mutation";
+      readonly status: LifecycleMutationStatus;
+      readonly rows: readonly RosterBenchMutationRow[];
+      readonly text: string;
+    };
 
 const maximumTransactionFileBytes = 30_000;
 const lifecycleWorkerRpcTimeoutMs = 5_000;
@@ -65,6 +107,7 @@ interface StagedChange {
   readonly stepId: string;
   readonly before: FileSnapshot;
   readonly after: FileSnapshot;
+  readonly status: LifecycleMutationStatus;
 }
 
 interface ActiveTransaction {
@@ -614,12 +657,12 @@ async function stage(message) {
   if (current.exists && desired && current.content === desired.toString("base64")) {
     const step = { stepId, name, before: current, after: current, noop: true };
     steps.set(stepId, step);
-    return { before: current, after: current };
+    return { before: current, after: current, status: "already-current" };
   }
   if (!current.exists && !desired) {
     const step = { stepId, name, before: current, after: current, noop: true };
     steps.set(stepId, step);
-    return { before: current, after: current };
+    return { before: current, after: current, status: "already-current" };
   }
   const beforePath = current.exists ? journal(stepId, "before") : undefined;
   const nextPath = desired ? journal(stepId, "next") : undefined;
@@ -648,7 +691,7 @@ async function stage(message) {
     }
     const step = { stepId, name, before: current, after, beforePath, nextPath, noop: false };
     steps.set(stepId, step);
-    return { before: current, after };
+    return { before: current, after, status: "changed" };
   } catch (error) {
     if (nextPath) {
       try { const owned = await snapshot(nextPath); if (next && sameSnapshot(owned, next)) await removePrivate(nextPath, next); } catch {}
@@ -928,14 +971,22 @@ class LifecycleDirectoryWorker {
     return entries;
   }
 
-  async stage(name: string, stepId: string, expected: FileSnapshot, content: Buffer | undefined): Promise<FileSnapshot> {
+  async stage(
+    name: string,
+    stepId: string,
+    expected: FileSnapshot,
+    content: Buffer | undefined,
+  ): Promise<{ readonly after: FileSnapshot; readonly status: LifecycleMutationStatus }> {
     const result = await this.request("stage", {
       name,
       stepId,
       expected: this.toWire(expected),
       content: content === undefined ? null : content.toString("base64"),
     });
-    return snapshotFromWire(result.after);
+    if (result?.status !== "changed" && result?.status !== "already-current") {
+      throw new Error("lifecycle worker returned an invalid mutation status");
+    }
+    return { after: snapshotFromWire(result.after), status: result.status };
   }
 
   async verify(stepId: string): Promise<void> { await this.request("verify", { stepId }); }
@@ -1078,6 +1129,12 @@ export class Roster {
   /** Testable environment boundary; executable selection never asks a shell to resolve it. */
   protected lifecycleHostEnvironment(): NodeJS.ProcessEnv { return process.env; }
 
+  /** Abortable contention wait; protected so lock/abort ordering can be tested without sleeps. */
+  protected async waitForMutationLock(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    await delay(25, undefined, signal ? { signal } : undefined);
+  }
+
   private nodeRuntime(): Promise<LifecycleNodeRuntime> {
     this.lifecycleRuntime ??= resolveLifecycleNodeRuntime(
       this.lifecycleHostExecutable(),
@@ -1160,7 +1217,7 @@ export class Roster {
   // same persistent registration. `wx` provides exclusive acquisition. A dead owner's lock is removed
   // only after its structured ownership record is re-read unchanged; foreign or malformed locks are
   // collisions, never cleanup candidates. Release likewise verifies the token before deleting the file.
-  private async withMutationLock<T>(action: () => Promise<T>): Promise<T> {
+  private async withMutationLock<T>(action: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const path = contained(this.spec.home, join(this.spec.home, this.spec.registrationDir, ".roster.lock"));
     if (this.boundDirectories) throw new Error("nested roster mutation is not allowed");
     this.boundDirectories = new Map();
@@ -1172,16 +1229,21 @@ export class Roster {
     let lockDirectory: BoundDirectory | undefined;
     let ownsLock = false;
     try {
+      signal?.throwIfAborted();
       lockDirectory = await this.bindDirectory(dirname(path));
+      signal?.throwIfAborted();
       const record = JSON.stringify({ owner: "agent-harbor", pid: lockDirectory.worker.pid, token });
       for (let attempt = 0; attempt < 200 && !ownsLock; attempt += 1) {
+        signal?.throwIfAborted();
         await lockDirectory.worker.assertCanonical();
         try {
           await lockDirectory.worker.acquireLock(basename(path), Buffer.from(record, "utf8"));
           ownsLock = true;
         } catch (error: any) {
           if (error?.code !== "EEXIST") throw error;
+          signal?.throwIfAborted();
           const current = await lockDirectory.worker.snapshot(basename(path));
+          signal?.throwIfAborted();
           if (current.content === undefined) continue;
           let owner: { owner?: unknown; pid?: unknown; token?: unknown };
           try { owner = JSON.parse(current.content.toString("utf8")); }
@@ -1197,17 +1259,20 @@ export class Roster {
           try { process.kill(owner.pid, 0); }
           catch (signalError: any) { if (signalError?.code === "ESRCH") alive = false; else throw signalError; }
           if (!alive) {
+            signal?.throwIfAborted();
             await lockDirectory.worker.removeExact(basename(path), current);
             continue;
           }
-          await delay(25);
+          await this.waitForMutationLock(signal);
         }
       }
       if (!ownsLock) throw new Error("roster is busy; retry the operation");
+      signal?.throwIfAborted();
       await this.bindDirectory(contained(
         this.spec.project,
         join(this.spec.project, this.spec.activeDir),
       ));
+      signal?.throwIfAborted();
       value = await action();
     } catch (error) {
       failure = error;
@@ -1241,7 +1306,7 @@ export class Roster {
     }
     await target.directory.worker.assertCanonical();
     const stepId = `step-${_index}-${randomUUID()}`;
-    const after = await target.directory.worker.stage(target.name, stepId, expected, desired);
+    const { after, status } = await target.directory.worker.stage(target.name, stepId, expected, desired);
     await target.directory.worker.assertCanonical();
     transaction.staged.push({
       path: change.path,
@@ -1249,6 +1314,7 @@ export class Roster {
       stepId,
       before: expected,
       after,
+      status,
     });
   }
 
@@ -1271,7 +1337,9 @@ export class Roster {
   // with create-if-absent publication, then verify the complete transaction.
   // Rollback removes only the inode installed by this transaction. Concurrent
   // foreign replacements are preserved and reported as incomplete rollback.
-  private async transaction(changes: Array<{ path: string; content?: string }>): Promise<void> {
+  private async transaction(
+    changes: Array<{ path: string; content?: string }>,
+  ): Promise<readonly LifecycleMutationStatus[]> {
     if (this.activeTransaction) throw new Error("nested roster transaction is not allowed");
     const bound = await Promise.all(changes.map(async ({ path }) => {
       const target = await this.bindTarget(path);
@@ -1290,6 +1358,9 @@ export class Roster {
       try {
         for (const [index, change] of changes.entries()) {
           await this.applyChange(change, index);
+        }
+        if (transaction.staged.length !== changes.length || transaction.staged.some((item, index) => item.path !== changes[index]?.path)) {
+          throw new Error("lifecycle transaction did not report every staged mutation outcome");
         }
         for (const change of transaction.staged) await this.verifyStagedChange(change);
       } catch (error) {
@@ -1312,6 +1383,7 @@ export class Roster {
       if (cleanupErrors.length) {
         throw new AggregateError(cleanupErrors, "mutation committed but transaction cleanup was incomplete");
       }
+      return transaction.staged.map(({ status }) => status);
     } finally {
       if (this.activeTransaction === transaction) this.activeTransaction = undefined;
     }
@@ -1324,28 +1396,63 @@ export class Roster {
   }
 
   /**
-   * Validates and joins a personal player by writing identical registration and active profiles.
-   * Unmanaged collisions are never replaced. A differing owned profile requires `replace: true`,
-   * and both files either verify successfully or are restored to their prior exact bytes.
+   * Validates and joins a personal player by writing a portable user registration and a
+   * project-bound active profile. Unmanaged collisions are never replaced. A differing owned
+   * profile requires `replace: true`, and both files either verify successfully or are restored
+   * to their prior exact bytes.
    */
-  async join(input: unknown): Promise<string> {
+  async joinResult(input: unknown, signal?: AbortSignal): Promise<RosterJoinResult> {
+    signal?.throwIfAborted();
     const player = validatePlayer(input);
-    const content = this.spec.renderPlayer(player, "personal");
-    if (Buffer.byteLength(content, "utf8") > 30_000) throw new Error("profile exceeds 30000 bytes");
+    const registrationContent = renderPlayerRegistration(this.spec.name, player);
+    const activeContent = this.spec.renderPlayer(player, "personal");
+    if ([registrationContent, activeContent].some((content) => Buffer.byteLength(content, "utf8") > 30_000)) {
+      throw new Error("profile exceeds 30000 bytes");
+    }
     return this.withMutationLock(async () => {
       const paths = this.paths(player.name);
       const current = await Promise.all([this.existingBound(paths.registration), this.existingBound(paths.active)]);
+      signal?.throwIfAborted();
       for (const collision of current) if (collision !== undefined && !isOwnedProfile(collision, player.name, "personal")) throw new Error("unmanaged collision");
-      if (current[0] === undefined && (await this.registrationEntries()).length >= 200) {
-        throw new Error("personal roster limit reached (200); retire an existing personal member before joining another");
+      if (current[0] === undefined) {
+        const registrations = await this.registrationEntries();
+        signal?.throwIfAborted();
+        if (registrations.length >= 200) {
+          throw new Error("personal roster limit reached (200); retire an existing personal member before joining another");
+        }
       }
-      if (!player.replace && current.some((value) => value !== undefined &&
-          !isCanonicalPlayerProfile(value, this.spec.name, player, "personal", this.spec.project))) {
+      signal?.throwIfAborted();
+      const registrationCompatible = current[0] === undefined ||
+        isCompatiblePlayerRegistration(current[0], this.spec.name, player);
+      const activeCanonical = current[1] === undefined ||
+        isCanonicalPlayerProfile(current[1], this.spec.name, player, "personal", this.spec.project);
+      if (!player.replace && (!registrationCompatible || !activeCanonical)) {
         throw new Error("replace:true required");
       }
-      await this.transaction([{ path: paths.registration, content }, { path: paths.active, content }]);
-      return `joined ${player.name}\ncommand: /${player.name} <request>\nregistration: ${paths.registration}\nactive: ${paths.active}`;
-    });
+      // This is the cancellation boundary. Once transaction staging begins,
+      // ignore later aborts so the verified multi-file commit can finish and
+      // its truthful lifecycle outcome reaches the caller.
+      signal?.throwIfAborted();
+      const fileStatuses = await this.transaction([
+        { path: paths.registration, content: registrationContent },
+        { path: paths.active, content: activeContent },
+      ]);
+      const status: LifecycleMutationStatus = fileStatuses.includes("changed") ? "changed" : "already-current";
+      const summary = status === "changed"
+        ? `joined ${player.name}\nRoster registration and active profile updated.`
+        : `${player.name} is already joined with the requested definition.\nNo roster files changed.`;
+      return {
+        kind: "join",
+        player: player.name,
+        status,
+        text: `${summary}\ncommand: /${player.name} <request>\nregistration: ${paths.registration}\nactive: ${paths.active}`,
+      };
+    }, signal);
+  }
+
+  /** Text-compatible lifecycle API. Native adapters should prefer `joinResult()`. */
+  async join(input: unknown, signal?: AbortSignal): Promise<string> {
+    return (await this.joinResult(input, signal)).text;
   }
 
   private async bundledBenchInventory(
@@ -1419,7 +1526,7 @@ export class Roster {
       try { definition = validatePlayer(decodePlayer(registration!, id)); }
       catch { definition = undefined; }
       const registrationCanonical = definition !== undefined &&
-        isCanonicalPlayerProfile(registration!, this.spec.name, definition, "personal", this.spec.project);
+        isCanonicalPlayerRegistration(registration!, this.spec.name, definition);
       rows.push({
         id,
         roster: "personal",
@@ -1443,7 +1550,7 @@ export class Roster {
     id: string,
     action: BenchAction,
     bundled: ReadonlyMap<string, PlayerDefinition>,
-  ): Promise<BenchChange> {
+  ): Promise<BenchPlayerPlan> {
     const paths = this.paths(id);
     const active = await this.existingBound(paths.active);
     const definition = bundled.get(id);
@@ -1453,16 +1560,23 @@ export class Roster {
       if (roster === "personal" && active !== undefined && !isOwnedProfile(await this.existingBound(paths.registration), id, "personal")) {
         throw new Error(`personal registration missing: ${id}`);
       }
-      return { path: paths.active };
+      return { changes: [{ path: paths.active }] };
     }
     const registration = definition ? undefined : await this.existingBound(paths.registration);
     if (!definition && (!registration || !isOwnedProfile(registration, id, "personal"))) throw new Error(`unknown player: ${id}`);
     try {
+      if (definition) {
+        return { changes: [{ path: paths.active, content: this.spec.renderPlayer(definition, "sdlc") }] };
+      }
+      const personal = validatePlayer(decodePlayer(registration!, id));
+      if (!isCompatiblePlayerRegistration(registration!, this.spec.name, personal)) {
+        throw new Error("registration is not canonical");
+      }
       return {
-        path: paths.active,
-        content: definition
-          ? this.spec.renderPlayer(definition, "sdlc")
-          : this.spec.renderPlayer(validatePlayer(decodePlayer(registration!, id)), "personal"),
+        changes: [
+          { path: paths.registration, content: renderPlayerRegistration(this.spec.name, personal) },
+          { path: paths.active, content: this.spec.renderPlayer(personal, "personal") },
+        ],
       };
     } catch {
       throw new Error(`stale personal profile: ${id}; re-run join with replace:true`);
@@ -1473,10 +1587,15 @@ export class Roster {
   private async planBenchMutation(
     command: Extract<BenchCommand, { kind: "mutate" }>,
     bundled: ReadonlyMap<string, PlayerDefinition>,
-  ): Promise<BenchChange[]> {
-    const changes: BenchChange[] = [];
-    for (const id of command.ids) changes.push(await this.planBenchPlayer(id, command.action, bundled));
-    return changes;
+    signal?: AbortSignal,
+  ): Promise<BenchPlayerPlan[]> {
+    const plans: BenchPlayerPlan[] = [];
+    for (const id of command.ids) {
+      signal?.throwIfAborted();
+      plans.push(await this.planBenchPlayer(id, command.action, bundled));
+      signal?.throwIfAborted();
+    }
+    return plans;
   }
 
   /**
@@ -1484,35 +1603,95 @@ export class Roster {
    * Turning a personal player off removes only its owned active copy; its registration remains the
    * source of truth. Turning it on requires a recoverable current registration.
    */
-  async bench(args: string, bundled: ReadonlyMap<string, PlayerDefinition>): Promise<string> {
+  async benchResult(
+    args: string,
+    bundled: ReadonlyMap<string, PlayerDefinition>,
+    signal?: AbortSignal,
+  ): Promise<RosterBenchResult> {
+    signal?.throwIfAborted();
     const command = parseBenchCommand(args, bundled);
-    if (command.kind === "list") return this.listBench(command.filter, bundled);
+    if (command.kind === "list") return { kind: "list", text: await this.listBench(command.filter, bundled) };
     return this.withMutationLock(async () => {
-      const changes = await this.planBenchMutation(command, bundled);
-      await this.transaction(changes);
-      return command.ids.map((id) => `${id}: turned ${command.action}`).join("\n");
-    });
+      const plans = await this.planBenchMutation(command, bundled, signal);
+      signal?.throwIfAborted();
+      const fileStatuses = await this.transaction(plans.flatMap(({ changes }) => changes));
+      let statusIndex = 0;
+      const rows = command.ids.map((id, index): RosterBenchMutationRow => {
+        const statuses = fileStatuses.slice(statusIndex, statusIndex + plans[index]!.changes.length);
+        statusIndex += plans[index]!.changes.length;
+        return {
+          id,
+          action: command.action,
+          status: statuses.includes("changed") ? "changed" : "already-current",
+        };
+      });
+      const status: LifecycleMutationStatus = rows.some((row) => row.status === "changed")
+        ? "changed"
+        : "already-current";
+      const textRows = rows.map(({ id, action, status: rowStatus }) => rowStatus === "changed"
+        ? action === "on"
+          ? `${id}: enabled in this project.`
+          : `${id}: moved to the bench in this project.`
+        : action === "on"
+          ? `${id}: currently enabled in this project · this member was unchanged.`
+          : `${id}: currently benched in this project · this member was unchanged.`);
+      if (status === "already-current") textRows.push("No roster files changed.");
+      return {
+        kind: "mutation",
+        status,
+        rows,
+        text: textRows.join("\n"),
+      };
+    }, signal);
+  }
+
+  /** Text-compatible lifecycle API. Native adapters should prefer `benchResult()`. */
+  async bench(
+    args: string,
+    bundled: ReadonlyMap<string, PlayerDefinition>,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    return (await this.benchResult(args, bundled, signal)).text;
   }
 
   /**
    * Removes an owned personal registration and this project's owned active copy transactionally.
    * Active copies in other projects are intentionally outside the transaction and remain untouched.
    */
-  async retire(id: string): Promise<string> {
+  async retireResult(id: string, signal?: AbortSignal): Promise<RosterRetireResult> {
+    signal?.throwIfAborted();
     // Names newly reserved by a host must remain removable when an older
     // Agent Harbor version already created a verified personal profile.
     if (!isHarborId(id)) throw new Error("invalid personal player");
     return this.withMutationLock(async () => {
       const paths = this.paths(id);
       const registration = await this.existingBound(paths.registration);
+      signal?.throwIfAborted();
       const active = await this.existingBound(paths.active);
+      signal?.throwIfAborted();
       if (registration === undefined && active === undefined) {
-        return `retired ${id}; already absent; other projects intentionally untouched`;
+        return {
+          kind: "retire",
+          player: id,
+          status: "already-current",
+          text: `${id} is already retired here; other projects intentionally untouched\nNo roster files changed.`,
+        };
       }
       if (!isOwnedProfile(registration, id, "personal")) throw new Error("owned registration not found");
       if (active !== undefined && !isOwnedProfile(active, id, "personal")) throw new Error("unmanaged collision");
+      signal?.throwIfAborted();
       await this.transaction([{ path: paths.registration }, { path: paths.active }]);
-      return `retired ${id}; other projects intentionally untouched`;
-    });
+      return {
+        kind: "retire",
+        player: id,
+        status: "changed",
+        text: `retired ${id}; other projects intentionally untouched`,
+      };
+    }, signal);
+  }
+
+  /** Text-compatible lifecycle API. Native adapters should prefer `retireResult()`. */
+  async retire(id: string, signal?: AbortSignal): Promise<string> {
+    return (await this.retireResult(id, signal)).text;
   }
 }

@@ -35,6 +35,84 @@ function validOpenCodeSessionID(value) {
         && value.length <= maximumOpenCodeSessionIDCodeUnits
         && Buffer.byteLength(value, "utf8") <= maximumOpenCodeSessionIDBytes;
 }
+function telemetryRecord(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+        ? value
+        : undefined;
+}
+function telemetryToken(value) {
+    return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+function telemetryCost(value) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER
+        ? value
+        : undefined;
+}
+function addTelemetryToken(left, right) {
+    return left > Number.MAX_SAFE_INTEGER - right
+        ? { value: Number.MAX_SAFE_INTEGER, bounded: true }
+        : { value: left + right, bounded: false };
+}
+function observeContractTelemetry(value) {
+    const info = telemetryRecord(value);
+    if (!info || info.role !== "assistant")
+        return {};
+    const providerID = validModelIdentity(info.providerID) ? info.providerID : undefined;
+    const modelID = validModelIdentity(info.modelID) ? info.modelID : undefined;
+    const variant = validModelIdentity(info.variant) ? info.variant : undefined;
+    const source = telemetryRecord(info.tokens);
+    const cache = telemetryRecord(source?.cache);
+    const input = telemetryToken(source?.input);
+    const output = telemetryToken(source?.output);
+    const reasoning = telemetryToken(source?.reasoning);
+    const cacheRead = telemetryToken(cache?.read ?? source?.cacheRead);
+    const cacheWrite = telemetryToken(cache?.write ?? source?.cacheWrite);
+    const nativeTotal = telemetryToken(source?.total);
+    const components = [input, output, reasoning, cacheRead, cacheWrite];
+    let componentTotal = 0;
+    let componentCount = 0;
+    let componentBounded = false;
+    for (const component of components) {
+        if (component === undefined)
+            continue;
+        componentCount += 1;
+        const next = addTelemetryToken(componentTotal, component);
+        componentTotal = next.value;
+        componentBounded ||= next.bounded;
+    }
+    let totalConflict = false;
+    if (nativeTotal !== undefined) {
+        let minimum = 0;
+        for (const component of [input, output, cacheRead, cacheWrite]) {
+            if (component === undefined)
+                continue;
+            minimum = addTelemetryToken(minimum, component).value;
+        }
+        totalConflict = nativeTotal < minimum;
+        if (!totalConflict && [input, output, cacheRead, cacheWrite].every((component) => component !== undefined)
+            && reasoning !== undefined) {
+            totalConflict = nativeTotal > addTelemetryToken(minimum, reasoning).value;
+        }
+    }
+    const total = nativeTotal ?? (componentCount ? componentTotal : undefined);
+    return {
+        ...(providerID && modelID ? { model: { providerID, modelID, ...(variant ? { variant } : {}) } } : {}),
+        ...(input === undefined ? {} : { input }),
+        ...(output === undefined ? {} : { output }),
+        ...(reasoning === undefined ? {} : { reasoning }),
+        ...(cacheRead === undefined ? {} : { cacheRead }),
+        ...(cacheWrite === undefined ? {} : { cacheWrite }),
+        ...(total === undefined ? {} : { total }),
+        ...(nativeTotal !== undefined
+            ? { totalSource: "native" }
+            : componentCount ? { totalSource: "observed-components" } : {}),
+        ...(nativeTotal === undefined && componentCount > 0 && (componentCount < components.length || componentBounded)
+            ? { totalLowerBound: true }
+            : {}),
+        ...(totalConflict ? { totalConflict: true } : {}),
+        ...(telemetryCost(info.cost) === undefined ? {} : { cost: telemetryCost(info.cost) }),
+    };
+}
 function safeOpenCodeCleanupID(value) {
     return typeof value === "string" && value.length > 0
         && value.length <= maximumSafeCleanupIDCodeUnits
@@ -184,7 +262,7 @@ export class OpenCodeOrchestrator {
             || model.variant !== undefined && !validModelIdentity(model.variant)) {
             throw new Error("OpenCode agent requires a bounded explicit model identity");
         }
-        return this.runChildLifecycle({
+        return (await this.runChildLifecycle({
             evidenceBase: { harness: this.harness, agent, runtimeAgent: agent, parentSessionId: parentID },
             titleInvocation: "agent",
             titleAgent: agent,
@@ -197,10 +275,14 @@ export class OpenCodeOrchestrator {
             }),
             signal,
             lifecyclePhaseHook: lifecyclePhaseHook ?? this.lifecyclePhaseHook,
-        });
+        })).text;
     }
     /** Runs one portable contract using a closed OpenCode tool policy. */
     async run(definition, signal) {
+        return (await this.runObserved(definition, signal)).text;
+    }
+    /** Retains bounded native prompt telemetry before the disposable child is deleted. */
+    async runObserved(definition, signal) {
         signal?.throwIfAborted();
         requireBoundedTask(definition.task);
         const configuredModel = configuredContractModel(definition.model);
@@ -300,6 +382,7 @@ export class OpenCodeOrchestrator {
                 const lateID = late.data?.id;
                 if (!validOpenCodeSessionID(lateID)) {
                     await this.rejectMalformedCreatedChildID(lateID, "OpenCode malformed late-created child cleanup");
+                    throw new Error("OpenCode malformed late-created child reconciliation returned unexpectedly");
                 }
                 let cleanupError;
                 try {
@@ -360,18 +443,24 @@ export class OpenCodeOrchestrator {
             });
             throw error;
         }
-        lifecyclePhaseHook?.("working");
-        emitHarborEvidence(this.evidenceHook, { ...evidenceBase, phase: "child.started", outcome: "ok", childId: id });
         let failed = false;
         let failure;
+        let lifecycleCleanupFailure;
         let output = "";
+        let telemetry = {};
         try {
+            // Publish and read back the exact disposable child identity before any
+            // prompt or working state. The initial starting claim remains tied only
+            // to its owner session and can never authorize interrupting that parent.
+            lifecyclePhaseHook?.("working", id);
+            emitHarborEvidence(this.evidenceHook, { ...evidenceBase, phase: "child.started", outcome: "ok", childId: id });
             emitHarborEvidence(this.evidenceHook, { ...evidenceBase, phase: "prompt.attempted", outcome: "ok", childId: id });
             const result = await this.client.session.prompt({
                 path: { id }, query: { directory: this.directory }, signal, throwOnError: true,
                 body: buildPromptBody(),
             });
             output = collectOpenCodeResponseEvidence(result.data?.parts).text;
+            telemetry = observeContractTelemetry(result.data?.info);
             if (!output.trim())
                 throw new Error(`OpenCode child ${evidenceBase.agent} returned empty evidence`);
             emitHarborEvidence(this.evidenceHook, {
@@ -397,7 +486,12 @@ export class OpenCodeOrchestrator {
         finally {
             // Deleting the child is part of correctness, not best-effort telemetry;
             // execution and cleanup failures are therefore reported together.
-            lifecyclePhaseHook?.("cleaning");
+            try {
+                lifecyclePhaseHook?.("cleaning", id);
+            }
+            catch (error) {
+                lifecycleCleanupFailure = error;
+            }
             let cleanupError;
             try {
                 await this.deleteUnclaimedChild(id, "OpenCode child cleanup");
@@ -414,13 +508,19 @@ export class OpenCodeOrchestrator {
             });
             if (cleanupError !== undefined) {
                 recordOpenCodeCleanupHazard(this.directory);
-                if (failed)
-                    throw new AggregateError([failure, cleanupError], `OpenCode child execution and cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`);
+                if (failed || lifecycleCleanupFailure !== undefined) {
+                    throw new AggregateError([failure, lifecycleCleanupFailure, cleanupError].filter((value) => value !== undefined), `OpenCode child execution and cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`);
+                }
                 throw cleanupError;
             }
         }
+        if (lifecycleCleanupFailure !== undefined) {
+            if (failed)
+                throw new AggregateError([failure, lifecycleCleanupFailure], "OpenCode child execution and lifecycle publication failed");
+            throw lifecycleCleanupFailure;
+        }
         if (failed)
             throw failure;
-        return output;
+        return { text: output, telemetry };
     }
 }

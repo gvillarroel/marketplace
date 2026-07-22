@@ -7,18 +7,25 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   comparePluginTrees,
+  createAgentHarborExtensionPermissionGate as createVerifierPermissionGate,
   findInstalledPluginRoot,
   parseArguments,
   snapshotPluginTree,
   verifyInstalledPlugin,
 } from "../scripts/verify-installed-copilot.mjs";
+import {
+  createAgentHarborExtensionPermissionGate as createDemoPermissionGate,
+} from "../scripts/asciinema-demo.mjs";
+import {
+  createAgentHarborExtensionPermissionGate,
+} from "../scripts/copilot-extension-permission-gate.mjs";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const script = join(root, "scripts", "verify-installed-copilot.mjs");
 
 async function makePlugin(path: string, files: Record<string, string> = {}) {
   await mkdir(path, { recursive: true });
-  await writeFile(join(path, "plugin.json"), JSON.stringify({ name: "agent-foundry", version: "0.12.0" }, null, 2), "utf8");
+  await writeFile(join(path, "plugin.json"), JSON.stringify({ name: "agent-foundry", version: "0.12.1" }, null, 2), "utf8");
   for (const [name, body] of Object.entries(files)) {
     await mkdir(dirname(join(path, name)), { recursive: true });
     await writeFile(join(path, name), body, "utf8");
@@ -79,8 +86,8 @@ test("same plugin version with a mixed old/new tree fails missing, unexpected an
     "skills/bench/SKILL.md": "obsolete wrapper\n",
   });
 
-  assert.equal(JSON.parse(await readFile(join(canonical, "plugin.json"), "utf8")).version, "0.12.0");
-  assert.equal(JSON.parse(await readFile(join(installed, "plugin.json"), "utf8")).version, "0.12.0");
+  assert.equal(JSON.parse(await readFile(join(canonical, "plugin.json"), "utf8")).version, "0.12.1");
+  assert.equal(JSON.parse(await readFile(join(installed, "plugin.json"), "utf8")).version, "0.12.1");
   const report = await verifyInstalledPlugin({ referenceRoot: canonical, installedRoot: installed });
   assert.equal(report.ok, false);
   assert.ok(report.issues.some((entry) => entry.kind === "missing" && entry.path === "agents/crafter.agent.md"));
@@ -176,4 +183,41 @@ test("fixture paths remain resolved without following a plugin-root symlink", as
   const parsed = parseArguments(["--reference-root", join(sandbox, "a"), "--installed-root", join(sandbox, "b")]);
   assert.equal(parsed.referenceRoot, resolve(sandbox, "a"));
   assert.equal(parsed.installedRoot, resolve(sandbox, "b"));
+});
+
+test("demo and installed smoke share the single permission-gate factory", () => {
+  assert.equal(createVerifierPermissionGate, createAgentHarborExtensionPermissionGate);
+  assert.equal(createDemoPermissionGate, createAgentHarborExtensionPermissionGate);
+});
+
+test("the shared permission gate approves exactly one exact Agent Harbor extension request", () => {
+    const expected = {
+      kind: "extension-permission-access",
+      extensionName: "plugin:agent-foundry:agent-harbor",
+      capabilities: ["skip tool permission prompts", "register hooks"],
+    };
+    const gate = createAgentHarborExtensionPermissionGate("unit-test smoke");
+    assert.deepEqual(gate.handler(expected), { kind: "approve-once" });
+    assert.doesNotThrow(() => gate.assertSatisfied());
+
+    for (const request of [
+      { ...expected, extensionName: "plugin:agent-foundry:not-agent-harbor" },
+      { ...expected, capabilities: [...expected.capabilities, "execute shell commands"] },
+      { ...expected, requestSandboxBypass: true },
+      { kind: "shell", fullCommandText: "npm test" },
+    ]) {
+      const adversarialGate = createAgentHarborExtensionPermissionGate("unit-test smoke");
+      assert.equal(adversarialGate.handler(request).kind, "reject");
+      assert.throws(() => adversarialGate.assertSatisfied(), /observed 0; rejected:/u);
+    }
+
+    const duplicateGate = createAgentHarborExtensionPermissionGate("unit-test smoke");
+    assert.equal(duplicateGate.handler(expected).kind, "approve-once");
+    assert.equal(duplicateGate.handler(expected).kind, "reject");
+    assert.throws(() => duplicateGate.assertSatisfied(), /observed 1; rejected:/u);
+
+    assert.throws(
+      () => createAgentHarborExtensionPermissionGate("unit-test smoke").assertSatisfied(),
+      /expected exactly one Agent Harbor extension permission approval; observed 0/u,
+    );
 });

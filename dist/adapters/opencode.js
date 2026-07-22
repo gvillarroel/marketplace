@@ -3,10 +3,11 @@ import { Buffer } from "node:buffer";
 import { resolve } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 import { discoverStartupActiveProfiles, listInvocablePlayers, listOwnedActiveIds, loadManagedActivePlayer, requireInvocablePlayer } from "../core/active.js";
-import { executeCommand } from "../core/commands.js";
-import { assertHarborCustomToolAccess, formatHarborTeamRosterSnapshot, harborCustomToolNames, harborCustomToolPolicy, harborStaticCustomToolSpecs, HarborInvocationLedger, HarborScoutTurnGuard, validateHarborCustomToolArguments, } from "../core/custom-tools.js";
+import { executeCommandResult } from "../core/commands.js";
+import { assertHarborCustomToolAccess, formatHarborTeamRosterSnapshot, harborCustomToolNames, harborCustomToolPolicy, harborStaticCustomToolSpecs, HarborInvocationLedger, HarborScoutTurnGuard, maximumHarborTeamRosterMembers, validateHarborCustomToolArguments, } from "../core/custom-tools.js";
 import { bundledPlayers, rolePlayers, scoutPlayer, trustedSkills } from "../core/defaults.js";
 import { GhResolver } from "../core/github.js";
+import { isHarborId } from "../core/identity.js";
 import { validatePlayer } from "../core/lifecycle.js";
 import { composePlayerInstructions, normalizeDelegatedTaskPaths, openCodePermissionPolicy, openCodeToolPolicy, playerDefinitionDigest } from "../core/profiles.js";
 import { publicErrorText, publicMetadataText } from "../core/public-metadata.js";
@@ -14,8 +15,10 @@ import { formatLoadedSkillGroup, loadConfiguredSkills } from "../core/skills.js"
 import { filterTrustedSkills, formatScoutSkillMatches } from "../core/scout.js";
 import { commandNames } from "../core/types.js";
 import { OpenCodeOrchestrator } from "../orchestrators/opencode.js";
-import { claimOpenCodeAgentActivity, readOpenCodeAgentActivities, } from "./opencode-agent-activity.js";
+import { claimValidatedOpenCodeAgentActivity, readOpenCodeAgentActivities, runOpenCodeRosterMutationGate, } from "./opencode-agent-activity.js";
 import { recordOpenCodeAgentConflicts } from "./opencode-agent-conflicts.js";
+import { assertOpenCodeLifecycleMutationTruth } from "./opencode-lifecycle-result.js";
+import { recordOpenCodeDirectAliasCollisions } from "./opencode-team-runtime.js";
 import { harborContext } from "./shared.js";
 const maximumOpenCodeDirectTaskBytes = 30 * 1_024;
 const maximumOpenCodeProjectReservations = 32;
@@ -29,6 +32,7 @@ const maximumOpenCodeAuthoritativeActivities = 32;
 const maximumOpenCodeActivityConcurrency = 4;
 const maximumOpenCodeActivityMessagesPerSession = 8;
 const maximumOpenCodeActivityRetryMessageBytes = 1_024;
+const openCodeDirectPreflightToastDeadlineMs = 500;
 class OpenCodeAncestryError extends Error {
 }
 class OpenCodeActivityError extends Error {
@@ -103,6 +107,50 @@ async function publicOpenCodeToolCall(name, signal, run) {
         throw bounded;
     }
 }
+function publicOpenCodeDirectPreflightError(command, error) {
+    let raw = "";
+    try {
+        raw = error instanceof Error ? error.message : String(error);
+    }
+    catch {
+        raw = "";
+    }
+    const message = publicErrorText(raw, 600, [command])
+        ?? `/${command} was blocked before model execution without a public diagnostic`;
+    const result = new Error(message);
+    result.name = "AgentHarborDirectPreflightError";
+    return result;
+}
+async function showOpenCodeDirectPreflightError(client, directory, message) {
+    if (typeof client.tui?.showToast !== "function")
+        return;
+    const controller = new AbortController();
+    let timer;
+    const operation = Promise.resolve().then(() => client.tui.showToast({
+        body: {
+            title: "Agent Harbor command blocked",
+            message,
+            variant: "error",
+            duration: 8_000,
+        },
+        query: { directory },
+        signal: controller.signal,
+    })).then(() => undefined, () => undefined);
+    const deadline = new Promise((resolveDeadline) => {
+        timer = setTimeout(() => {
+            controller.abort();
+            resolveDeadline();
+        }, openCodeDirectPreflightToastDeadlineMs);
+    });
+    try {
+        await Promise.race([operation, deadline]);
+    }
+    finally {
+        if (timer)
+            clearTimeout(timer);
+        controller.abort();
+    }
+}
 function normalizedOpenCodeProject(project) {
     const root = resolve(project);
     return process.platform === "win32" ? root.toLowerCase() : root;
@@ -112,6 +160,11 @@ function assertOpenCodeHostIdentity(value, label, caller) {
         || Buffer.byteLength(value, "utf8") > maximumOpenCodeHostIdentityBytes || /[\u0000-\u001f\u007f]/u.test(value)) {
         throw new OpenCodeAncestryError(`${caller} received an invalid OpenCode ${label} ID`);
     }
+}
+function validOpenCodeHostIdentity(value) {
+    return typeof value === "string" && Boolean(value) && value.length <= maximumOpenCodeHostIdentityBytes
+        && Buffer.byteLength(value, "utf8") <= maximumOpenCodeHostIdentityBytes
+        && !/[\u0000-\u001f\u007f]/u.test(value);
 }
 async function boundedOpenCodeAncestryRpc(caller, invoke, timeoutMs, externalSignal) {
     const cancelled = () => new OpenCodeAncestryError(`${caller} was cancelled while reading message ancestry`);
@@ -275,7 +328,7 @@ function openCodeConfigCollisionWarning(agentIds, commandAliases) {
             : []),
     ].join("\n").slice(0, 4_000);
 }
-function conciseOpenCodeScoutJoin(definition) {
+function conciseOpenCodeScoutJoin(definition, status) {
     const player = validatePlayer(JSON.parse(definition));
     const publicRole = publicMetadataText(player.description, 240) ?? "Personal Agent Harbor teammate";
     const capacity = publicMetadataText([
@@ -284,11 +337,14 @@ function conciseOpenCodeScoutJoin(definition) {
     ].join(", "), 500) ?? "advisory";
     const model = player.model ? publicMetadataText(player.model, 200) : undefined;
     return [
-        `✓ ${player.name} joined · personal · enabled in this project`,
+        status === "already-current"
+            ? `○ ${player.name} is already joined and current · no roster files changed.`
+            : `✓ ${player.name} joined · personal · enabled in this project`,
         `Role: ${publicRole}`,
         `Capacity: ${capacity}`,
         `Model: ${model ? `configured ${model}` : "inherits the OpenCode host when run"}`,
-        "Reload OpenCode configuration to expose the /<id> convenience alias; ownership-validated invocation remains fail-closed.",
+        "Reload OpenCode before native selection, /<id>, or team-lead delegation can use this definition.",
+        "Until reload, the live roster remains visible to zero-model controls but invocation fails closed.",
     ].join("\n");
 }
 /**
@@ -319,10 +375,20 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
     });
     const agentReservations = new Map();
     const directAgentCommands = new Map();
+    let loadedHarborAgentDigests = new Map();
     let configAgentConflicts = new Set();
     const assertNoConfigAgentConflict = (id) => {
         if (configAgentConflicts.has(id)) {
             throw new Error(`Agent Harbor player ${id} conflicts with a foreign OpenCode agent; rename or remove that agent entry, then reload OpenCode`);
+        }
+    };
+    const validateLoadedHarborAgent = (id, expectedDigest) => {
+        assertNoConfigAgentConflict(id);
+        const current = id === scoutPlayer.name
+            ? scoutPlayer
+            : requireInvocablePlayer("opencode", directory, id).definition;
+        if (playerDefinitionDigest(current) !== expectedDigest) {
+            throw new Error(`Agent Harbor player ${id} changed after OpenCode loaded it; reload before model execution`);
         }
     };
     const authoritativeBusyAgents = async (project, callerSessionID, signal) => {
@@ -434,7 +500,7 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
             throw new OpenCodeActivityError("OpenCode activity verification failed; team availability remains unknown");
         }
     };
-    const reserveAgent = (project, agent, reservation, busyMessage) => {
+    const reserveAgent = (project, agent, reservation, busyMessage, validateAdmission) => {
         const key = openCodeReservationKey(project, agent);
         if (agentReservations.has(key))
             throw new Error(busyMessage);
@@ -445,11 +511,11 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                 active += 1;
         }
         if (active >= maximumOpenCodeProjectReservations) {
-            throw new Error(`Agent Harbor allows at most ${maximumOpenCodeProjectReservations} active runs per project; wait for work to finish or use /team stop`);
+            throw new Error(`Agent Harbor allows at most ${maximumOpenCodeProjectReservations} active runs per project; wait for work to finish or open /team and enter stop all`);
         }
         let activity;
         try {
-            activity = claimOpenCodeAgentActivity(projectKey, agent, reservation.kind);
+            activity = claimValidatedOpenCodeAgentActivity(projectKey, agent, reservation.kind, reservation.sessionID, validateAdmission);
         }
         catch (error) {
             if (error instanceof Error && /busy in another direct or delegated run/u.test(error.message)) {
@@ -457,17 +523,22 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
             }
             throw error;
         }
-        const record = { ...reservation, project: projectKey, activity };
+        const record = { ...reservation, agent, project: projectKey, activity, observedBusy: false };
         agentReservations.set(key, record);
         return { key, record };
     };
     const releaseDirectReservations = (sessionID) => {
+        let failed = false;
         for (const [key, reservation] of agentReservations) {
             if (reservation.kind === "direct" && reservation.sessionID === sessionID) {
-                reservation.activity.release();
-                agentReservations.delete(key);
+                if (!reservation.activity || reservation.activity.release())
+                    agentReservations.delete(key);
+                else
+                    failed = true;
             }
         }
+        if (failed)
+            throw new Error("Agent Harbor could not verify direct activity-claim cleanup; filesystem recovery is required");
     };
     const originatingUserTurn = async (sessionID, messageID, currentDirectory, caller, signal) => {
         assertOpenCodeHostIdentity(sessionID, "session", caller);
@@ -536,8 +607,26 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
     };
     const rosterSnapshot = (currentDirectory, query, authoritativeBusy) => {
         const processBusy = new Set(readOpenCodeAgentActivities(currentDirectory).map(({ agent }) => agent));
-        return formatHarborTeamRosterSnapshot(listInvocablePlayers("opencode", currentDirectory)
-            .filter(({ id }) => id !== "team-lead")
+        const enabled = listInvocablePlayers("opencode", currentDirectory)
+            .filter(({ id }) => id !== "team-lead");
+        if (enabled.length > maximumHarborTeamRosterMembers) {
+            return {
+                complete: false,
+                total: enabled.length,
+                text: `Complete roster unavailable: ${enabled.length} enabled specialists exceeds the ${maximumHarborTeamRosterMembers}-member model-facing limit. Disable surplus bundled/personal members with /bench-off <id...>, reload OpenCode, then start a new lead turn. No partial roster was disclosed and no model child was started.`,
+            };
+        }
+        const pendingReload = enabled.filter(({ id, definition }) => configAgentConflicts.has(id) || loadedHarborAgentDigests.get(id) !== playerDefinitionDigest(definition));
+        if (pendingReload.length) {
+            const shown = pendingReload.slice(0, 3).map(({ id }) => id).join(", ");
+            const hidden = pendingReload.length > 3 ? `, +${pendingReload.length - 3} more` : "";
+            return {
+                complete: false,
+                total: enabled.length,
+                text: `Complete roster unavailable: ${pendingReload.length} of ${enabled.length} enabled specialists are not loaded by this OpenCode instance (${shown}${hidden}). Reload OpenCode before team-lead delegation. No partial roster was disclosed and no model child was started.`,
+            };
+        }
+        return formatHarborTeamRosterSnapshot(enabled
             .map(({ definition }) => ({
             id: definition.name,
             role: definition.description,
@@ -548,7 +637,12 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                 processBusy.has(definition.name)
                 ? "busy"
                 : "ready",
-        })), query);
+        })), query, "/bench-off <id...>");
+    };
+    const assertLeadRosterCapacity = (currentDirectory, authoritativeBusy) => {
+        const snapshot = rosterSnapshot(currentDirectory, "", authoritativeBusy);
+        if (!snapshot.complete)
+            throw new Error(snapshot.text);
     };
     const runScoutCall = async (name, execution, currentDirectory, action) => {
         const signal = execution.abort;
@@ -565,31 +659,156 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
             throw error;
         }
     };
+    const exactDirectClaimToken = (sessionID, agent) => {
+        const matches = [...agentReservations.values()].filter((reservation) => reservation.kind === "direct" && reservation.sessionID === sessionID &&
+            reservation.agent === agent && reservation.activity);
+        if (matches.length > 1) {
+            throw new Error(`Agent Harbor found ambiguous ${agent} activity ownership for this OpenCode session`);
+        }
+        return matches[0]?.activity?.snapshot.claimToken;
+    };
+    const abortAfterDirectOwnershipLoss = async (sessionID) => {
+        // Replace a vanished exact claim with a fresh recovery generation before
+        // awaiting host abort. If another process already won the slot, its claim
+        // is itself the fence and the old native turn is still aborted below.
+        for (const reservation of agentReservations.values()) {
+            if (reservation.kind !== "direct" || reservation.sessionID !== sessionID)
+                continue;
+            const expectedDigest = loadedHarborAgentDigests.get(reservation.agent);
+            if (!expectedDigest)
+                continue;
+            try {
+                const recovery = claimValidatedOpenCodeAgentActivity(reservation.project, reservation.agent, "direct", reservation.sessionID, () => validateLoadedHarborAgent(reservation.agent, expectedDigest));
+                if (!recovery.setPhase("cleaning")) {
+                    recovery.release();
+                    continue;
+                }
+                reservation.activity = recovery;
+                reservation.observedBusy = true;
+            }
+            catch { /* A competing exact claim already fences this member. */ }
+        }
+        let abortConfirmed = false;
+        if (activityClient?.session.abort) {
+            try {
+                const response = await boundedOpenCodeActivityRpc("OpenCode ownership-loss abort", (signal) => activityClient.session.abort({
+                    path: { id: sessionID },
+                    query: { directory },
+                    signal,
+                    throwOnError: true,
+                }), openCodeActivityRpcDeadlineMs);
+                abortConfirmed = openCodeRpcData(response) === true;
+            }
+            catch { /* The public failure below remains fail-closed and path-free. */ }
+        }
+        throw new Error(abortConfirmed
+            ? "Agent Harbor lost the exact direct activity generation; the native session was aborted and recovery is required"
+            : "Agent Harbor lost the exact direct activity generation; native abort outcome is unknown and recovery is required");
+    };
     return {
         "chat.message": async (input, output) => {
             const messageID = input.messageID ?? output.message.id;
             const model = input.model ?? output.message.model;
             const typedMessage = output.message;
+            const typedInput = input;
+            const outputAgent = typedMessage.agent;
+            const inputAgent = typedInput.agent;
             const variant = input.variant ?? typedMessage.variant ?? typedMessage.model.variant;
-            if (typeof input.sessionID !== "string" || !input.sessionID ||
-                input.sessionID.length > maximumOpenCodeHostIdentityBytes ||
-                Buffer.byteLength(input.sessionID, "utf8") > maximumOpenCodeHostIdentityBytes ||
-                typeof messageID !== "string" || !messageID || messageID.length > maximumOpenCodeHostIdentityBytes ||
-                Buffer.byteLength(messageID, "utf8") > maximumOpenCodeHostIdentityBytes ||
+            const sessionReservations = typeof input.sessionID === "string"
+                ? [...agentReservations.values()].filter((reservation) => reservation.kind === "direct" && reservation.sessionID === input.sessionID)
+                : [];
+            let reservation = sessionReservations[0];
+            const outputDigest = isHarborId(outputAgent)
+                ? loadedHarborAgentDigests.get(outputAgent)
+                : undefined;
+            const inputDigest = isHarborId(inputAgent)
+                ? loadedHarborAgentDigests.get(inputAgent)
+                : undefined;
+            // Foreign/native OpenCode agents remain entirely outside Agent Harbor's
+            // admission policy. A loaded Harbor identity, however, must claim before
+            // its first model turn even when invoked through native selection.
+            if (!reservation && outputDigest === undefined && inputDigest === undefined)
+                return;
+            const rejectTurn = (error) => {
+                if (!reservation)
+                    throw error;
+                try {
+                    releaseDirectReservations(reservation.sessionID);
+                }
+                catch (cleanupError) {
+                    throw new AggregateError([error, cleanupError], "OpenCode direct turn validation and activity-claim cleanup both failed");
+                }
+                throw error;
+            };
+            if (sessionReservations.length > 1) {
+                rejectTurn(new Error("Agent Harbor found multiple direct reservations for one OpenCode session"));
+            }
+            const expectedAgent = reservation?.agent ?? outputAgent;
+            if (typeof expectedAgent !== "string" || outputAgent !== expectedAgent ||
+                inputAgent !== undefined && inputAgent !== expectedAgent ||
+                !validOpenCodeHostIdentity(input.sessionID) || !validOpenCodeHostIdentity(messageID) ||
                 !validOpenCodeHostModelIdentity(model?.providerID) ||
                 !validOpenCodeHostModelIdentity(model?.modelID) ||
-                variant !== undefined && !validOpenCodeHostModelIdentity(variant))
-                return;
-            for (const reservation of agentReservations.values()) {
-                if (reservation.kind === "direct" && reservation.sessionID === input.sessionID) {
-                    reservation.activity.setPhase("working");
+                variant !== undefined && !validOpenCodeHostModelIdentity(variant)) {
+                rejectTurn(new Error("Agent Harbor rejected mismatched agent identity, turn identity, or model telemetry before model execution"));
+            }
+            let authoritativeBusy;
+            if (!reservation || expectedAgent === "team-lead") {
+                authoritativeBusy = await authoritativeBusyAgents(directory, input.sessionID);
+            }
+            if (expectedAgent === "team-lead") {
+                try {
+                    assertLeadRosterCapacity(directory, authoritativeBusy);
+                }
+                catch (error) {
+                    rejectTurn(error instanceof Error
+                        ? error
+                        : new Error("Agent Harbor could not verify the team-lead roster before model execution"));
                 }
             }
-            turnModelLedger.acquire([input.sessionID], [input.sessionID, messageID]).value.model = {
-                providerID: model.providerID,
-                modelID: model.modelID,
-                ...(variant === undefined ? {} : { variant }),
-            };
+            if (!reservation) {
+                const expectedDigest = (outputDigest ?? inputDigest);
+                validateLoadedHarborAgent(expectedAgent, expectedDigest);
+                if (authoritativeBusy.has(expectedAgent)) {
+                    throw new Error(`Agent Harbor player ${expectedAgent} is busy in an active OpenCode session`);
+                }
+                reservation = reserveAgent(directory, expectedAgent, { kind: "direct", sessionID: input.sessionID, owner: `native:${input.sessionID}` }, `Agent Harbor player ${expectedAgent} is busy in another direct or delegated run`, () => {
+                    if (loadedHarborAgentDigests.get(expectedAgent) !== expectedDigest) {
+                        throw new Error(`Agent Harbor player ${expectedAgent} changed in loaded OpenCode configuration during admission`);
+                    }
+                    validateLoadedHarborAgent(expectedAgent, expectedDigest);
+                }).record;
+            }
+            if (!reservation.activity) {
+                const expectedDigest = loadedHarborAgentDigests.get(expectedAgent);
+                if (!expectedDigest) {
+                    rejectTurn(new Error(`Agent Harbor player ${expectedAgent} is not loaded; reload OpenCode before model execution`));
+                }
+                const admissionDigest = expectedDigest;
+                try {
+                    reservation.activity = claimValidatedOpenCodeAgentActivity(reservation.project, expectedAgent, "direct", reservation.sessionID, () => validateLoadedHarborAgent(expectedAgent, admissionDigest));
+                }
+                catch (error) {
+                    rejectTurn(error instanceof Error ? error : new Error("Agent Harbor direct activity admission failed"));
+                }
+            }
+            const directActivity = reservation.activity;
+            if (!directActivity)
+                rejectTurn(new Error("Agent Harbor direct activity admission did not publish an ownership claim"));
+            if (!directActivity.setPhase("working")) {
+                rejectTurn(new Error("Agent Harbor could not publish and verify the direct working phase; the run was rejected before reliable activity publication"));
+            }
+            try {
+                turnModelLedger.acquire([input.sessionID], [input.sessionID, messageID]).value.model = {
+                    providerID: model.providerID,
+                    modelID: model.modelID,
+                    ...(variant === undefined ? {} : { variant }),
+                };
+                reservation.messageID = messageID;
+            }
+            catch (error) {
+                rejectTurn(error instanceof Error ? error : new Error("Agent Harbor model ledger publication failed"));
+            }
         },
         "chat.params": async (input, output) => {
             if (input.model.providerID === "openai" &&
@@ -599,6 +818,21 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
             }
         },
         event: async ({ event }) => {
+            if (event.type === "session.status" && event.properties.status.type !== "idle") {
+                const sessionID = event.properties.sessionID;
+                let ownershipLost = false;
+                for (const reservation of agentReservations.values()) {
+                    if (reservation.kind === "direct" && reservation.sessionID === sessionID) {
+                        if (reservation.activity && !reservation.activity.setPhase("working"))
+                            ownershipLost = true;
+                        else
+                            reservation.observedBusy = true;
+                    }
+                }
+                if (ownershipLost)
+                    await abortAfterDirectOwnershipLoss(sessionID);
+                return;
+            }
             const sessionID = event.type === "session.idle"
                 ? event.properties.sessionID
                 : event.type === "session.status" && event.properties.status.type === "idle"
@@ -610,21 +844,164 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                             : undefined;
             if (!sessionID)
                 return;
-            releaseDirectReservations(sessionID);
+            let directGeneration = [...agentReservations.values()].filter((reservation) => reservation.kind === "direct" && reservation.sessionID === sessionID);
+            // A slash-command claim without a user-turn boundary is provisional.
+            // Any terminal can discard it: the later chat hook must still hold (or
+            // win) a fresh validated claim before model work, so a replayed terminal
+            // cannot weaken admission safety.
+            for (const [key, reservation] of agentReservations) {
+                if (reservation.kind === "direct" && reservation.sessionID === sessionID && !reservation.messageID) {
+                    if (!reservation.activity || reservation.activity.release())
+                        agentReservations.delete(key);
+                }
+            }
+            directGeneration = directGeneration.filter((reservation) => reservation.activity !== undefined && reservation.messageID !== undefined);
+            if (event.type !== "session.deleted" && directGeneration.length) {
+                // Idle/error events carry only a reusable session ID. Never let a
+                // delayed terminal from turn N erase the claim for turn N+1. A current
+                // An idle must first follow a busy/retry transition. session.error is
+                // equally session-scoped and may also be replayed, so without current-
+                // generation busy evidence it additionally needs an exact terminal
+                // assistant message parented by this reservation's user turn.
+                if (event.type !== "session.error" &&
+                    directGeneration.some((reservation) => !reservation.observedBusy || !reservation.messageID))
+                    return;
+                const tokens = directGeneration.map(({ activity }) => activity.snapshot.claimToken).sort();
+                const exactTurnTerminal = async (reservation) => {
+                    if (!activityClient || !reservation.messageID)
+                        return false;
+                    let response;
+                    try {
+                        response = await boundedOpenCodeActivityRpc("OpenCode direct-error turn reconciliation", (signal) => activityClient.session.messages({
+                            path: { id: sessionID },
+                            query: { directory, limit: maximumOpenCodeActivityMessagesPerSession },
+                            signal,
+                        }), openCodeActivityRpcDeadlineMs);
+                    }
+                    catch {
+                        return false;
+                    }
+                    let messages;
+                    try {
+                        messages = openCodeRpcData(response);
+                    }
+                    catch {
+                        return false;
+                    }
+                    if (!Array.isArray(messages) || messages.length === 0 ||
+                        messages.length > maximumOpenCodeActivityMessagesPerSession)
+                        return false;
+                    for (const message of messages) {
+                        const info = plainRecord(plainRecord(message)?.info);
+                        if (!info || info.role !== "assistant")
+                            continue;
+                        if (info.sessionID !== sessionID || info.parentID !== reservation.messageID ||
+                            typeof info.id !== "string" || !validOpenCodeHostIdentity(info.id))
+                            continue;
+                        const time = plainRecord(info.time);
+                        const completed = time?.completed;
+                        const hasCompleted = Number.isSafeInteger(completed) && completed >= 0;
+                        const hasError = Object.hasOwn(info, "error") && info.error !== undefined;
+                        const hasFinish = typeof info.finish === "string" && info.finish.length > 0 &&
+                            info.finish.length <= maximumOpenCodeHostIdentityBytes;
+                        if (hasCompleted || hasError || hasFinish)
+                            return true;
+                    }
+                    return false;
+                };
+                if (event.type === "session.error" && directGeneration.some((reservation) => !reservation.observedBusy)) {
+                    const terminal = await Promise.all(directGeneration.map(exactTurnTerminal));
+                    if (terminal.some((value) => !value)) {
+                        if (directGeneration.some((reservation) => !reservation.activity.setPhase("cleaning"))) {
+                            await abortAfterDirectOwnershipLoss(sessionID);
+                        }
+                        return;
+                    }
+                }
+                const confirmedIdle = async () => {
+                    if (!activityClient)
+                        return false;
+                    const deadline = Date.now() + openCodeActivityTotalDeadlineMs;
+                    let consecutiveIdle = 0;
+                    while (Date.now() < deadline) {
+                        let response;
+                        try {
+                            response = await boundedOpenCodeActivityRpc("OpenCode direct-terminal reconciliation", (signal) => activityClient.session.status({ query: { directory }, signal }), openCodeActivityRpcDeadlineMs);
+                        }
+                        catch {
+                            return false;
+                        }
+                        const statuses = plainRecord(openCodeRpcData(response));
+                        if (!statuses)
+                            return false;
+                        const status = plainRecord(statuses[sessionID]);
+                        if (status !== undefined && status.type !== "idle") {
+                            if (status.type !== "busy" && status.type !== "retry")
+                                return false;
+                            consecutiveIdle = 0;
+                        }
+                        else {
+                            consecutiveIdle += 1;
+                        }
+                        const current = [...agentReservations.values()]
+                            .filter((reservation) => reservation.kind === "direct" && reservation.sessionID === sessionID && reservation.activity)
+                            .map(({ activity }) => activity.snapshot.claimToken)
+                            .sort();
+                        if (current.length !== tokens.length || !current.every((token, index) => token === tokens[index]))
+                            return false;
+                        if (consecutiveIdle >= 2)
+                            return true;
+                        await new Promise((resolve) => setTimeout(resolve, 20));
+                    }
+                    return false;
+                };
+                if (!await confirmedIdle()) {
+                    // The terminal was observed but the native host has not converged.
+                    // Publish that cleanup is pending instead of falsely leaving the
+                    // player "working" forever; stop/reload recovery remains fail-closed.
+                    if (directGeneration.some((reservation) => !reservation.activity.setPhase("cleaning"))) {
+                        await abortAfterDirectOwnershipLoss(sessionID);
+                    }
+                    return;
+                }
+            }
+            let releaseFailure;
+            try {
+                releaseDirectReservations(sessionID);
+            }
+            catch (error) {
+                releaseFailure = error;
+            }
+            let ledgerFailure;
             try {
                 scoutLedger.terminateScope([sessionID], `OpenCode ${event.type}`);
                 delegateLedger.terminateScope([sessionID], `OpenCode ${event.type}`);
                 turnModelLedger.terminateScope([sessionID], `OpenCode ${event.type}`);
             }
-            catch { /* Oversized/invalid host IDs fail closed at the call boundary. */ }
+            catch (error) {
+                ledgerFailure = error; /* Oversized/invalid host IDs fail closed at the call boundary. */
+            }
+            if (releaseFailure !== undefined && ledgerFailure !== undefined) {
+                throw new AggregateError([releaseFailure, ledgerFailure], "OpenCode activity cleanup and lifecycle-ledger termination both failed");
+            }
+            if (releaseFailure !== undefined)
+                throw releaseFailure;
+            if (ledgerFailure !== undefined)
+                throw ledgerFailure;
         },
         dispose: async () => {
             scoutLedger.terminateAll("OpenCode plugin disposed");
             delegateLedger.terminateAll("OpenCode plugin disposed");
             turnModelLedger.terminateAll("OpenCode plugin disposed");
-            for (const reservation of agentReservations.values())
-                reservation.activity.release();
-            agentReservations.clear();
+            let releaseFailed = false;
+            for (const [key, reservation] of agentReservations) {
+                if (!reservation.activity || reservation.activity.release())
+                    agentReservations.delete(key);
+                else
+                    releaseFailed = true;
+            }
+            if (releaseFailed)
+                throw new Error("Agent Harbor could not verify activity-claim cleanup during disposal; filesystem recovery is required");
         },
         config: async (config) => {
             config.command ??= {};
@@ -634,7 +1011,9 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                 const agent = candidate && typeof candidate === "object" && !Array.isArray(candidate)
                     ? candidate.agent
                     : undefined;
-                if (alias === "scout" && isAgentHarborScoutCommand(candidate) ||
+                if (commandNames.includes(alias) &&
+                    isAgentHarborLifecycleCommand(alias, candidate) ||
+                    alias === "scout" && isAgentHarborScoutCommand(candidate) ||
                     typeof agent === "string" && isAgentHarborDirectCommand(agent, candidate)) {
                     delete config.command[alias];
                 }
@@ -642,19 +1021,8 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
             // While configuration is being reconciled, every direct alias fails
             // closed instead of using a stale ownership decision.
             directAgentCommands.clear();
-            const commandCollisions = new Set();
-            for (const name of commandNames) {
-                const existing = config.command[name];
-                // Lifecycle names are preferred Harbor aliases, not destructive host
-                // namespaces. Deterministic TUI/CLI controls remain available if a
-                // user-owned slash command already has the exact name.
-                if (existing === undefined || isAgentHarborLifecycleCommand(name, existing)) {
-                    config.command[name] = openCodeLifecycleCommand(name);
-                }
-                else {
-                    commandCollisions.add(name);
-                }
-            }
+            recordOpenCodeDirectAliasCollisions(directory, []);
+            const commandCollisions = new Map();
             const startupProfiles = discoverStartupActiveProfiles("opencode", directory);
             if (startupProfiles.diagnostics.length && typeof client.app?.log === "function") {
                 try {
@@ -774,12 +1142,28 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
             const sortedAgentConflicts = [...nextAgentConflicts].sort();
             configAgentConflicts = new Set(sortedAgentConflicts);
             recordOpenCodeAgentConflicts(directory, sortedAgentConflicts);
+            const nextLoadedHarborAgentDigests = new Map();
+            for (const [id, player] of rolePlayers) {
+                nextLoadedHarborAgentDigests.set(id, playerDefinitionDigest(player));
+            }
+            nextLoadedHarborAgentDigests.set(scoutPlayer.name, playerDefinitionDigest(scoutPlayer));
+            for (const [id, player] of managedDefinitions) {
+                if (!configAgentConflicts.has(id)) {
+                    nextLoadedHarborAgentDigests.set(id, playerDefinitionDigest(player));
+                }
+            }
+            loadedHarborAgentDigests = nextLoadedHarborAgentDigests;
             const nextDirectAgentCommands = new Map();
             const registerDirectAlias = (alias, id, definition, player) => {
-                if (configAgentConflicts.has(id))
+                if (configAgentConflicts.has(id)) {
+                    // Alias ownership remains independently observable even when the
+                    // same member also has an agent-definition collision.
+                    if (config.command[alias] !== undefined)
+                        commandCollisions.set(alias, id);
                     return;
+                }
                 if (config.command[alias] !== undefined) {
-                    commandCollisions.add(alias);
+                    commandCollisions.set(alias, id);
                     return;
                 }
                 config.command[alias] = definition;
@@ -794,7 +1178,11 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
             registerDirectAlias("scout", scoutPlayer.name, openCodeScoutCommand(), undefined);
             for (const [alias, direct] of nextDirectAgentCommands)
                 directAgentCommands.set(alias, direct);
-            const sortedCommandCollisions = [...commandCollisions].sort();
+            const sortedCommandCollisions = [...commandCollisions.keys()].sort();
+            recordOpenCodeDirectAliasCollisions(directory, sortedCommandCollisions.map((alias) => ({
+                alias,
+                agent: commandCollisions.get(alias),
+            })));
             if ((sortedAgentConflicts.length || sortedCommandCollisions.length) && typeof client.app?.log === "function") {
                 try {
                     await client.app.log({
@@ -813,43 +1201,55 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
             const direct = directAgentCommands.get(command);
             if (!direct)
                 return;
-            const { id } = direct;
-            if (typeof args !== "string")
-                throw new Error(`/${command} requires a string task`);
-            if (args.length > maximumOpenCodeDirectTaskBytes ||
-                Buffer.byteLength(args, "utf8") > maximumOpenCodeDirectTaskBytes) {
-                throw new Error(`/${command} task exceeds the ${maximumOpenCodeDirectTaskBytes / 1_024} KiB direct-run limit`);
-            }
-            if (!args.trim())
-                throw new Error(`/${command} requires a non-empty task`);
-            if (typeof sessionID !== "string" || !sessionID || sessionID.length > maximumOpenCodeHostIdentityBytes ||
-                Buffer.byteLength(sessionID, "utf8") > maximumOpenCodeHostIdentityBytes ||
-                /[\u0000-\u001f\u007f]/u.test(sessionID)) {
-                throw new Error(`/${command} received an invalid OpenCode session ID`);
-            }
-            assertNoConfigAgentConflict(id);
-            if (id !== scoutPlayer.name) {
-                const current = requireInvocablePlayer("opencode", directory, id);
-                if (!direct.definitionDigest || playerDefinitionDigest(current.definition) !== direct.definitionDigest) {
-                    throw new Error(`/${command} requires an OpenCode reload because its loaded Agent Harbor definition changed`);
+            try {
+                const { id } = direct;
+                if (typeof args !== "string")
+                    throw new Error(`/${command} requires a string task`);
+                if (args.length > maximumOpenCodeDirectTaskBytes ||
+                    Buffer.byteLength(args, "utf8") > maximumOpenCodeDirectTaskBytes) {
+                    throw new Error(`/${command} task exceeds the ${maximumOpenCodeDirectTaskBytes / 1_024} KiB direct-run limit`);
                 }
+                if (!args.trim())
+                    throw new Error(`/${command} requires a non-empty task`);
+                if (typeof sessionID !== "string" || !sessionID || sessionID.length > maximumOpenCodeHostIdentityBytes ||
+                    Buffer.byteLength(sessionID, "utf8") > maximumOpenCodeHostIdentityBytes ||
+                    /[\u0000-\u001f\u007f]/u.test(sessionID)) {
+                    throw new Error(`/${command} received an invalid OpenCode session ID`);
+                }
+                const validateCurrentDefinition = () => {
+                    assertNoConfigAgentConflict(id);
+                    if (id !== scoutPlayer.name) {
+                        let current;
+                        try {
+                            current = requireInvocablePlayer("opencode", directory, id);
+                        }
+                        catch (error) {
+                            if (error instanceof Error && /^active managed player not found: [a-z0-9-]+$/u.test(error.message)) {
+                                throw new Error(`/${command} is no longer active in Agent Harbor; reload OpenCode to remove this stale alias`);
+                            }
+                            throw error;
+                        }
+                        if (!direct.definitionDigest || playerDefinitionDigest(current.definition) !== direct.definitionDigest) {
+                            throw new Error(`/${command} requires an OpenCode reload because its loaded Agent Harbor definition changed`);
+                        }
+                    }
+                };
+                validateCurrentDefinition();
+                const authoritativeBusy = await authoritativeBusyAgents(directory, sessionID);
+                if (id === "team-lead")
+                    assertLeadRosterCapacity(directory, authoritativeBusy);
+                if (authoritativeBusy.has(id)) {
+                    throw new Error(`Agent Harbor player ${id} is busy in an active OpenCode session`);
+                }
+                reserveAgent(directory, id, { kind: "direct", sessionID, owner: `direct:${sessionID}` }, `Agent Harbor player ${id} is busy in another direct or delegated run`, validateCurrentDefinition);
             }
-            const authoritativeBusy = await authoritativeBusyAgents(directory, sessionID);
-            if (authoritativeBusy.has(id)) {
-                throw new Error(`Agent Harbor player ${id} is busy in an active OpenCode session`);
+            catch (error) {
+                const publicError = publicOpenCodeDirectPreflightError(command, error);
+                await showOpenCodeDirectPreflightError(client, directory, publicError.message);
+                throw publicError;
             }
-            reserveAgent(directory, id, { kind: "direct", sessionID, owner: `direct:${sessionID}` }, `Agent Harbor player ${id} is busy in another direct or delegated run`);
         },
         tool: {
-            harbor: tool({
-                description: "Execute one deterministic Agent Harbor lifecycle or orchestration command.",
-                args: { command: tool.schema.enum(commandNames), args: tool.schema.string() },
-                execute: async ({ command, args }, execution) => {
-                    const currentDirectory = execution.directory || directory;
-                    const context = await harborContext("opencode", currentDirectory, new OpenCodeOrchestrator(client, currentDirectory));
-                    return executeCommand(command, args, context, execution.abort);
-                },
-            }),
             [harborCustomToolNames.teamRoster]: tool({
                 description: `${harborStaticCustomToolSpecs[harborCustomToolNames.teamRoster].description} Returns every enabled specialist or a fail-closed over-capacity diagnostic; a query ranks matches but never hides other members.`,
                 args: openCodeToolArgs(harborStaticCustomToolSpecs[harborCustomToolNames.teamRoster]),
@@ -904,13 +1304,17 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                     const currentDirectory = execution.directory || directory;
                     return runScoutCall(harborCustomToolNames.joinPlayer, execution, currentDirectory, async () => {
                         const context = await harborContext("opencode", currentDirectory, new OpenCodeOrchestrator(client, currentDirectory));
-                        await executeCommand("join", call.definition, context, execution.abort);
-                        return { result: conciseOpenCodeScoutJoin(call.definition) };
+                        const committed = await runOpenCodeRosterMutationGate("join", call.definition, currentDirectory, () => executeCommandResult("join", call.definition, context, execution.abort), exactDirectClaimToken(execution.sessionID, scoutPlayer.name));
+                        assertOpenCodeLifecycleMutationTruth("join", call.definition, committed);
+                        if (committed.lifecycle?.command !== "join")
+                            throw new Error("OpenCode scout join lifecycle verification was not retained");
+                        const status = committed.lifecycle.status;
+                        return { result: conciseOpenCodeScoutJoin(call.definition, status) };
                     });
                 }),
             }),
             [harborCustomToolNames.delegate]: tool({
-                description: `${harborStaticCustomToolSpecs[harborCustomToolNames.delegate].description} The target is ownership-validated against the live roster at invocation time, including players added by /join during this session.`,
+                description: `${harborStaticCustomToolSpecs[harborCustomToolNames.delegate].description} The target must be ownership-validated and loaded by the current OpenCode configuration; newly joined or replaced players require reload before delegation.`,
                 args: openCodeToolArgs(harborStaticCustomToolSpecs[harborCustomToolNames.delegate]),
                 execute: (args, execution) => publicOpenCodeToolCall(harborCustomToolNames.delegate, execution.abort, async () => {
                     const call = validatedOpenCodeCall(harborCustomToolNames.delegate, args, { agent: execution.agent });
@@ -920,6 +1324,11 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                     const currentDirectory = execution.directory || directory;
                     assertNoConfigAgentConflict(agent);
                     const player = requireInvocablePlayer("opencode", currentDirectory, agent).definition;
+                    const expectedDefinitionDigest = playerDefinitionDigest(player);
+                    const loadedDefinitionDigest = loadedHarborAgentDigests.get(agent);
+                    if (loadedDefinitionDigest !== expectedDefinitionDigest) {
+                        throw new Error(`delegation target ${agent} is enabled but not loaded by this OpenCode instance; reload OpenCode before delegation`);
+                    }
                     const originatingTurn = await originatingUserMessage(execution.sessionID, execution.messageID, currentDirectory, execution.abort);
                     const turn = delegateLedger.acquire([execution.sessionID], [execution.sessionID, originatingTurn.id]);
                     const state = turn.value;
@@ -939,20 +1348,50 @@ export const AgentHarborPlugin = async ({ client, directory }) => {
                     if (authoritativeBusy.has(agent)) {
                         throw new Error(`delegation target ${agent} is busy in an active OpenCode session`);
                     }
-                    const reservationRecord = reserveAgent(currentDirectory, agent, { kind: "delegated", sessionID: execution.sessionID, owner: turn.id }, `delegation target ${agent} is busy in another direct or delegated Agent Harbor run`);
+                    const reservationRecord = reserveAgent(currentDirectory, agent, { kind: "delegated", sessionID: execution.sessionID, owner: turn.id }, `delegation target ${agent} is busy in another direct or delegated Agent Harbor run`, () => {
+                        assertNoConfigAgentConflict(agent);
+                        const current = requireInvocablePlayer("opencode", currentDirectory, agent).definition;
+                        if (playerDefinitionDigest(current) !== expectedDefinitionDigest) {
+                            throw new Error(`delegation target ${agent} changed during admission; retry with the live roster`);
+                        }
+                    });
                     state.calls += 1;
                     state.agents.add(agent);
                     state.inFlight = true;
+                    let result;
+                    let runFailure;
+                    let releaseFailure;
                     try {
-                        return await new OpenCodeOrchestrator(client, currentDirectory).runAgent(agent, normalizeDelegatedTaskPaths(task, currentDirectory), execution.sessionID, model, execution.abort, (phase) => reservationRecord.record.activity.setPhase(phase));
+                        result = await new OpenCodeOrchestrator(client, currentDirectory).runAgent(agent, normalizeDelegatedTaskPaths(task, currentDirectory), execution.sessionID, model, execution.abort, (phase, childSessionID) => {
+                            if (childSessionID && reservationRecord.record.activity.snapshot.sessionID !== childSessionID &&
+                                !reservationRecord.record.activity.setSessionID(childSessionID)) {
+                                throw new Error("Agent Harbor could not publish and verify the disposable child identity; the child will be cleaned without prompting");
+                            }
+                            if (!reservationRecord.record.activity.setPhase(phase)) {
+                                throw new Error(`Agent Harbor could not publish and verify the delegated ${phase} phase`);
+                            }
+                        });
+                    }
+                    catch (error) {
+                        runFailure = error;
                     }
                     finally {
                         state.inFlight = false;
                         if (agentReservations.get(reservationRecord.key) === reservationRecord.record) {
-                            reservationRecord.record.activity.release();
-                            agentReservations.delete(reservationRecord.key);
+                            if (reservationRecord.record.activity.release())
+                                agentReservations.delete(reservationRecord.key);
+                            else
+                                releaseFailure = new Error("Agent Harbor could not verify delegated activity-claim cleanup; filesystem recovery is required");
                         }
                     }
+                    if (runFailure !== undefined && releaseFailure) {
+                        throw new AggregateError([runFailure, releaseFailure], "OpenCode delegation and activity-claim cleanup both failed");
+                    }
+                    if (runFailure !== undefined)
+                        throw runFailure;
+                    if (releaseFailure)
+                        throw releaseFailure;
+                    return result;
                 }),
             }),
             agent_harbor_skills: tool({

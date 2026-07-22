@@ -6,6 +6,7 @@ team. All three runtimes share the same roster and lifecycle rules.
 It includes:
 
 - `team-lead` and `crafter`, available from startup;
+- `talent-scout`, the startup utility available as `/scout`;
 - six opt-in SDLC specialists: `portfolio-management`, `design`, `build`,
   `manage`, `consume`, and `dispose`;
 - deterministic `/team`, `/bench`, `/join`, `/retire`, and `/list-skills` controls that

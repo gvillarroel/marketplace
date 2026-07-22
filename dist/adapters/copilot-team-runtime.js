@@ -1,8 +1,9 @@
 /** Process-local, zero-model observability for Agent Harbor runs hosted by Copilot. */
 import { createHmac, randomBytes } from "node:crypto";
-import { basename, resolve } from "node:path";
+import { basename } from "node:path";
 import { publicMetadataText, publicTaskLabel } from "../core/public-metadata.js";
-import { wrapPlainLines } from "../core/text-layout.js";
+import { canonicalProjectIdentity } from "../core/project-identity.js";
+import { takeTerminalColumns, terminalLineWidth, visibleTextWidth, wrapPlainLines } from "../core/text-layout.js";
 export const maximumConcurrentCopilotRoots = 32;
 export const maximumCopilotUsageIdentityKeys = 4_096;
 const usageFields = ["input", "output", "reasoning", "cacheRead", "cacheWrite", "total"];
@@ -53,8 +54,7 @@ function sumFiniteNumbers(values) {
     return { value, overflow };
 }
 function projectKey(project) {
-    const absolute = resolve(project);
-    return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+    return canonicalProjectIdentity(project);
 }
 /** Strips terminal controls and bounds host-provided public identifiers. */
 export function copilotPublicIdentifier(value, limit = 120) {
@@ -596,7 +596,7 @@ export class CopilotTeamRuntime {
         return this.mission(rootRunId).some((run) => run.usageAttributionUnverified);
     }
     projectName(project) {
-        return basename(resolve(project)) || "project";
+        return basename(projectKey(project)) || "project";
     }
     observeModel(run, value) {
         const model = copilotPublicIdentifier(value, 200);
@@ -737,17 +737,19 @@ export function formatCopilotTokenCount(value, lowerBound = false) {
 function formatCopilotBillingCount(value, lowerBound = false) {
     if (value === undefined)
         return "—";
-    const formatted = value > Number.MAX_SAFE_INTEGER
+    const formatted = value !== 0 && value < 0.000001
         ? value.toExponential(6)
-        : new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 }).format(value);
+        : value > Number.MAX_SAFE_INTEGER
+            ? value.toExponential(6)
+            : new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 }).format(value);
     return `${lowerBound ? "≥" : ""}${formatted}`;
 }
 export function formatCopilotBilling(billing, lowerBounds = []) {
     const lower = new Set(lowerBounds);
-    return [
-        `model-multiplier cost ${formatCopilotBillingCount(billing.modelMultiplier, lower.has("modelMultiplier"))}`,
+    return `billing units (not USD): ${[
+        `model multiplier ${formatCopilotBillingCount(billing.modelMultiplier, lower.has("modelMultiplier"))}`,
         `nano AIU ${formatCopilotBillingCount(billing.totalNanoAiu, lower.has("totalNanoAiu"))}`,
-    ].join(" · ");
+    ].join(" · ")}`;
 }
 export function formatCopilotModel(run) {
     if (run.observedModels.length > 1 || run.observedModelsTruncated) {
@@ -863,8 +865,29 @@ export function formatCopilotMissionDetails(runtime, rootRunId) {
     const billingNote = Object.values(missionBilling).some((value) => value !== undefined)
         ? ` · ${formatCopilotBilling(missionBilling, runtime.missionBillingLowerBounds(rootRunId))}`
         : "";
-    lines.push(`Mission total · ${formatCopilotElapsed(root.elapsedMs)} · ${formatCopilotUsage(runtime.missionUsage(rootRunId), runtime.missionUsageLowerBounds(rootRunId))}${billingNote}${attributionNote}${aggregateConflictNote}`);
-    return wrapPlainLines(lines);
+    const totalLine = `Mission total · ${formatCopilotElapsed(root.elapsedMs)} · ${formatCopilotUsage(runtime.missionUsage(rootRunId), runtime.missionUsageLowerBounds(rootRunId))}${billingNote}${attributionNote}${aggregateConflictNote}`;
+    lines.push(totalLine);
+    const rich = wrapPlainLines(lines);
+    if (rich.length <= 28)
+        return rich;
+    const boundedLine = (value) => {
+        if (visibleTextWidth(value) <= terminalLineWidth)
+            return value;
+        const [prefix] = takeTerminalColumns(value, terminalLineWidth - 1);
+        return `${prefix.trimEnd()}…`;
+    };
+    const compact = runs.map((run) => {
+        const total = formatCopilotTokenCount(run.usage.total, run.usageLowerBounds.includes("total"));
+        const childFacts = run.parentRunId
+            ? ` · duration ${run.durationMs === undefined ? "—" : formatCopilotNativeDuration(run.durationMs)} · tools ${run.totalToolCalls ?? "—"}`
+            : "";
+        return boundedLine(`${run.parentRunId ? "↳" : "●"} ${copilotPublicIdentifier(run.agent, 18) ?? "unknown"} · ${run.state} · total ${total}${childFacts} · /team run:${copilotPublicIdentifier(run.id, 64) ?? "unknown"}`);
+    });
+    return [
+        ...compact,
+        ...wrapPlainLines([totalLine]).slice(0, Math.max(1, 28 - compact.length)),
+        ...(compact.length < 27 ? ["Rich per-run model/reasoning/task metadata: /team run:<id>."] : []),
+    ].slice(0, 28);
 }
 export function formatCopilotMissionReport(runtime, rootRunId) {
     return ["", "TEAM RUN (native Copilot telemetry)", ...formatCopilotMissionDetails(runtime, rootRunId)].join("\n");

@@ -14,6 +14,7 @@ const runtimeTargets = [
       "shared.js",
       "copilot.js",
       "direct.js",
+      "opencode-agent-activity.js",
       "copilot-coordinator.js",
       "copilot-team-runtime.js",
       "copilot-team-view.js",

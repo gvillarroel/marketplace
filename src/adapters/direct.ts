@@ -1,5 +1,5 @@
 /** Zero-model adapter shared by CLI and native deterministic controls. */
-import { executeCommand } from "../core/commands.js";
+import { executeCommandResult, type HarborCommandResult } from "../core/commands.js";
 import type { SkillCatalogStyle } from "../core/catalog.js";
 import type { DeterministicCommandName, HarnessName, Orchestrator } from "../core/types.js";
 import { harborContext } from "./shared.js";
@@ -24,6 +24,19 @@ export function runDeterministicCommand(
   signal?: AbortSignal,
   catalogStyle: SkillCatalogStyle = "plain",
 ): Promise<string> {
+  return runDeterministicCommandResult(harness, command, args, project, signal, catalogStyle)
+    .then(({ text }) => text);
+}
+
+/** Executes a deterministic control while preserving structured lifecycle mutation truth. */
+export function runDeterministicCommandResult(
+  harness: HarnessName,
+  command: DeterministicCommandName,
+  args: string,
+  project = process.cwd(),
+  signal?: AbortSignal,
+  catalogStyle: SkillCatalogStyle = "plain",
+): Promise<HarborCommandResult> {
   return harborContext(harness, project, noModelOrchestrator(harness), catalogStyle)
-    .then((context) => executeCommand(command, args, context, signal));
+    .then((context) => executeCommandResult(command, args, context, signal));
 }

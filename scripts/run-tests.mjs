@@ -33,6 +33,7 @@ function requireSuccess(result, stage) {
 try {
   requireSuccess(await run(["scripts/build.mjs"]), "build");
   requireSuccess(await run(["scripts/run-test-suite.mjs"]), "test suite");
+  requireSuccess(await run(["scripts/run-capture-tests.mjs"]), "capture hardening tests");
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);

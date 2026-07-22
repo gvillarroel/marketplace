@@ -838,6 +838,7 @@ test("Copilot child admission denies before native work without poisoning the ne
     getCurrent: async () => ({ agent: fixedCopilotIdentity(teamLead) }),
     reload: async () => ({ agents }),
   } } }), undefined, undefined, (input) => {
+    if (input.type === "root") return;
     attempts += 1;
     observed.push(input);
     if (attempts === 1) throw new Error("crafter is already working in copilot-run-7");

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -11,8 +11,14 @@ import {
 } from "../src/adapters/copilot-coordinator.js";
 import { AgentHarborPlugin } from "../src/adapters/opencode.js";
 import openCodeTui, { openCodeDirectCommands } from "../src/adapters/opencode-tui.js";
+import { runDeterministicCommand } from "../src/adapters/direct.js";
+import { claimSharedAgentActivity, readSharedAgentActivities } from "../src/adapters/opencode-agent-activity.js";
 import { commandNames } from "../src/core/types.js";
-import { harborCustomToolNames, harborStaticCustomToolSpecs } from "../src/core/custom-tools.js";
+import {
+  harborCustomToolNames,
+  harborStaticCustomToolSpecs,
+  validateHarborCustomToolArguments,
+} from "../src/core/custom-tools.js";
 import { bundledPlayers, rolePlayers, scoutPlayer, trustedSkills } from "../src/core/defaults.js";
 import { GhResolver } from "../src/core/github.js";
 import type { HarborEvidenceEvent } from "../src/core/evidence.js";
@@ -34,7 +40,12 @@ registerHooks({
       : nextResolve(specifier, context);
   },
 });
-const { default: piExtension } = await import("../src/adapters/pi.js");
+const {
+  default: piExtension,
+  requirePiBenchLifecycleOutcome,
+  requirePiJoinLifecycleOutcome,
+  requirePiRetireLifecycleOutcome,
+} = await import("../src/adapters/pi.js");
 
 const definition = { name: "worker", description: "Worker", prompt: "Work", tools: ["read"] as const, task: "Do it" };
 const cycleDataset = loadHarborCycleDataset();
@@ -76,6 +87,13 @@ function authenticatedPiHostState(model: any = authenticatedPiHostModel) {
   };
 }
 
+async function sharedActivityClaimFile(activityHome: string, agent: string): Promise<string> {
+  const root = join(activityHome, "agent-foundry", "team-activity-v1");
+  const projects = await readdir(root);
+  assert.equal(projects.length, 1, "expected one shared activity project directory");
+  return join(root, projects[0], `${agent}.json`);
+}
+
 function datasetTask(cycle: HarborCycle, index: number, priorEvidence?: string): string {
   const step = cycle.steps[index];
   return step.evidenceFrom
@@ -95,6 +113,20 @@ test("delegated tasks replace project-absolute paths with bounded relative paths
   assert.match(normalized, /\.[/\\]src[/\\]score\.js/u);
   assert.match(normalized, /\.\/test\/score\.test\.js/u);
   assert.match(normalized, /C:\\outside\\secret\.txt/u);
+});
+
+test("shared recruiter join contract refuses replacement definitions", () => {
+  const definition = JSON.stringify({
+    name: "existing-reviewer",
+    description: "Must remain unchanged",
+    prompt: "Review safely",
+    tools: ["read"],
+    replace: true,
+  });
+  assert.throws(
+    () => validateHarborCustomToolArguments(harborCustomToolNames.joinPlayer, { definition }),
+    /harbor_join_player recruits a new teammate and cannot replace an existing roster member/u,
+  );
 });
 
 test("Copilot orchestrator uses one SDK custom-agent session", async () => {
@@ -345,6 +377,24 @@ test("Copilot team-lead hooks enforce exact active sequential delegation across 
   serialized.toolArgs = JSON.stringify(serialized.toolArgs) as any;
   assert.equal((await hooks.onPreToolUse(serialized, invocation))?.permissionDecision, "allow");
   await finish(serialized as any, "serialized evidence");
+  assert.match(
+    (await hooks.onPreToolUse(input("portfolio-management", "retry after success"), invocation))
+      ?.permissionDecisionReason ?? "",
+    /already delegated to portfolio-management in this user prompt/u,
+  );
+  await reset("a new user prompt resets the consumed target set");
+  const failedOnce = input("portfolio-management", "admitted child fails");
+  assert.equal((await hooks.onPreToolUse(failedOnce, invocation))?.permissionDecision, "allow");
+  await hooks.onPostToolUseFailure({ ...failedOnce, error: new Error("child failed") }, invocation);
+  assert.match(
+    (await hooks.onPreToolUse(input("portfolio-management", "retry after failure"), invocation))
+      ?.permissionDecisionReason ?? "",
+    /already delegated to portfolio-management in this user prompt/u,
+  );
+  await reset("the following user prompt may delegate to that target once again");
+  const afterPromptReset = input("portfolio-management", "fresh prompt delegation");
+  assert.equal((await hooks.onPreToolUse(afterPromptReset, invocation))?.permissionDecision, "allow");
+  await finish(afterPromptReset, "fresh prompt evidence");
   endTurn("serialized-cycle-idle");
   await reset("reject malformed serialized delegations");
   assert.match((await hooks.onPreToolUse({ ...input("portfolio-management", "work"), toolArgs: "not-json" }, invocation))?.permissionDecisionReason ?? "", /bounded object/);
@@ -1073,7 +1123,7 @@ test("contract skills are validated and materialized before any SDK child is cre
   assert.equal(children, 1, "skill validation must finish before creating a child");
 });
 
-test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", async () => {
+test("OpenCode plugin exposes direct player aliases and an isolated talent scout", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-opencode-adapter-"));
   const previous = process.env.OPENCODE_CONFIG_DIR;
   process.env.OPENCODE_CONFIG_DIR = join(root, "home");
@@ -1096,7 +1146,10 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
   } as any, {});
   const config: any = {};
   await plugin.config?.(config);
-  assert.deepEqual(Object.keys(config.command).slice(0, commandNames.length), [...commandNames]);
+  for (const name of commandNames) {
+    assert.equal(config.command[name], undefined,
+      `OpenCode server config must not route deterministic /${name} through a model session`);
+  }
   for (const id of rolePlayers.keys()) assert.deepEqual(config.command[id], {
     description: `Run Agent Harbor player ${id} in the current session`,
     template: "$ARGUMENTS",
@@ -1136,7 +1189,8 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
   assert.ok(plugin.tool?.harbor_team_roster);
   assert.ok(plugin.tool?.harbor_filter_skills);
   assert.ok(plugin.tool?.harbor_join_player);
-  assert.ok(plugin.tool?.harbor);
+  assert.equal(plugin.tool?.harbor, undefined,
+    "OpenCode must not expose an ambient generic lifecycle tool; direct controls own deterministic commands");
   assert.equal(plugin.tool?.harbor_contract, undefined, "OpenCode must not expose an unauthenticated contract preflight tool");
   assert.ok(plugin.tool?.harbor_delegate);
   assert.ok(plugin.tool?.agent_harbor_skills);
@@ -1146,40 +1200,57 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
   ), /non-empty/);
   await directPreflight({ command: "team-lead", sessionID: "session", arguments: "coordinate" }, { parts: [] });
   await assert.rejects(() => directPreflight(
-    { command: "scout", sessionID: "session", arguments: "   " }, { parts: [] },
+    { command: "scout", sessionID: "session", arguments: "same native session" }, { parts: [] },
+  ), /only one direct player claim per owning runtime session/u);
+  await assert.rejects(() => directPreflight(
+    { command: "scout", sessionID: "scout-session", arguments: "   " }, { parts: [] },
   ), /non-empty/);
-  await directPreflight({ command: "scout", sessionID: "session", arguments: "zx automation" }, { parts: [] });
+  await directPreflight({ command: "scout", sessionID: "scout-session", arguments: "zx automation" }, { parts: [] });
   await directPreflight({ command: "bench", sessionID: "session", arguments: "list" }, { parts: [] });
   await mkdir(join(current, "skills", "native"), { recursive: true });
   await writeFile(join(current, "skills", "native", "SKILL.md"), [
     "---", "name: native-guidance", "description: Native guidance", "---", "", "NATIVE-ONLY-GUIDANCE",
   ].join("\n"), "utf8");
-  const result = await plugin.tool!.harbor.execute(
-    { command: "join", args: JSON.stringify({
+  const result = await runDeterministicCommand(
+    "opencode",
+    "join",
+    JSON.stringify({
       name: "native", description: "Native", prompt: "Work", tools: ["read"],
       skills: [{ kind: "repo", name: "native-guidance", path: "skills/native/SKILL.md" }],
-    }) },
-    { directory: current, abort: new AbortController().signal } as any,
+    }),
+    current,
+    new AbortController().signal,
   );
   assert.match(String(result), /joined native/);
   assert.match(String(result), /command: \/native <request>/);
   assert.match(String(result), new RegExp(current.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  const reloadedPlugin = await AgentHarborPlugin({ client: { session: emptyOpenCodeActivitySession() }, directory: current } as any, {});
+  const reloadedPlugin = await AgentHarborPlugin({ client: { session: {
+    ...emptyOpenCodeActivitySession(),
+    message: async ({ path }: any) => ({ data: {
+      info: {
+        id: path.messageID,
+        role: "user",
+        model: { providerID: "openai", modelID: "gpt-5.3-codex-spark" },
+      },
+      parts: [],
+    } }),
+  } }, directory: current } as any, {});
   const reloadedConfig: any = {};
   await reloadedPlugin.config?.(reloadedConfig);
+  const activeTools = reloadedPlugin.tool!;
   assert.deepEqual(reloadedConfig.command.native, {
     description: "Run Agent Harbor player native in the current session",
     template: "$ARGUMENTS",
     agent: "native",
     subtask: false,
   });
-  const guidance = await plugin.tool!.agent_harbor_skills.execute(
+  const guidance = await activeTools.agent_harbor_skills.execute(
     {},
     { directory: current, agent: "native", abort: new AbortController().signal } as any,
   );
   assert.match(String(guidance), /HARBOR-SKILL native-guidance/);
   assert.match(String(guidance), /NATIVE-ONLY-GUIDANCE/);
-  await assert.rejects(() => plugin.tool!.agent_harbor_skills.execute(
+  await assert.rejects(() => activeTools.agent_harbor_skills.execute(
     {},
     { directory: current, agent: "team-lead", abort: new AbortController().signal } as any,
   ), /no configured skills/);
@@ -1198,10 +1269,10 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
       messageID,
       abort: new AbortController().signal,
     });
-    await assert.rejects(() => plugin.tool!.harbor_filter_skills.execute(
+    await assert.rejects(() => activeTools.harbor_filter_skills.execute(
       { query: "zx scripts" }, { directory: current, agent: "team-lead", abort: new AbortController().signal } as any,
     ), /not available to this principal/);
-    await assert.rejects(() => plugin.tool!.harbor_team_roster.execute(
+    await assert.rejects(() => activeTools.harbor_team_roster.execute(
       { query: "native" }, { directory: current, agent: "crafter", abort: new AbortController().signal } as any,
     ), /not available to this principal/);
 
@@ -1218,56 +1289,56 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
       }
       return { commit: "e".repeat(40), description: "Author zx automation scripts." };
     };
-    await plugin.tool!.harbor_team_roster.execute(
+    await activeTools.harbor_team_roster.execute(
       { query: "" }, scoutExecution("scout-concurrent") as any,
     );
-    const blockedFilter = plugin.tool!.harbor_filter_skills.execute(
+    const blockedFilter = activeTools.harbor_filter_skills.execute(
       { query: "zx scripts" }, scoutExecution("scout-concurrent") as any,
     );
     await blockedFilterEntered;
-    await assert.rejects(() => plugin.tool!.harbor_filter_skills.execute(
+    await assert.rejects(() => activeTools.harbor_filter_skills.execute(
       { query: "automation" }, scoutExecution("scout-concurrent") as any,
     ), /must run sequentially/);
     releaseBlockedFilter();
     await blockedFilter;
 
     GhResolver.prototype.describe = async () => ({ commit: "e".repeat(40), description: "Author zx automation scripts." });
-    await assert.rejects(() => plugin.tool!.harbor_join_player.execute(
+    await assert.rejects(() => activeTools.harbor_join_player.execute(
       { definition: JSON.stringify({ name: "out-of-order", description: "Out of order", prompt: "Work.", tools: ["read"] }) },
       scoutExecution("scout-order") as any,
     ), /requires one successful complete harbor_team_roster snapshot first/);
-    await plugin.tool!.harbor_team_roster.execute({ query: "" }, scoutExecution("scout-order") as any);
-    await assert.rejects(() => plugin.tool!.harbor_join_player.execute(
+    await activeTools.harbor_team_roster.execute({ query: "" }, scoutExecution("scout-order") as any);
+    await assert.rejects(() => activeTools.harbor_join_player.execute(
       { definition: JSON.stringify({ name: "still-out-of-order", description: "Out of order", prompt: "Work.", tools: ["read"] }) },
       scoutExecution("scout-order") as any,
     ), /requires a successful harbor_filter_skills call first/);
 
-    await plugin.tool!.harbor_team_roster.execute({ query: "" }, scoutExecution("scout-filter-limit") as any);
+    await activeTools.harbor_team_roster.execute({ query: "" }, scoutExecution("scout-filter-limit") as any);
     for (let index = 0; index < 3; index += 1) {
-      await plugin.tool!.harbor_filter_skills.execute(
+      await activeTools.harbor_filter_skills.execute(
         { query: `zx scripts ${index}` }, scoutExecution("scout-filter-limit") as any,
       );
     }
-    await assert.rejects(() => plugin.tool!.harbor_filter_skills.execute(
+    await assert.rejects(() => activeTools.harbor_filter_skills.execute(
       { query: "fourth filter" }, scoutExecution("scout-filter-limit") as any,
     ), /per-run limit \(3\)/);
 
-    const roster = await plugin.tool!.harbor_team_roster.execute(
+    const roster = await activeTools.harbor_team_roster.execute(
       { query: "native" }, scoutExecution("scout-main") as any,
     );
     assert.match(String(roster), /"id":"native".*"availability":"ready"/u);
     assert.doesNotMatch(String(roster), /\.opencode|agent-harbor\/bench/iu);
-    await assert.rejects(() => plugin.tool!.harbor_team_roster.execute(
+    await assert.rejects(() => activeTools.harbor_team_roster.execute(
       { query: "again" }, scoutExecution("scout-main") as any,
     ), /exactly once/u);
-    const matches = await plugin.tool!.harbor_filter_skills.execute(
+    const matches = await activeTools.harbor_filter_skills.execute(
       { query: "zx scripts" }, scoutExecution("scout-main") as any,
     );
     assert.match(String(matches), /zx-example-author/);
-    await assert.rejects(() => plugin.tool!.harbor_join_player.execute(
+    await assert.rejects(() => activeTools.harbor_join_player.execute(
       { definition: "{}" }, { directory: current, agent: "crafter", abort: new AbortController().signal } as any,
     ), /not available to this principal/);
-    const scouted = await plugin.tool!.harbor_join_player.execute(
+    const scouted = await activeTools.harbor_join_player.execute(
       { definition: JSON.stringify({ name: "open-scouted", description: "Scouted", prompt: "Work narrowly.", tools: ["read"] }) },
       scoutExecution("scout-main") as any,
     );
@@ -1275,13 +1346,13 @@ test("OpenCode plugin exposes lifecycle commands and an isolated talent scout", 
     assert.match(String(scouted), /Role: Scouted/u);
     assert.match(String(scouted), /Capacity: read/u);
     assert.match(String(scouted), /Model: inherits the OpenCode host/u);
-    assert.match(String(scouted), /Reload OpenCode configuration/u);
+    assert.match(String(scouted), /Reload OpenCode before native selection/u);
     assert.doesNotMatch(String(scouted), /registration:|active:|\\home\\|\/home\//u);
-    await assert.rejects(() => plugin.tool!.harbor_join_player.execute(
+    await assert.rejects(() => activeTools.harbor_join_player.execute(
       { definition: JSON.stringify({ name: "open-scouted-again", description: "Scouted again", prompt: "Work narrowly.", tools: ["read"] }) },
       scoutExecution("scout-main") as any,
     ), /talent-scout turn is terminal: join completed/);
-    await assert.rejects(() => plugin.tool!.harbor_filter_skills.execute(
+    await assert.rejects(() => activeTools.harbor_filter_skills.execute(
       { query: "after join" }, scoutExecution("scout-main") as any,
     ), /talent-scout turn is terminal: join completed/);
   } finally {
@@ -1478,7 +1549,7 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
   };
   const delegate = plugin.tool!.harbor_delegate;
   assert.equal((delegate.args.agent as any).options, undefined);
-  assert.match(delegate.description, /live roster at invocation time/);
+  assert.match(delegate.description, /ownership-validated and loaded by the current OpenCode configuration/);
   let evidence: string | undefined;
   for (const [index, step] of defaultCycle.steps.entries()) {
     evidence = String(await delegate.execute(
@@ -1492,11 +1563,12 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
   assert.deepEqual(prompts.map((entry) => entry.body.variant), defaultCycle.steps.map(() => defaultModel.variant));
 
   await roster.join({ name: "new-player", description: "New player", prompt: "Handle newly assigned work.", tools: ["read"] });
-  assert.equal(await delegate.execute(
+  const beforePendingReload = creates.length;
+  await assert.rejects(() => delegate.execute(
     { agent: "new-player", task: "handle work joined during this session" },
     { ...execution, messageID: "default-new-player" },
-  ), "evidence:new-player");
-  assert.equal(prompts.at(-1).body.agent, "new-player");
+  ), /enabled but not loaded.*reload OpenCode/u);
+  assert.equal(creates.length, beforePendingReload, "pending-reload members must create zero children");
 
   const beforeInvalid = creates.length;
   const sdlcExecution = { ...execution, messageID: "sdlc-invalid" };
@@ -1508,7 +1580,7 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
   await assert.rejects(() => delegate.execute({ agent: "dispose", task: "retire safely" }, sdlcExecution), /not found/);
   await assert.rejects(() => directPreflight(
     { command: "dispose", sessionID: "parent", arguments: "retire safely" }, { parts: [] },
-  ), /not found/);
+  ), /\/dispose is no longer active in Agent Harbor; reload OpenCode to remove this stale alias/u);
   assert.equal(creates.length, beforeInvalid, "invalid or inactive targets must create zero children");
   await roster.bench("on dispose", bundledPlayers);
 
@@ -1534,19 +1606,18 @@ test("OpenCode team lead dispatches exact active agents sequentially without a r
   await assert.rejects(() => delegate.execute(
     { agent: fullCycle.steps[0].agent, task: "seventh stage" }, { ...sdlcExecution, messageID: "sdlc-7" },
   ), /at most six/);
-  assert.equal(creates.length, defaultCycle.steps.length + 1 + fullCycle.steps.length);
+  assert.equal(creates.length, defaultCycle.steps.length + fullCycle.steps.length);
   assert.deepEqual(prompts.map((entry) => entry.body.agent), [
-    ...defaultCycle.steps.map((step) => step.agent), "new-player", ...fullCycle.steps.map((step) => step.agent),
+    ...defaultCycle.steps.map((step) => step.agent), ...fullCycle.steps.map((step) => step.agent),
   ]);
   assert.deepEqual(
     prompts.map((entry) => entry.body.model),
     [...defaultCycle.steps.map(() => ({ providerID: defaultModel.providerID, modelID: defaultModel.modelID })),
-      { providerID: defaultModel.providerID, modelID: defaultModel.modelID },
       ...fullCycle.steps.map(() => ({ providerID: sdlcModel.providerID, modelID: sdlcModel.modelID }))],
   );
   assert.deepEqual(
     prompts.map((entry) => entry.body.variant),
-    [...defaultCycle.steps.map(() => defaultModel.variant), defaultModel.variant, ...fullCycle.steps.map(() => sdlcModel.variant)],
+    [...defaultCycle.steps.map(() => defaultModel.variant), ...fullCycle.steps.map(() => sdlcModel.variant)],
   );
   assert.match(prompts.at(-1).body.parts[0].text, new RegExp(`evidence:${fullCycle.steps.at(-2)!.agent}`));
   assert.ok(creates.every((entry) => entry.body.parentID === undefined));
@@ -1635,10 +1706,13 @@ test("OpenCode TUI exposes direct controls that bypass sessions and models", asy
       session: { get: () => undefined, messages: () => [], status: () => undefined },
       part: () => [],
     },
-    client: { v2: { session: {
-      list: async () => ({ data: { data: [], cursor: {} } }),
-      active: async () => ({ data: { data: {} } }),
-    } } },
+    client: {
+      session: { status: async () => ({ data: {} }) },
+      v2: { session: {
+        list: async () => ({ data: { data: [], cursor: {} } }),
+        active: async () => ({ data: { data: {} } }),
+      } },
+    },
     ui: {
       toast: (value: unknown) => toasts.push(value), dialog,
       DialogPrompt: (props: unknown) => props,
@@ -1651,12 +1725,12 @@ test("OpenCode TUI exposes direct controls that bypass sessions and models", asy
     GhResolver.prototype.listCatalog = async (source) => [{ repo: source.repo, path: source.path ?? "skills/zx-example-author/SKILL.md", name: source.name ?? "zx-example-author" }];
     const commands = openCodeDirectCommands(api);
     assert.deepEqual(commands.map((command) => command.slashName), [
-      "team", "bench-list", "bench-on", "bench-off", "harbor-join", "harbor-retire", "harbor-list-skills", "harbor-filter-skills",
+      "team", "bench-list", "bench-on", "bench-off", "harbor-join", "harbor-retire", "contract", "harbor-list-skills", "harbor-filter-skills",
     ]);
     assert.ok(commands.every((command) => command.namespace === "palette"));
     await commands.find((command) => command.name.endsWith("bench-list"))!.run();
     assert.match(prompts.at(-1).title, /0 model tokens/);
-    assert.match(prompts.at(-1).message, /portfolio-management \| bundled \| bench/);
+    assert.match(prompts.at(-1).message, /portfolio-management · bundled · bench/);
 
     commands.find((command) => command.name.endsWith("bench-on"))!.run();
     await prompts.at(-1).onConfirm("portfolio-management");
@@ -1696,7 +1770,7 @@ test("OpenCode TUI exposes direct controls that bypass sessions and models", asy
     };
     commands.find((command) => command.name.endsWith("join"))!.run();
     await prompts.at(-1).onConfirm(JSON.stringify(nativeDefinition));
-    assert.match(prompts.at(-1).message, /native joined · personal · ready · invocable/u);
+    assert.match(prompts.at(-1).message, /○ native is already joined and current · no roster files changed\./u);
     assert.match(prompts.at(-1).message, /Run now: \/native <task>/u);
     commands.find((command) => command.name.endsWith("retire"))!.run();
     await prompts.at(-1).onConfirm("native");
@@ -1705,18 +1779,22 @@ test("OpenCode TUI exposes direct controls that bypass sessions and models", asy
 
     await commands.find((command) => command.name.endsWith("skills-list"))!.run();
     assert.match(prompts.at(-1).message, /REPOSITORY.*PATH.*SKILL/su);
+    assert.match(prompts.at(-1).message, /skills\/zx-example-author\/SKILL\.md/u);
+    assert.doesNotMatch(prompts.at(-1).message, /\[path\]/u);
     assert.doesNotMatch(prompts.at(-1).message, /\x1b\[/u);
     commands.find((command) => command.name.endsWith("skills-filter"))!.run();
     await prompts.at(-1).onConfirm("zx");
     assert.match(prompts.at(-1).message, /zx-example-author/);
-    assert.equal(toasts.length, 0);
+    assert.equal(toasts.length, 1);
+    assert.match(toasts[0].title, /0 model tokens/u);
+    assert.match(toasts[0].message, /Reading a bounded OpenCode team snapshot/u);
     assert.ok(prompts.filter((entry) => entry?.message).every((entry) => /0 model tokens/.test(entry.title)));
     assert.ok(prompts.flatMap((entry) => typeof entry?.message === "string" ? entry.message.split("\n") : [])
       .every((line) => visibleTextWidth(line) <= 96), "an OpenCode direct-control result exceeded 96 cells");
 
     await openCodeTui.tui(api, undefined, {} as any);
     assert.equal(layers.length, 1);
-    assert.equal(layers[0].commands.length, 8);
+    assert.equal(layers[0].commands.length, 9);
     assert.ok(!("server" in openCodeTui));
   } finally {
     GhResolver.prototype.listCatalog = originalListCatalog;
@@ -1732,7 +1810,10 @@ test("Pi extension registers lifecycle and fixed roles through ExtensionAPI", ()
     registerTool: (tool: any) => tools.push(tool),
     getThinkingLevel: () => "minimal",
   } as any);
-  assert.deepEqual(names, ["team", ...commandNames, ...rolePlayers.keys(), "scout"]);
+  const baseline = ["team", ...commandNames, ...rolePlayers.keys(), "scout"];
+  assert.deepEqual(names.slice(0, baseline.length), baseline);
+  assert.equal(new Set(names).size, names.length,
+    "startup discovery registered a command identity more than once");
   assert.deepEqual(tools, [], "Pi must not expose a model-callable global contract tool");
 });
 
@@ -1814,7 +1895,7 @@ test("Pi /scout inspects one roster snapshot before filtering and one determinis
       "late-roster", { query: "" }, new AbortController().signal, undefined, { cwd: project },
     ), /root is terminal or cleaning; late custom-tool calls are blocked/u);
     assert.match(await readFile(join(project, ".pi", "agents", "zx-automator.md"), "utf8"), /zx-example-author/);
-    assert.match(notices.at(-1)!, /^scout-complete\nRoster commit preserved: zx-automator is joined and active in this project\.\nTEAM RUN \(native Pi telemetry\)/u);
+    assert.match(notices.at(-1)!, /^scout-complete\nRoster commit preserved: zx-automator is joined and active in this project\.\nTEAM RUN · native Pi telemetry · bounded summary/u);
   } finally {
     PiOrchestrator.prototype.run = originalRun;
     GhResolver.prototype.describe = originalDescribe;
@@ -1959,7 +2040,7 @@ test("Pi /scout reconciles and reports a join that commits after the cancelled U
     on: (event: string, handler: () => Promise<void>) => { if (event === "session_shutdown") shutdown = handler; },
   } as any);
   const originalRun = PiOrchestrator.prototype.run;
-  const originalJoin = Roster.prototype.join;
+  const originalJoinResult = Roster.prototype.joinResult;
   const originalDescribe = GhResolver.prototype.describe;
   const originalListCatalog = GhResolver.prototype.listCatalog;
   const originalInspectCatalog = GhResolver.prototype.inspectCatalog;
@@ -1972,10 +2053,10 @@ test("Pi /scout reconciles and reports a join that commits after the cancelled U
       repo: source.repo, path: "skills/late/SKILL.md", name: "late-skill", track: source.track, commit: "e".repeat(40),
     }];
     GhResolver.prototype.inspectCatalog = async (entry) => ({ name: entry.name, description: "Late commit skill." });
-    Roster.prototype.join = async function (input: unknown) {
+    Roster.prototype.joinResult = async function (input: unknown) {
       enterJoin();
       await joinReleased;
-      return originalJoin.call(this, input);
+      return originalJoinResult.call(this, input);
     };
     PiOrchestrator.prototype.run = async function () {
       const rosterTool = (this as any).customTools.find((tool: any) => tool.name === "harbor_team_roster");
@@ -2011,7 +2092,7 @@ test("Pi /scout reconciles and reports a join that commits after the cancelled U
     await access(join(project, ".pi", "agents", "late-commit.md"));
   } finally {
     PiOrchestrator.prototype.run = originalRun;
-    Roster.prototype.join = originalJoin;
+    Roster.prototype.joinResult = originalJoinResult;
     GhResolver.prototype.describe = originalDescribe;
     GhResolver.prototype.listCatalog = originalListCatalog;
     GhResolver.prototype.inspectCatalog = originalInspectCatalog;
@@ -2059,7 +2140,7 @@ test("Pi direct /contract inherits the host SDK model and thinking level without
     PiOrchestrator.prototype.run = originalRun;
   }
 
-  assert.match(notices.at(-1)!, /^contract-evidence\nTEAM RUN \(native Pi telemetry\)/u);
+  assert.match(notices.at(-1)!, /^contract-evidence\nTEAM RUN · native Pi telemetry · bounded summary/u);
   assert.equal(observed.length, 2);
   assert.ok(observed.every((entry) => entry.hostMarker === "host-sdk-static-import"));
   assert.equal(observed[0].sessionOptions.model, hostModel);
@@ -2153,7 +2234,8 @@ test("Pi model-backed commands fail before run creation without a usable authent
     assert.equal(started.length, 0);
 
     await commands.get("team").handler("", context(undefined, registry([], { authenticated: false })));
-    assert.match(notices.at(-1)!.message, /No one is working right now/u);
+    assert.match(notices.at(-1)!.message,
+      /No active persistent work; disposable contractors are visible only in their owning Pi process/u);
     assert.doesNotMatch(notices.at(-1)!.message, /LAST MISSION|TEAM RUN/u);
 
     const authenticated = context(selected, registry([selected], { authenticated: true }));
@@ -2258,7 +2340,8 @@ test("Pi captures only command-required public provider projections before creat
     assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
     assert.doesNotMatch(notices.at(-1)!.message, new RegExp(secret, "u"));
     await commands.get("team").handler("", context);
-    assert.match(notices.at(-1)!.message, /No one is working right now/u);
+    assert.match(notices.at(-1)!.message,
+      /No active persistent work; disposable contractors are visible only in their owning Pi process/u);
     assert.doesNotMatch(notices.at(-1)!.message, /LAST MISSION|TEAM RUN/u);
 
     runtimeKeyFailure = false;
@@ -2294,6 +2377,147 @@ test("Pi captures only command-required public provider projections before creat
     await assert.rejects(access(join(home, "models.json")));
   } finally {
     PiOrchestrator.prototype.run = originalRun;
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
+});
+
+test("Pi revalidates admission after retire wins the provider-auth preflight gap", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-admission-race-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = home;
+  const roster = new Roster(harnessSpec("pi", home, project));
+  await roster.join({
+    name: "race-reviewer",
+    description: "Review lifecycle admission races",
+    prompt: "Review safely",
+    tools: ["read"],
+  });
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(project);
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => "minimal",
+    } as any);
+  } finally { process.chdir(previousCwd); }
+
+  let authEnteredResolve!: () => void;
+  let releaseAuth!: () => void;
+  const authEntered = new Promise<void>((resolve) => { authEnteredResolve = resolve; });
+  const authRelease = new Promise<void>((resolve) => { releaseAuth = resolve; });
+  const selected = { provider: "runtime-provider", id: "runtime-model" };
+  const context = {
+    cwd: project,
+    model: selected,
+    modelRegistry: {
+      find: (provider: string, id: string) => provider === selected.provider && id === selected.id
+        ? selected
+        : undefined,
+      getAvailable: () => [selected],
+      getError: () => undefined,
+      hasConfiguredAuth: () => true,
+      getRegisteredProviderConfig: () => ({ name: "Runtime provider", api: "openai-completions" }),
+      getProviderAuthStatus: () => ({ configured: true, source: "runtime" }),
+      getApiKeyForProvider: async () => {
+        authEnteredResolve();
+        await authRelease;
+        return "runtime-secret";
+      },
+    },
+    ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+  } as any;
+  const originalRun = PiOrchestrator.prototype.run;
+  let starts = 0;
+  try {
+    PiOrchestrator.prototype.run = async () => {
+      starts += 1;
+      return "must not run";
+    };
+    const pending = commands.get("race-reviewer").handler("must not use stale admission", context);
+    await authEntered;
+    await commands.get("retire").handler("race-reviewer", context);
+    assert.match(notices.at(-1)!.message, /race-reviewer unregistered and deactivated here/u);
+    await assert.rejects(access(join(project, ".pi", "agents", "race-reviewer.md")));
+    releaseAuth();
+    await pending;
+
+    assert.equal(starts, 0, "retired Pi player crossed runtime.begin and started a model child");
+    assert.match(notices.at(-1)!.message,
+      /active managed player changed during preflight: race-reviewer; inspect \/team and retry/u);
+    assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
+    assert.doesNotMatch(notices.map(({ message }) => message).join("\n"), /runtime-secret/u);
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    releaseAuth?.();
+    if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
+});
+
+test("Pi reserves a team-lead snapshot against concurrent bench off", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-lead-bench-race-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const previousHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = home;
+  const roster = new Roster(harnessSpec("pi", home, project));
+  await roster.bench("on build", bundledPlayers);
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(project);
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => "minimal",
+    } as any);
+  } finally { process.chdir(previousCwd); }
+  const context = {
+    cwd: project,
+    ...authenticatedPiHostState(),
+    ui: {
+      notify: (message: string, level?: string) => notices.push({ message, level }),
+      setStatus: () => {},
+      setWidget: () => {},
+    },
+  } as any;
+  let runEnteredResolve!: () => void;
+  let releaseRun!: () => void;
+  const runEntered = new Promise<void>((resolve) => { runEnteredResolve = resolve; });
+  const runRelease = new Promise<void>((resolve) => { releaseRun = resolve; });
+  const originalRun = PiOrchestrator.prototype.run;
+  try {
+    PiOrchestrator.prototype.run = async function () {
+      (this as any).runObserver.sessionStarted();
+      runEnteredResolve();
+      await runRelease;
+      return "lead completed";
+    };
+    const pending = commands.get("team-lead").handler("coordinate the active build specialist", context);
+    await runEntered;
+    await commands.get("bench").handler("off build", context);
+
+    assert.match(notices.at(-1)!.message,
+      /cannot bench off build while team-lead owns its active roster snapshot in pi-run-1/u);
+    assert.match(notices.at(-1)!.message,
+      /use \/team stop pi-run-1, then wait for cleanup to settle/u);
+    await access(join(project, ".pi", "agents", "build.md"));
+
+    releaseRun();
+    await pending;
+    await commands.get("bench").handler("off build", context);
+    assert.match(notices.at(-1)!.message, /build moved to the bench in this project/u);
+    await assert.rejects(access(join(project, ".pi", "agents", "build.md")));
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    releaseRun?.();
     if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousHome;
   }
@@ -2372,13 +2596,14 @@ test("Pi deterministic command handlers never enter the SDK orchestrator", async
   process.env.PI_CODING_AGENT_DIR = join(root, "home");
   const project = join(root, "project");
   const commands = new Map<string, any>(); const notices: string[] = [];
+  let registrationCalls = 0;
   const originalRun = PiOrchestrator.prototype.run;
   const originalListCatalog = GhResolver.prototype.listCatalog;
   try {
     PiOrchestrator.prototype.run = async () => { throw new Error("model orchestrator was invoked"); };
     GhResolver.prototype.listCatalog = async (source) => [{ repo: source.repo, path: source.path ?? "skills/zx-example-author/SKILL.md", name: source.name ?? "zx-example-author" }];
     piExtension({
-      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerCommand: (name: string, options: any) => { registrationCalls += 1; commands.set(name, options); },
       registerTool: () => {},
       getThinkingLevel: () => { throw new Error("deterministic commands requested model state"); },
     } as any);
@@ -2391,8 +2616,37 @@ test("Pi deterministic command handlers never enter the SDK orchestrator", async
     });
     assert.match(notices.at(-1)!, /native joined · personal · ready/u);
     assert.ok(commands.has("native"), "join must register /native in the current Pi session");
+    const registrationsBeforeJoinNoOp = registrationCalls;
+    await commands.get("join").handler(JSON.stringify({ name: "native", description: "Native", prompt: "Work", tools: ["read"] }), context);
+    assert.match(notices.at(-1)!, /○ native is already joined and current · no roster files changed\./u);
+    assert.equal(registrationCalls, registrationsBeforeJoinNoOp + 1,
+      "a verified join no-op did not reconcile the active alias after possible external drift");
+    await commands.get("bench").handler("off native", context);
+    assert.match(notices.at(-1)!, /✓ native moved to the bench in this project\./u);
+    const registrationsBeforeBenchNoOp = registrationCalls;
+    await commands.get("bench").handler("off native", context);
+    assert.match(notices.at(-1)!, /○ native is already benched · this member was unchanged\.[\s\S]*No roster files changed\./u);
+    assert.match(notices.at(-1)!,
+      /If this session still lists a benched alias, run \/reload to remove it from completion/u);
+    assert.equal(registrationCalls, registrationsBeforeBenchNoOp, "a Pi bench no-op refreshed active commands");
+    await commands.get("bench").handler("on design", context);
+    await commands.get("bench").handler("on design,build", context);
+    const mixedBench = notices.at(-1)!;
+    assert.match(mixedBench, /○ design is already enabled · this member was unchanged\./u);
+    assert.match(mixedBench, /✓ build enabled in this project\./u);
+    assert.doesNotMatch(mixedBench, /No roster files changed\./u);
+    const registrationsBeforeAllBenchNoOp = registrationCalls;
+    await commands.get("bench").handler("on design,build", context);
+    const allBenchNoOp = notices.at(-1)!;
+    assert.equal((allBenchNoOp.match(/this member was unchanged\./gu) ?? []).length, 2);
+    assert.equal((allBenchNoOp.match(/No roster files changed\./gu) ?? []).length, 1);
+    assert.equal(registrationCalls, registrationsBeforeAllBenchNoOp + 2,
+      "a verified bench no-op did not reconcile both active aliases after possible external drift");
     await commands.get("retire").handler("native", context);
     assert.match(notices.at(-1)!, /native unregistered and deactivated here/u);
+    await commands.get("retire").handler("native", context);
+    assert.match(notices.at(-1)!, /native was already retired here · no roster files changed/u);
+    assert.match(notices.at(-1)!, /^Agent Harbor \/retire · 0 model tokens\n○ native/u);
     await commands.get("list-skills").handler("zx", context);
     assert.match(notices.at(-1)!, /REPOSITORY.*PATH.*SKILL/);
     assert.match(notices.at(-1)!, /\x1b\[/);
@@ -2417,6 +2671,34 @@ test("Pi deterministic command handlers never enter the SDK orchestrator", async
   }
 });
 
+test("Pi rejects missing or mismatched lifecycle truth before presenting join and bench mutations", () => {
+  const joinArgs = JSON.stringify({ name: "truthful", description: "Truthful", prompt: "Work", tools: ["read"] });
+  assert.throws(() => requirePiJoinLifecycleOutcome(joinArgs, undefined), /lifecycle outcome.*unverified/u);
+  assert.throws(() => requirePiJoinLifecycleOutcome(joinArgs, {
+    command: "join", player: "different", status: "changed",
+  }), /mismatched lifecycle outcome/u);
+  assert.throws(() => requirePiBenchLifecycleOutcome("on design,build", undefined),
+    /lifecycle outcome.*unverified/u);
+  assert.throws(() => requirePiBenchLifecycleOutcome("on design,build", {
+    command: "bench",
+    status: "changed",
+    rows: [
+      { id: "build", action: "on", status: "changed" },
+      { id: "design", action: "on", status: "already-current" },
+    ],
+  }), /mismatched lifecycle outcome/u);
+  assert.throws(() => requirePiBenchLifecycleOutcome("off design", {
+    command: "bench",
+    status: "already-current",
+    rows: [{ id: "design", action: "off", status: "changed" }],
+  }), /mismatched lifecycle outcome/u);
+  assert.throws(() => requirePiRetireLifecycleOutcome("truthful", undefined),
+    /lifecycle outcome.*unverified/u);
+  assert.throws(() => requirePiRetireLifecycleOutcome("truthful", {
+    command: "retire", player: "different", status: "changed",
+  }), /mismatched lifecycle outcome/u);
+});
+
 test("Pi /team and enriched /bench are searchable zero-model controls with completions and human errors", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-pi-team-control-"));
   const previousHome = process.env.PI_CODING_AGENT_DIR;
@@ -2437,7 +2719,8 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
     assert.match(notices.at(-1)!.message, /Agent Harbor team .*0 model tokens/u);
     assert.match(notices.at(-1)!.message, /team-lead · manager · ready/u);
     assert.match(notices.at(-1)!.message, /talent-scout \(\/scout\) · utility · ready/u);
-    assert.match(notices.at(-1)!.message, /No one is working right now/u);
+    assert.match(notices.at(-1)!.message,
+      /No active persistent work; disposable contractors are visible only in their owning Pi process/u);
     const offlineSentinel = {
       ...context,
       model: { provider: "unknown", id: "unknown", maxTokens: 0 },
@@ -2445,7 +2728,7 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
     await commands.get("team").handler("", offlineSentinel);
     const offlineTeam = notices.at(-1)!.message.replace(/\s+/gu, " ");
     assert.match(offlineTeam,
-      /Next default child: no active model; availability unobserved \(use \/model or \/login\).*model max output per response unknown/u);
+      /Next child: no active model; availability unobserved \(use \/model or \/login\).*max output unknown/u);
     assert.match(offlineTeam,
       /Delegable now: none \(model availability unobserved; use \/model or \/login\)/u);
     assert.doesNotMatch(notices.at(-1)!.message, /unknown\/unknown \(inherited\)|max output per response 0 tokens/u);
@@ -2456,7 +2739,7 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
     } as any);
     const noModelTeam = notices.at(-1)!.message.replace(/\s+/gu, " ");
     assert.match(noModelTeam,
-      /Next default child: unavailable \(Pi reports no usable models; use \/login\).*model max output per response unknown/u);
+      /Next child: unavailable \(Pi reports no usable models; use \/login\).*max output unknown/u);
     assert.doesNotMatch(noModelTeam, /unknown\/default \(unobserved\)|max output per response 0 tokens/u);
     await commands.get("team").handler("", {
       ...context,
@@ -2465,7 +2748,7 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
     } as any);
     const emptyRegistryTeam = notices.at(-1)!.message.replace(/\s+/gu, " ");
     assert.match(emptyRegistryTeam,
-      /Next default child: unavailable \(Pi reports no usable models; use \/login\).*model max output per response unknown/u);
+      /Next child: unavailable \(Pi reports no usable models; use \/login\).*max output unknown/u);
     assert.match(emptyRegistryTeam, /Delegable now: none \(model unavailable\)/u);
     await commands.get("team").handler("", {
       ...context,
@@ -2477,7 +2760,7 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
     } as any);
     const unselectedTeam = notices.at(-1)!.message.replace(/\s+/gu, " ");
     assert.match(unselectedTeam,
-      /Next default child: not selected \(1 available; use \/model\).*model max output per response unknown/u);
+      /Next child: not selected \(1 available; use \/model\).*max output unknown/u);
     assert.doesNotMatch(unselectedTeam, /Pi reports no usable models/u);
     assert.match(unselectedTeam, /Delegable now: none \(select a model with \/model\)/u);
     assert.doesNotMatch(unselectedTeam, /Delegable now: crafter/u);
@@ -2488,7 +2771,7 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
     } as any);
     const unhealthyRegistryTeam = notices.at(-1)!.message.replace(/\s+/gu, " ");
     assert.match(unhealthyRegistryTeam,
-      /Next default child: no active model; availability unobserved \(use \/model or \/login\).*model max output per response unknown/u);
+      /Next child: no active model; availability unobserved \(use \/model or \/login\).*max output unknown/u);
     assert.match(unhealthyRegistryTeam,
       /Delegable now: none \(model availability unobserved; use \/model or \/login\)/u);
     assert.doesNotMatch(unhealthyRegistryTeam, /Pi reports no usable models/u);
@@ -2499,7 +2782,7 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
     } as any);
     const canonicalSentinelTeam = notices.at(-1)!.message.replace(/\s+/gu, " ");
     assert.match(canonicalSentinelTeam,
-      /Next default child: unavailable \(Pi reports no usable models; use \/login\).*Delegable now: none \(model unavailable\)/u);
+      /Next child: unavailable \(Pi reports no usable models; use \/login\).*Delegable now: none \(model unavailable\)/u);
     await commands.get("team").handler("", {
       ...context,
       model: { provider: "unknown", id: "default", maxTokens: 0 },
@@ -2509,7 +2792,7 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
       },
     } as any);
     const sentinelWithAvailableModel = notices.at(-1)!.message.replace(/\s+/gu, " ");
-    assert.match(sentinelWithAvailableModel, /Next default child: not selected \(1 available; use \/model\)/u);
+    assert.match(sentinelWithAvailableModel, /Next child: not selected \(1 available; use \/model\)/u);
     assert.match(sentinelWithAvailableModel, /Delegable now: none \(select a model with \/model\)/u);
     assert.doesNotMatch(sentinelWithAvailableModel, /model unavailable|Delegable now: crafter/u);
     await commands.get("team").handler("", {
@@ -2517,7 +2800,7 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
       model: { provider: "openai", id: "gpt-valid", maxTokens: -1 },
     } as any);
     assert.match(notices.at(-1)!.message.replace(/\s+/gu, " "),
-      /Next default child: openai\/gpt-valid \(inherited\).*model max output per response unknown/u);
+      /Next child: openai\/gpt-valid \(inherited\).*max output unknown/u);
     assert.match(notices.at(-1)!.message, /Delegable now: crafter/u);
     assert.doesNotMatch(notices.at(-1)!.message, /max output per response -1 tokens/u);
     await commands.get("bench").handler("list construction", context);
@@ -2548,19 +2831,29 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
     assert.match(commands.get("join").description, /persist, and activate one personal teammate/u);
     assert.match(commands.get("retire").description, /Unregister one personal teammate/u);
     assert.match(commands.get("list-skills").description, /Search the trusted skill catalog/u);
+    assert.match(commands.get("list-skills").description, /--page N/u);
     await commands.get("team").handler("help", context);
-    assert.match(notices.at(-1)!.message,
-      /Field filters: member:\/id: · kind:\/role: · description: · capability:\/tool:\/skill:/u);
-    assert.match(notices.at(-1)!.message, /status:\/state: · model: · thinking: · task: · run:/u);
-    assert.match(notices.at(-1)!.message,
-      /Examples: \/team status:working · \/team member:reviewer · \/team model:gpt/u);
-    assert.match(notices.at(-1)!.message, /Choose one exact teammate: \/<id> <task>.*\/player <id> <task>/u);
-    assert.match(notices.at(-1)!.message, /Set a personal model with \/join JSON model:"provider\/model"; add replace:true/u);
-    assert.match(notices.at(-1)!.message, /Tokens, AI credits, and max-output are observations only when the host reports/u);
-    assert.match(notices.at(-1)!.message, /does not simulate a hard per-run token cap/u);
-    assert.match(notices.at(-1)!.message, /limits 32 concurrent roots.*6 sequential team-lead delegations/u);
-    assert.match(notices.at(-1)!.message, /Disposable work: \/contract <json> \(exactly 1 model child\)/u);
-    assert.match(notices.at(-1)!.message, /Recruit: \/scout <need> \(1 recruiter\s+model child\)/u);
+    const helpPage1 = notices.at(-1)!.message;
+    assert.match(helpPage1, /\/team roster-page:1[\s\S]*\/team activity-page:1[\s\S]*\/team history-page:1/u);
+    assert.match(helpPage1, /Exact run telemetry: \/team run:<id>/u);
+    assert.match(helpPage1, /States: ready\/idle, starting, working, cleaning, bench, stale, conflict/u);
+    await commands.get("team").handler("help page:2", context);
+    const helpPage2 = notices.at(-1)!.message;
+    assert.match(helpPage2, /Fields: member:, kind:, description:, capability:, tool:, skill:, status:, model:/u);
+    assert.match(helpPage2, /thinking:, task:, run:, owner:, pid:, heartbeat:/u);
+    assert.match(helpPage2, /Every structured field requires a value; unknown prefixes are rejected/u);
+    assert.match(helpPage2, /\/team stop <run-id\|all>[\s\S]*\/bench list page:1[\s\S]*\/retire <personal-id>/u);
+    await commands.get("team").handler("help page:3", context);
+    const helpPage3 = notices.at(-1)!.message;
+    assert.match(helpPage3, /Direct teammate: \/<id> <task> · Cost: 1 lead \+ up to 6 sequential specialist children/u);
+    assert.match(helpPage3, /^\/contract \{"name":"a","description":"Audit","prompt":"Audit","tools":\["read"\],"task":"Review"\}$/mu);
+    assert.match(helpPage3, /^\/join \{"name":"reviewer","description":"Review","prompt":"Review","tools":\["read"\]\}$/mu);
+    assert.match(helpPage3, /Observed tokens\/cost are provider facts; unreported values stay unobserved/u);
+    assert.match(helpPage3, /A new team-lead needs two free shared slots/u);
+    for (const page of [helpPage1, helpPage2, helpPage3]) {
+      assert.ok(page.split("\n").length <= 30);
+      assert.ok(page.split("\n").every((line) => visibleTextWidth(line) <= 96));
+    }
     await commands.get("bench").handler("on design", context);
     assert.equal((notices.at(-1)!.message.match(/0 model tokens/gu) ?? []).length, 1);
     assert.match(commands.get("design").description, /Solution design/u);
@@ -2635,7 +2928,7 @@ test("Pi /team and enriched /bench are searchable zero-model controls with compl
   }
 });
 
-test("Pi exposes a live safe team run, native usage, propagated signal, and always-cleared status/widget", async () => {
+test("Pi exposes a live safe team run, native usage/cost, propagated signal, and one shared status/widget", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-pi-live-status-"));
   const project = join(root, "project");
   const commands = new Map<string, any>();
@@ -2659,7 +2952,10 @@ test("Pi exposes a live safe team run, native usage, propagated signal, and alwa
       observer.sessionStarted({ model: { provider: "effective", id: "model" }, thinking: "low" });
       observer.messageEnd({
         role: "assistant", responseId: "live-1", provider: "effective", model: "model",
-        usage: { input: 10, output: 4, reasoning: 2, cacheRead: 3, cacheWrite: 1, totalTokens: 18 },
+        usage: {
+          input: 10, output: 4, reasoning: 2, cacheRead: 3, cacheWrite: 1, totalTokens: 18,
+          cost: { input: 0.00001, output: 0.00002, cacheRead: 0.000003, cacheWrite: 0.000004, total: 0.000037 },
+        },
       });
       await gate;
       observer.state("cleaning");
@@ -2678,23 +2974,360 @@ test("Pi exposes a live safe team run, native usage, propagated signal, and alwa
     const live = notices.at(-1)!;
     assert.match(live, /crafter · fixed · working/u);
     assert.match(live, /Task: “Review \[path\] without exposing it”/u);
-    assert.match(live, /effective\/model \(observed\) · thinking setting low · model turns 1 · 18 native tokens/u);
+    assert.match(live, /Usage: in 10 · out 4 · reason 2 · cache r\/w 3\/1 · total 18/u);
+    assert.match(live, /effective\/model \(observed\) · thinking setting low · model turns 1/u);
+    assert.match(live,
+      /Provider cost in \$0\.00001 · out \$0\.00002 · cache r\/w \$0\.000003\/\$0\.000004 · total \$0\.000037/u);
     assert.doesNotMatch(live, /private|customer\.txt/u);
+    await commands.get("team").handler("", { cwd: project, model: { provider: "requested", id: "alias" }, ui: { notify: (message: string) => notices.push(message) } });
+    const compact = notices.at(-1)!;
+    assert.match(compact, /crafter · working[\s\S]*\/team run:pi-run-1[\s\S]*t1\/18tok\/\$0\.000037/u);
     assert.notEqual(receivedSignal, controller.signal, "root control should compose its own stop signal with the caller signal");
     assert.equal(receivedSignal?.aborted, false);
     release();
     await invocation;
     assert.match(notices.at(-1)!, /^verified evidence\nTEAM RUN/u);
     assert.match(notices.at(-1)!, /in 10 · out 4 · reason 2 · cache r\/w 3\/1 · total 18/u);
+    assert.match(notices.at(-1)!, /cost in \$0\.00001 · out \$0\.00002 · cache r\/w \$0\.000003\/\$0\.000004 ·[\s\S]*total \$0\.000037/u);
     assert.ok(statuses.some(({ value }) => value?.includes("working")));
+    assert.ok(statuses.some(({ value }) => value?.includes("cost $0.000037")));
     assert.ok(statuses.some(({ value }) => value?.includes("cleaning")));
+    assert.deepEqual([...new Set(statuses.filter(({ value }) => value !== undefined).map(({ key }) => key))],
+      ["agent-harbor:team"], "Pi created more than one live status key");
+    assert.deepEqual([...new Set(widgets.filter(({ value }) => value !== undefined).map(({ key }) => key))],
+      ["agent-harbor:team"], "Pi created more than one live widget key");
     assert.equal(statuses.at(-1)!.value, undefined);
     assert.equal(widgets.at(-1)!.value, undefined);
+    assert.ok(widgets.some(({ value }) => value?.some((line) => line.includes("$0.000037 observed cost"))));
+    assert.ok(widgets.some(({ value }) => value?.some((line) =>
+      line.includes("Model: effective/model (observed) · thinking low"))));
     assert.doesNotMatch(JSON.stringify(widgets), /private|customer\.txt/u);
-    assert.ok(statuses.flatMap(({ value }) => value?.split("\n") ?? []).every((line) => visibleTextWidth(line) <= 96));
-    assert.ok(widgets.flatMap(({ value }) => value ?? []).every((line) => visibleTextWidth(line) <= 96));
+    assert.ok(statuses.flatMap(({ value }) => value?.split("\n") ?? []).every((line) => visibleTextWidth(line) <= 78));
+    assert.ok(widgets.flatMap(({ value }) => value ?? []).every((line) => visibleTextWidth(line) <= 78));
     assert.ok(notices.flatMap((value) => value.split("\n")).every((line) => visibleTextWidth(line) <= 96));
   } finally { PiOrchestrator.prototype.run = originalRun; }
+});
+
+test("Pi aborts before model continuation when the admitted shared claim is deleted before working", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-phase-loss-"));
+  const project = join(root, "project");
+  const activityHome = join(root, "activity-home");
+  await mkdir(project, { recursive: true });
+  const priorPiHome = process.env.PI_CODING_AGENT_DIR;
+  const priorActivityHome = process.env.AGENT_HARBOR_ACTIVITY_HOME;
+  process.env.PI_CODING_AGENT_DIR = join(root, "pi-home");
+  process.env.AGENT_HARBOR_ACTIVITY_HOME = activityHome;
+  const commands = new Map<string, any>();
+  const notices: string[] = [];
+  piExtension({
+    registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerTool: () => {},
+    getThinkingLevel: () => "minimal",
+  } as any);
+  const originalRun = PiOrchestrator.prototype.run;
+  let continuedAfterWorking = false;
+  try {
+    PiOrchestrator.prototype.run = async function (_definition: any, signal?: AbortSignal) {
+      await unlink(await sharedActivityClaimFile(activityHome, "crafter"));
+      (this as any).runObserver.sessionStarted();
+      continuedAfterWorking = !signal?.aborted;
+      signal?.throwIfAborted();
+      return "must not continue";
+    };
+    await commands.get("crafter").handler("verify pre-send ownership", {
+      cwd: project,
+      ...authenticatedPiHostState(),
+      ui: { notify: (message: string) => notices.push(message) },
+    });
+    assert.equal(continuedAfterWorking, false);
+    assert.match(notices.at(-1) ?? "", /lost crafter's exact project-shared activity ownership before working/u);
+    assert.deepEqual(readSharedAgentActivities(project), []);
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    if (priorPiHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = priorPiHome;
+    if (priorActivityHome === undefined) delete process.env.AGENT_HARBOR_ACTIVITY_HOME;
+    else process.env.AGENT_HARBOR_ACTIVITY_HOME = priorActivityHome;
+  }
+});
+
+test("Pi heartbeat aborts live work after exact shared ownership is replaced", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-heartbeat-loss-"));
+  const project = join(root, "project");
+  const activityHome = join(root, "activity-home");
+  await mkdir(project, { recursive: true });
+  const priorPiHome = process.env.PI_CODING_AGENT_DIR;
+  const priorActivityHome = process.env.AGENT_HARBOR_ACTIVITY_HOME;
+  process.env.PI_CODING_AGENT_DIR = join(root, "pi-home");
+  process.env.AGENT_HARBOR_ACTIVITY_HOME = activityHome;
+  const commands = new Map<string, any>();
+  const notices: string[] = [];
+  piExtension({
+    registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerTool: () => {},
+    getThinkingLevel: () => "minimal",
+  } as any);
+  const originalRun = PiOrchestrator.prototype.run;
+  let competitorAdmitted = false;
+  try {
+    PiOrchestrator.prototype.run = async function (_definition: any, signal?: AbortSignal) {
+      (this as any).runObserver.sessionStarted();
+      assert.equal(readSharedAgentActivities(project)[0]?.phase, "working");
+      await unlink(await sharedActivityClaimFile(activityHome, "crafter"));
+      const competitor = claimSharedAgentActivity(
+        project,
+        "crafter",
+        "direct",
+        `copilot:${process.pid}:heartbeat-competitor`,
+        "copilot",
+      );
+      competitorAdmitted = true;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("timed out waiting for Pi heartbeat ownership loss")), 5_000);
+          const aborted = (): void => { clearTimeout(timer); resolve(); };
+          if (signal?.aborted) aborted();
+          else signal?.addEventListener("abort", aborted, { once: true });
+        });
+      } finally {
+        assert.equal(competitor.release(), true);
+      }
+      signal?.throwIfAborted();
+      return "must not continue";
+    };
+    await commands.get("crafter").handler("verify heartbeat ownership", {
+      cwd: project,
+      ...authenticatedPiHostState(),
+      ui: { notify: (message: string) => notices.push(message) },
+    });
+    assert.equal(competitorAdmitted, true);
+    assert.match(notices.at(-1) ?? "", /lost crafter's exact project-shared activity ownership while its heartbeat was active/u);
+    assert.deepEqual(readSharedAgentActivities(project), []);
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    if (priorPiHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = priorPiHome;
+    if (priorActivityHome === undefined) delete process.env.AGENT_HARBOR_ACTIVITY_HOME;
+    else process.env.AGENT_HARBOR_ACTIVITY_HOME = priorActivityHome;
+  }
+});
+
+test("Pi shared stop guidance preserves the exact owner runtime and PID", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-shared-stop-owner-"));
+  const project = join(root, "project");
+  const activityHome = join(root, "activity-home");
+  await mkdir(project, { recursive: true });
+  const priorPiHome = process.env.PI_CODING_AGENT_DIR;
+  const priorActivityHome = process.env.AGENT_HARBOR_ACTIVITY_HOME;
+  process.env.PI_CODING_AGENT_DIR = join(root, "pi-home");
+  process.env.AGENT_HARBOR_ACTIVITY_HOME = activityHome;
+  const commands = new Map<string, any>();
+  const notices: string[] = [];
+  let claim: ReturnType<typeof claimSharedAgentActivity> | undefined;
+  try {
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => "minimal",
+    } as any);
+    claim = claimSharedAgentActivity(project, "crafter", "direct", "private-copilot-run", "copilot");
+    assert.equal(claim.setPhase("working"), true);
+    await commands.get("team").handler("stop shared-crafter", {
+      cwd: project,
+      ...authenticatedPiHostState(),
+      ui: { notify: (message: string) => notices.push(message) },
+    });
+    const output = notices.at(-1) ?? "";
+    assert.match(output, /Agent Harbor stop · 0 model tokens/u);
+    assert.match(output, new RegExp(`shared-crafter[\\s\\S]*owner copilot PID ${process.pid}`, "u"));
+    assert.match(output, /Action: in each listed owning process run \/team stop all/u);
+    assert.deepEqual(readSharedAgentActivities(project).map(({ agent, phase }) => ({ agent, phase })), [{
+      agent: "crafter",
+      phase: "working",
+    }]);
+  } finally {
+    claim?.release();
+    if (priorPiHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = priorPiHome;
+    if (priorActivityHome === undefined) delete process.env.AGENT_HARBOR_ACTIVITY_HOME;
+    else process.env.AGENT_HARBOR_ACTIVITY_HOME = priorActivityHome;
+  }
+});
+
+test("Pi groups crowded shared stop routing without losing owner processes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-bounded-shared-stop-"));
+  const project = join(root, "project");
+  const piHome = join(root, "pi-home");
+  const activityHome = join(root, "activity-home");
+  await mkdir(project, { recursive: true });
+  const priorPiHome = process.env.PI_CODING_AGENT_DIR;
+  const priorActivityHome = process.env.AGENT_HARBOR_ACTIVITY_HOME;
+  process.env.PI_CODING_AGENT_DIR = piHome;
+  process.env.AGENT_HARBOR_ACTIVITY_HOME = activityHome;
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  const claims: Array<ReturnType<typeof claimSharedAgentActivity> | undefined> = [];
+  let legacyPath: string | undefined;
+  const bounded = (output: string): void => {
+    assert.ok(output.split("\n").length <= 30, `Pi /team output exceeded 30 lines:\n${output}`);
+    assert.ok(output.split("\n").every((line) => visibleTextWidth(line) <= 96),
+      `Pi /team output exceeded 96 columns:\n${output}`);
+  };
+  try {
+    new Roster(harnessSpec("pi", piHome, project));
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => "minimal",
+    } as any);
+    for (let index = 0; index < 32; index += 1) {
+      const agent = `remote-owner-${index.toString().padStart(2, "0")}`;
+      const claim = claimSharedAgentActivity(
+        project,
+        agent,
+        "direct",
+        `private-session-${index.toString().padStart(2, "0")}`,
+        index % 2 ? "copilot" : "pi",
+      );
+      assert.equal(claim.setPhase("working"), true);
+      claims.push(claim);
+      const routePath = await sharedActivityClaimFile(activityHome, agent);
+      const routed = JSON.parse(await readFile(routePath, "utf8")) as Record<string, unknown>;
+      routed.processID = 10_000 + index;
+      await writeFile(routePath, JSON.stringify(routed), { encoding: "utf8", mode: 0o600 });
+    }
+    legacyPath = await sharedActivityClaimFile(activityHome, "remote-owner-00");
+    const legacy = JSON.parse(await readFile(legacyPath, "utf8")) as Record<string, unknown>;
+    claims[0] = undefined;
+    legacy.version = 1;
+    delete legacy.ownerRuntime;
+    await writeFile(legacyPath, JSON.stringify(legacy), { encoding: "utf8", mode: 0o600 });
+
+    const context = {
+      cwd: project,
+      ...authenticatedPiHostState(),
+      ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+    } as any;
+    await commands.get("team").handler("stop all", context);
+    const stop = notices.at(-1)!.message;
+    bounded(stop);
+    assert.match(stop, /Stop authority is in another process for 32 project-shared persistent run\(s\) across 32 owner\s+process route\(s\)/u);
+    assert.match(stop,
+      /owner runtime unverified \(legacy claim\) · PID 10000 ×1/u);
+    assert.match(stop, /owner copilot PID 10001 ×1/u);
+    assert.match(stop, /owner pi PID 10002 ×1/u);
+    assert.match(stop, /owner copilot PID 10031 ×1/u,
+      "the last distinct owner process route was omitted from the bounded output");
+    const routedRuns = [...stop.matchAll(/×(\d+)/gu)]
+      .reduce((total, match) => total + Number(match[1]), 0);
+    assert.equal(routedRuns, 32, "grouped owner routes did not account for every external run");
+    assert.doesNotMatch(stop, /owner routes? omitted/u,
+      "stop all still discarded owner processes after grouping claims by route");
+    assert.match(stop, /Filter external work with \/team owner:<runtime> or \/team pid:<pid>/u);
+    assert.match(stop, /Action: in each listed owning process run \/team stop all/u);
+    for (const claim of claims) {
+      if (!claim) continue;
+      assert.doesNotMatch(stop, new RegExp(claim.snapshot.claimToken, "u"));
+      assert.doesNotMatch(stop, new RegExp(claim.snapshot.sessionID, "u"));
+    }
+
+    for (const filter of ["owner:copilot", "owner:pi", "pid:10031"]) {
+      await commands.get("team").handler(filter, context);
+      const filtered = notices.at(-1)!.message;
+      bounded(filtered);
+      assert.match(filtered, /shared-remote-owner-/u, `${filter} did not recover an external owner`);
+    }
+
+    const ownerCompletions = await commands.get("team").getArgumentCompletions("owner:");
+    assert.ok(ownerCompletions.some(({ value }: { value: string }) => value === "owner:copilot"));
+    assert.ok(ownerCompletions.some(({ value }: { value: string }) => value === "owner:pi"));
+    const pidCompletions = await commands.get("team").getArgumentCompletions("pid:");
+    assert.ok(pidCompletions.some(({ value }: { value: string }) => value === "pid:10031"));
+
+    for (const selector of ["x".repeat(257), "é".repeat(129), "x".repeat(5_000)]) {
+      await commands.get("team").handler(`stop ${selector}`, context);
+      const error = notices.at(-1)!;
+      assert.equal(error.level, "error");
+      assert.match(error.message, /\/team stop selector exceeds 256 bytes/u);
+      bounded(error.message);
+    }
+    await commands.get("team").handler(`stop ${"z".repeat(256)}`, context);
+    assert.equal(notices.at(-1)!.level, "error");
+    assert.match(notices.at(-1)!.message, /no active Harbor root matches/u);
+    bounded(notices.at(-1)!.message);
+  } finally {
+    for (const claim of claims) claim?.release();
+    if (legacyPath) await unlink(legacyPath).catch(() => {});
+    if (priorPiHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = priorPiHome;
+    if (priorActivityHome === undefined) delete process.env.AGENT_HARBOR_ACTIVITY_HOME;
+    else process.env.AGENT_HARBOR_ACTIVITY_HOME = priorActivityHome;
+  }
+});
+
+test("Pi keeps discovery warnings and hostile /team failures inside one 30x96 viewport", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-bounded-team-errors-"));
+  const healthyHome = join(root, "healthy-home");
+  const project = join(root, "project");
+  const priorPiHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = healthyHome;
+  const commands = new Map<string, any>();
+  const notices: Array<{ message: string; level?: string }> = [];
+  const bounded = (output: string): void => {
+    assert.ok(output.split("\n").length <= 30, `Pi /team output exceeded 30 lines:\n${output}`);
+    assert.ok(output.split("\n").every((line) => visibleTextWidth(line) <= 96),
+      `Pi /team output exceeded 96 columns:\n${output}`);
+  };
+  try {
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => "minimal",
+    } as any);
+    new Roster(harnessSpec("pi", healthyHome, project));
+    const context = {
+      cwd: project,
+      ...authenticatedPiHostState(),
+      ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+    } as any;
+
+    const activeDirectory = join(project, ".pi", "agents");
+    await mkdir(activeDirectory, { recursive: true });
+    const junk = Array.from({ length: 201 }, (_, index) =>
+      join(activeDirectory, `junk-${index.toString().padStart(3, "0")}.md`));
+    await Promise.all(junk.map((path) => writeFile(path, "unmanaged", "utf8")));
+    await commands.get("join").handler(JSON.stringify({
+      name: "warning-reviewer",
+      description: "Preserve a bounded warning",
+      prompt: "Review only",
+      tools: ["read"],
+    }), context);
+    assert.match(notices.at(-1)!.message,
+      /Pi command metadata refresh failed after the roster change was committed/u);
+    await Promise.all(junk.map((path) => unlink(path)));
+
+    await commands.get("team").handler("", context);
+    assert.match(notices.at(-1)!.message,
+      /Warning: Pi command metadata refresh failed after the roster change was committed/u);
+    bounded(notices.at(-1)!.message);
+    await commands.get("team").handler("help", context);
+    assert.match(notices.at(-1)!.message,
+      /Warning: Pi command metadata refresh failed after the roster change was committed/u);
+    bounded(notices.at(-1)!.message);
+
+    const hostile = { ...context };
+    Object.defineProperty(hostile, "model", {
+      get: () => { throw new Error(`C:\\private\\customer\\secret.txt\n${"界".repeat(2_000)}`); },
+    });
+    await commands.get("team").handler("member:crafter", hostile);
+    const failure = notices.at(-1)!;
+    assert.equal(failure.level, "error");
+    assert.doesNotMatch(failure.message, /private|customer|secret\.txt/u);
+    bounded(failure.message);
+  } finally {
+    if (priorPiHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = priorPiHome;
+  }
 });
 
 test("Pi Alt+H cancels an idle slash child without a caller signal and clears live UI", async () => {
@@ -2739,7 +3372,7 @@ test("Pi Alt+H cancels an idle slash child without a caller signal and clears li
     assert.equal(childSignal?.aborted, true);
     assert.match(notices[0].message, /^Agent Harbor stop · 0 model tokens/u);
     assert.equal(notices[0].level, "warning");
-    assert.match(notices.at(-1)!.message, /Cancelled.*TEAM RUN .*crafter · run pi-run-1 · fixed · cancelled/su);
+    assert.match(notices.at(-1)!.message, /Cancelled.*TEAM RUN .*crafter · cancelled .*\/team run:pi-run-1/su);
     assert.equal(notices.at(-1)!.level, "warning");
     assert.equal(statuses.at(-1), undefined);
     assert.equal(widgets.at(-1), undefined);
@@ -2801,13 +3434,13 @@ test("Pi stop keeps abort-ignoring work cleaning until real settlement and block
     await awaitBounded(first);
     assert.equal(ignoredSignal?.aborted, true);
     assert.match(notices.at(-1)!.message,
-      /Cancellation requested; provider cleanup is still settling[\s\S]*crafter · run pi-run-1 · fixed · cleaning/u);
+      /Cancellation requested; provider cleanup is still settling[\s\S]*crafter · cleaning .*\/team run:pi-run-1/u);
     assert.ok(statuses.some((value) => value?.includes("cleaning")), "stop never exposed the bounded cleanup transition");
-    assert.equal(statuses.at(-1), undefined);
-    assert.equal(widgets.at(-1), undefined);
+    assert.match(statuses.at(-1)!, /crafter cleaning/u);
+    assert.ok(widgets.at(-1)?.some((line) => line.includes("crafter · cleaning") && line.includes("/team run:pi-run-1")));
     await commands.get("team").handler("", context);
     assert.match(notices.at(-1)!.message,
-      /1 active[\s\S]*crafter · pi-run-1 · cleaning[\s\S]*crafter · fixed · cleaning/u);
+      /1 active[\s\S]*crafter · cleaning[\s\S]*\/team run:pi-run-1[\s\S]*crafter · fixed · cleaning/u);
 
     await commands.get("crafter").handler("capacity must stay blocked", context);
     assert.equal(starts, 1, "cleaning abort-ignoring work released specialist capacity early");
@@ -2816,10 +3449,16 @@ test("Pi stop keeps abort-ignoring work cleaning until real settlement and block
     assert.match(notices.at(-1)!.message, /Already stopping 1 root run\(s\): pi-run-1.*waiting for provider cleanup/isu);
 
     releases[0]();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    assert.equal(statuses.at(-1), undefined);
+    assert.equal(widgets.at(-1), undefined);
+    const firstLateSettlements = notices.filter(({ message }) =>
+      /Provider cleanup settled · pi-run-1 is cancelled/u.test(message));
+    assert.equal(firstLateSettlements.length, 1, "late provider settlement was not reported exactly once");
+    assert.equal(firstLateSettlements[0].level, "warning");
     await commands.get("team").handler("", context);
     assert.match(notices.at(-1)!.message,
-      /0 active[\s\S]*LAST MISSION[\s\S]*crafter · pi-run-1 · cancelled/u);
+      /0 active[\s\S]*LAST MISSION[\s\S]*crafter · cancelled[\s\S]*\/team run:pi-run-1/u);
 
     const second = commands.get("crafter").handler("capacity is reusable after settlement", context);
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -3006,13 +3645,15 @@ test("Pi extension invokes every fixed and activated agent and equips the team l
     notices.map((notice) => notice.split("\n", 1)[0]),
     ["completed:reviewer", ...[...rolePlayers.keys(), ...bundledPlayers.keys()].map((name) => `completed:${name}`)],
   );
-  assert.ok(notices.every((notice) => notice.includes("TEAM RUN (native Pi telemetry)")));
+  assert.ok(notices.every((notice) => notice.includes("TEAM RUN · native Pi telemetry · bounded summary")));
 });
 
 test("Pi team lead delegates sequentially to different enabled agents with bounds and preflight", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-pi-delegate-"));
   const project = join(root, "project");
   const roster = new Roster(harnessSpec("pi", join(root, "home"), project));
+  const previousActivityHome = process.env.AGENT_HARBOR_ACTIVITY_HOME;
+  process.env.AGENT_HARBOR_ACTIVITY_HOME = join(root, "activity-home");
   await roster.bench("on all", bundledPlayers);
   const previous = process.cwd(); const commands = new Map<string, any>();
   const hostModel = { provider: "openai-codex", id: "gpt-5.3-codex-spark" };
@@ -3032,6 +3673,8 @@ test("Pi team lead delegates sequentially to different enabled agents with bound
   try {
     PiOrchestrator.prototype.run = async function (definition: any) {
       calls.push(definition);
+      assert.ok(readSharedAgentActivities(project).some(({ agent }) => agent === definition.name),
+        `${definition.name} did not own a project-shared claim before its Pi model child ran`);
       const sdk = await (this as any).loadSdk();
       runtimes.push({ sessionOptions: { ...(this as any).sessionOptions }, hostMarker: sdk.HARBOR_PI_SDK_HOST_TEST_MARKER });
       if (definition.name === "team-lead") {
@@ -3115,9 +3758,14 @@ test("Pi team lead delegates sequentially to different enabled agents with bound
     assert.ok(runtimes.every((runtime) => runtime.hostMarker === "host-sdk-static-import"));
     assert.ok(runtimes.every((runtime) => runtime.sessionOptions.model === hostModel));
     assert.ok(runtimes.every((runtime) => runtime.sessionOptions.thinkingLevel === "minimal"));
-  } finally { PiOrchestrator.prototype.run = originalRun; }
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    assert.deepEqual(readSharedAgentActivities(project), [], "Pi persistent claims survived terminal settlement");
+    if (previousActivityHome === undefined) delete process.env.AGENT_HARBOR_ACTIVITY_HOME;
+    else process.env.AGENT_HARBOR_ACTIVITY_HOME = previousActivityHome;
+  }
   assert.deepEqual(notices.map((notice) => notice.split("\n", 1)[0]), ["evidence:team-lead", "evidence:team-lead"]);
-  assert.ok(notices.every((notice) => notice.includes("Mission total")));
+  assert.ok(notices.every((notice) => notice.includes("Mission usage:")));
 });
 
 test("Pi team lead resolves each specialist's configured model with auth before consuming delegation", async () => {
@@ -3213,7 +3861,7 @@ test("Pi team lead resolves each specialist's configured model with auth before 
     await commands.get("team").handler("member:model-worker", {
       cwd: project, ui: { notify: (message: string) => notices.push(message) },
     });
-    assert.match(notices.at(-1)!, /LAST MISSION · MATCHING MEMBERS/u);
+    assert.match(notices.at(-1)!, /RETAINED HISTORY · MATCHING MEMBERS/u);
     assert.match(notices.at(-1)!, /model-worker · run pi-run-2[\s\S]*router\/special \(configured\)/u);
   } finally {
     PiOrchestrator.prototype.run = originalRun;
@@ -3247,14 +3895,15 @@ test("Pi team lead rejects more than 32 enabled specialists before creating a gh
     assert.match(notices.at(-1)!.message, /Preflight stopped · no model was called · 0 model tokens/u);
     assert.doesNotMatch(notices.at(-1)!.message, /TEAM RUN/u);
     await commands.get("team").handler("", context);
-    assert.match(notices.at(-1)!.message, /Lead capacity exceeded: 57\/32/u);
+    assert.match(notices.at(-1)!.message, /Enabled specialist roster limit exceeded: 57\/32/u);
     assert.match(notices.at(-1)!.message, /Reduce enabled roster:/u);
-    assert.match(notices.at(-1)!.message, /No one is working right now/u);
+    assert.match(notices.at(-1)!.message,
+      /No active persistent work; disposable contractors are visible only in their owning Pi process/u);
     const teamCompletions = await commands.get("team").getArgumentCompletions("");
     assert.equal(teamCompletions.length, 50, "Pi team completions exceeded or missed their fixed cap");
     const statusCompletions = await commands.get("team").getArgumentCompletions("status:");
     assert.deepEqual(statusCompletions.map(({ value }: { value: string }) => value),
-      ["status:bench", "status:ready", "status:working"]);
+      ["status:bench", "status:idle", "status:ready", "status:working"]);
     const kindCompletions = await commands.get("team").getArgumentCompletions("kind:p");
     assert.equal(kindCompletions[0]?.value, "kind:personal");
     assert.equal((await commands.get("team").getArgumentCompletions("model:"))[0]?.value, "model:");
@@ -3264,6 +3913,109 @@ test("Pi team lead rejects more than 32 enabled specialists before creating a gh
   } finally {
     if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousHome;
+  }
+});
+
+test("Pi blocks a new team-lead at 31 shared claims before model work and reports the headroom", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-lead-shared-headroom-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const activityHome = join(root, "activity-home");
+  const previousPiHome = process.env.PI_CODING_AGENT_DIR;
+  const previousActivityHome = process.env.AGENT_HARBOR_ACTIVITY_HOME;
+  process.env.PI_CODING_AGENT_DIR = home;
+  process.env.AGENT_HARBOR_ACTIVITY_HOME = activityHome;
+  const claims: ReturnType<typeof claimSharedAgentActivity>[] = [];
+  const originalRun = PiOrchestrator.prototype.run;
+  let modelCalls = 0;
+  try {
+    new Roster(harnessSpec("pi", home, project));
+    for (let index = 0; index < 31; index += 1) {
+      claims.push(claimSharedAgentActivity(
+        project, `busy-${String(index).padStart(2, "0")}`, "direct", `copilot-${index}`, "copilot",
+      ));
+    }
+    const commands = new Map<string, any>();
+    const notices: Array<{ message: string; level?: string }> = [];
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => "low",
+    } as any);
+    PiOrchestrator.prototype.run = async function () { modelCalls += 1; return "unexpected"; };
+    const context = {
+      cwd: project, ...authenticatedPiHostState(),
+      ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+    } as any;
+    await commands.get("team-lead").handler("coordinate", context);
+    assert.equal(modelCalls, 0);
+    assert.match(notices.at(-1)!.message, /team-lead needs two project-shared slots.*31\/32/u);
+    assert.match(notices.at(-1)!.message, /0 model tokens/u);
+    await commands.get("team").handler("", context);
+    assert.match(notices.at(-1)!.message, /Delegable now: none \(team-lead start needs two project-shared slots; capacity is 31\/32\)/u);
+    assert.doesNotMatch(notices.at(-1)!.message, /Delegable now: crafter/u);
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    for (const claim of claims.reverse()) assert.equal(claim.release(), true);
+    if (previousPiHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousPiHome;
+    if (previousActivityHome === undefined) delete process.env.AGENT_HARBOR_ACTIVITY_HOME;
+    else process.env.AGENT_HARBOR_ACTIVITY_HOME = previousActivityHome;
+  }
+});
+
+test("Pi validates the exact 16 KiB model-facing roster snapshot before starting lead or scout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-pi-roster-bytes-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const activityHome = join(root, "activity-home");
+  const previousPiHome = process.env.PI_CODING_AGENT_DIR;
+  const previousActivityHome = process.env.AGENT_HARBOR_ACTIVITY_HOME;
+  process.env.PI_CODING_AGENT_DIR = home;
+  process.env.AGENT_HARBOR_ACTIVITY_HOME = activityHome;
+  const originalRun = PiOrchestrator.prototype.run;
+  let modelCalls = 0;
+  try {
+    const roster = new Roster(harnessSpec("pi", home, project));
+    for (let index = 0; index < 31; index += 1) {
+      await roster.join({
+        name: `verbose-${String(index).padStart(2, "0")}`,
+        description: `Role ${index} ${"🙂".repeat(220)}`,
+        prompt: "Work only on the assigned task.",
+        tools: ["read", "search", "edit", "execute"],
+        skills: Array.from({ length: 3 }, (_, skillIndex) => ({
+          kind: "repo" as const,
+          name: `skill-${String(skillIndex).padStart(2, "0")}-${"s".repeat(36)}`,
+          path: `skills/skill-${String(skillIndex).padStart(2, "0")}/SKILL.md`,
+        })),
+        model: `router/${"m".repeat(110 - String(index).length)}${index}`,
+      });
+    }
+    const commands = new Map<string, any>();
+    const notices: Array<{ message: string; level?: string }> = [];
+    piExtension({
+      registerCommand: (name: string, options: any) => commands.set(name, options),
+      registerTool: () => {},
+      getThinkingLevel: () => "low",
+    } as any);
+    PiOrchestrator.prototype.run = async function () { modelCalls += 1; return "unexpected"; };
+    const context = {
+      cwd: project, ...authenticatedPiHostState(),
+      ui: { notify: (message: string, level?: string) => notices.push({ message, level }) },
+    } as any;
+    for (const command of ["team-lead", "scout"]) {
+      await commands.get(command).handler("inspect roster", context);
+      assert.match(notices.at(-1)!.message, /Complete roster unavailable within the 16384-byte model-facing limit/u);
+      assert.match(notices.at(-1)!.message, /0 model tokens/u);
+    }
+    assert.equal(modelCalls, 0);
+    assert.deepEqual(readSharedAgentActivities(project), []);
+  } finally {
+    PiOrchestrator.prototype.run = originalRun;
+    if (previousPiHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousPiHome;
+    if (previousActivityHome === undefined) delete process.env.AGENT_HARBOR_ACTIVITY_HOME;
+    else process.env.AGENT_HARBOR_ACTIVITY_HOME = previousActivityHome;
   }
 });
 
@@ -3292,7 +4044,8 @@ test("Pi team-lead preparation failure creates no ghost root", async () => {
     assert.doesNotMatch(notices.at(-1)!.message, /TEAM RUN/u);
     assert.equal(modelCalls, 0);
     await commands.get("team").handler("", context);
-    assert.match(notices.at(-1)!.message, /No one is working right now/u);
+    assert.match(notices.at(-1)!.message,
+      /No active persistent work; disposable contractors are visible only in their owning Pi process/u);
   } finally { PiOrchestrator.prototype.run = originalRun; }
 });
 
@@ -3301,6 +4054,8 @@ test("Pi blocks direct double-booking, caps concurrent roots at 32, and stops ac
   const project = join(root, "project");
   const commands = new Map<string, any>();
   const notices: Array<{ message: string; level?: string }> = [];
+  const liveStatuses: Array<{ key: string; value?: string }> = [];
+  const liveWidgets: Array<{ key: string; value?: string[] }> = [];
   piExtension({
     registerCommand: (name: string, options: any) => commands.set(name, options),
     registerTool: () => {},
@@ -3319,7 +4074,8 @@ test("Pi blocks direct double-booking, caps concurrent roots at 32, and stops ac
       cwd: project, ...authenticatedPiHostState(), signal: undefined,
       ui: {
         notify: (message: string, level?: string) => notices.push({ message, level }),
-        setStatus: () => {}, setWidget: () => {},
+        setStatus: (key: string, value?: string) => liveStatuses.push({ key, value }),
+        setWidget: (key: string, value?: string[]) => liveWidgets.push({ key, value }),
       },
     } as any;
     const firstCrafter = commands.get("crafter").handler("first direct run", context);
@@ -3330,7 +4086,7 @@ test("Pi blocks direct double-booking, caps concurrent roots at 32, and stops ac
     await commands.get("team").handler("", context);
     const live = notices.at(-1)!.message;
     assert.match(live, /Team: .*1 active \(1 working\)/u);
-    assert.match(live, /crafter · pi-run-1 · working/u);
+    assert.match(live, /crafter · working[\s\S]*\/team run:pi-run-1/u);
     await commands.get("team").handler("stop all", context);
     await firstCrafter;
 
@@ -3346,8 +4102,16 @@ test("Pi blocks direct double-booking, caps concurrent roots at 32, and stops ac
     await new Promise<void>((resolve) => setImmediate(resolve));
     await commands.get("team").handler("", context);
     assert.match(notices.at(-1)!.message, /Team: .*32 active \(32 working\)/u);
-    assert.equal((notices.at(-1)!.message.match(/^● contractor-\d+ · pi-run-/gmu) ?? []).length, 4);
-    assert.match(notices.at(-1)!.message, /\+28 active runs omitted; narrow with \/team run:<id>/u);
+    assert.equal((notices.at(-1)!.message.match(/^● contractor-\d+ · working/gmu) ?? []).length, 4);
+    assert.match(notices.at(-1)!.message, /\+28 active runs omitted; enumerate with \/team activity-page:1/u);
+    assert.deepEqual([...new Set(liveStatuses.filter(({ value }) => value !== undefined).map(({ key }) => key))],
+      ["agent-harbor:team"]);
+    assert.deepEqual([...new Set(liveWidgets.filter(({ value }) => value !== undefined).map(({ key }) => key))],
+      ["agent-harbor:team"]);
+    const latestProjectWidget = liveWidgets.findLast(({ value }) => value !== undefined)!.value!;
+    assert.ok(latestProjectWidget.length <= 9);
+    assert.match(latestProjectWidget.join("\n"), /contractor-31 · working[\s\S]*\/team run:pi-run-33/u);
+    assert.match(latestProjectWidget.at(-1)!, /Alt\+H/u);
     await commands.get("team").handler("run:pi-run-33", context);
     assert.match(notices.at(-1)!.message,
       /contractor-31 · run pi-run-33[\s\S]*Task: “Concurrent contract 31”/u);
@@ -3376,7 +4140,8 @@ test("Pi blocks direct double-booking, caps concurrent roots at 32, and stops ac
     assert.match(notices.at(-1)!.message, /0 active/u);
     await commands.get("team").handler("stop all", context);
     assert.equal(notices.at(-1)!.level, "info");
-    assert.match(notices.at(-1)!.message, /No Agent Harbor work is active in this project/u);
+    assert.match(notices.at(-1)!.message,
+      /No project-shared persistent-player work is visible; disposable contractor work is\s+process-local/u);
     await commands.get("team").handler("stop pi-run-999999", context);
     assert.equal(notices.at(-1)!.level, "error");
     assert.match(notices.at(-1)!.message, /no active Harbor root matches pi-run-999999/u);

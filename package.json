@@ -1,6 +1,6 @@
 {
   "name": "@gvillarroel/agent-harbor",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "Agent Harbor plugins for GitHub Copilot CLI, OpenCode, and Pi",
   "type": "module",
   "main": "./dist/adapters/opencode.js",
@@ -20,7 +20,16 @@
     "plugins/",
     "scripts/asciinema-demo.mjs",
     "scripts/asciinema-copilot-tui.py",
-    "scripts/asciinema-replay.mjs"
+    "scripts/asciinema-copilot-tui-win.py",
+    "scripts/asciinema_capture_common.py",
+    "scripts/publish-asciinema-assets.py",
+    "scripts/run-capture-tests.mjs",
+    "scripts/verify-packaged-capture.mjs",
+    "scripts/copilot-extension-permission-gate.mjs",
+    "scripts/asciinema-replay.mjs",
+    "tests/test_asciinema_capture_common.py",
+    "tests/test_asciinema_copilot_tui_posix.py",
+    "tests/test_asciinema_copilot_tui_win.py"
   ],
   "engines": {
     "node": ">=22.19.0",
@@ -29,6 +38,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node scripts/run-tests.mjs",
+    "test:capture": "node scripts/run-capture-tests.mjs",
+    "test:capture:package": "node scripts/verify-packaged-capture.mjs",
     "typecheck": "tsc --noEmit",
     "test:ts": "node scripts/run-test-suite.mjs",
     "test:live:lead": "node scripts/run-live-lead.mjs",
@@ -62,7 +73,7 @@
     "@opencode-ai/plugin": "1.18.3"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.10"
+    "@earendil-works/pi-coding-agent": "0.80.10 || 0.81.1"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {

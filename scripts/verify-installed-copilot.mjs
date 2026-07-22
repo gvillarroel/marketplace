@@ -6,10 +6,14 @@
  * flag; it creates and then deletes one Copilot session.
  */
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { lstat, readFile, readdir, readlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createAgentHarborExtensionPermissionGate } from "./copilot-extension-permission-gate.mjs";
+
+export { createAgentHarborExtensionPermissionGate };
 
 const projectRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 export const DEFAULT_REFERENCE_ROOT = join(projectRoot, "plugins", "agent-foundry");
@@ -19,7 +23,6 @@ const remediation = [
   "copilot plugin uninstall agent-foundry@agent-harbor",
   "copilot plugin install agent-foundry@agent-harbor",
 ];
-
 const usage = `Usage: node scripts/verify-installed-copilot.mjs [options]
 
 Options:
@@ -255,6 +258,20 @@ function samePath(left, right) {
   return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
+function copilotExecutable() {
+  const explicit = process.env.AGENT_HARBOR_COPILOT_CLI?.trim();
+  if (explicit) return explicit;
+  const locator = process.platform === "win32" ? ["where.exe", ["copilot.exe"]] : ["which", ["copilot"]];
+  try {
+    const located = execFileSync(locator[0], locator[1], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim().split(/\r?\n/u).find(Boolean);
+    if (located) return located;
+  } catch { /* Use the actionable error below. */ }
+  throw new Error("GitHub Copilot CLI was not found; install it or set AGENT_HARBOR_COPILOT_CLI");
+}
+
 async function withTimeout(promise, timeoutMs, label) {
   let timer;
   try {
@@ -289,24 +306,51 @@ export async function runModelFreeSmoke({ referenceRoot, installedRoot, copilotH
     throw new Error(`--smoke must target the plugin discovered by Copilot: ${discovered}`);
   }
 
-  const { CopilotClient } = await import("@github/copilot-sdk");
+  const { CopilotClient, RuntimeConnection } = await import("@github/copilot-sdk");
+  const executable = copilotExecutable();
+  const cliVersion = execFileSync(executable, ["--version"], { encoding: "utf8" })
+    .trim().split(/\r?\n/u)[0];
   const client = new CopilotClient({
+    connection: RuntimeConnection.forStdio({
+      path: executable,
+      args: [
+        "--experimental",
+        "--no-auto-update",
+        "--no-color",
+        "--no-remote",
+        "--disable-builtin-mcps",
+      ],
+    }),
     workingDirectory,
     logLevel: "error",
-    env: { ...process.env, COPILOT_HOME: copilotHome, NO_COLOR: "1" },
+    env: {
+      ...process.env,
+      CI: "1",
+      COPILOT_HOME: copilotHome,
+      NO_COLOR: "1",
+      OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "false",
+    },
   });
   let session;
   let primaryError;
+  const permissionGate = createAgentHarborExtensionPermissionGate("model-free smoke");
   try {
     await withTimeout(client.start(), 30_000, "Copilot SDK start");
     session = await withTimeout(client.createSession({
       workingDirectory,
       enableConfigDiscovery: true,
       requestExtensions: true,
-      onPermissionRequest: () => ({ kind: "denied-no-approval-rule-and-could-not-request-from-user" }),
+      // The exact plugin tree was verified before this throwaway session. The
+      // extension needs one valid host approval to resume and register its
+      // deterministic commands; the smoke never sends a model prompt.
+      onPermissionRequest: permissionGate.handler,
       enableSessionTelemetry: false,
       infiniteSessions: { enabled: false },
       skipCustomInstructions: true,
+      customAgentsLocalOnly: true,
+      coauthorEnabled: false,
+      streaming: false,
+      includeSubAgentStreamingEvents: false,
     }), 30_000, "Copilot session creation");
 
     const modelEvents = [];
@@ -339,7 +383,8 @@ export async function runModelFreeSmoke({ referenceRoot, installedRoot, copilotH
     const after = await session.rpc.usage.getMetrics();
     if (stableJson(before) !== stableJson(after)) throw new Error(`/${clientCommand.name} changed Copilot usage metrics`);
     if (modelEvents.length) throw new Error(`/${clientCommand.name} emitted model events: ${modelEvents.join(", ")}`);
-    return { command: clientCommand.name, agents: expectedAgents.length };
+    permissionGate.assertSatisfied();
+    return { command: clientCommand.name, agents: expectedAgents.length, cliVersion };
   } catch (error) {
     primaryError = error;
     throw error;
@@ -353,6 +398,10 @@ export async function runModelFreeSmoke({ referenceRoot, installedRoot, copilotH
     catch (error) {
       cleanupErrors.push(error);
       try { await client.forceStop(); } catch (forceError) { cleanupErrors.push(forceError); }
+    }
+    if (!primaryError) {
+      try { permissionGate.assertSatisfied(); }
+      catch (error) { cleanupErrors.push(error); }
     }
     if (!primaryError && cleanupErrors.length) throw new AggregateError(cleanupErrors, "Copilot smoke cleanup failed");
   }
@@ -408,7 +457,7 @@ export async function main(argv = process.argv.slice(2), io = console) {
   }
   try {
     const smoke = await runModelFreeSmoke({ ...options, installedRoot: report.installedRoot });
-    io.log(`Smoke: /${smoke.command} completed with unchanged usage, no model events, and ${smoke.agents} canonical agents visible.`);
+    io.log(`Smoke: ${smoke.cliVersion}; /${smoke.command} completed with unchanged usage, no model events, and ${smoke.agents} canonical agents visible.`);
     return 0;
   } catch (error) {
     io.error(`Model-free Copilot smoke failed: ${error.message}`);

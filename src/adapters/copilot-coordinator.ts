@@ -18,6 +18,7 @@ import {
 import { harnessProfileLayout } from "../core/harnesses.js";
 import { isHarborId } from "../core/identity.js";
 import { publicErrorText, publicMetadataText } from "../core/public-metadata.js";
+import { samePhysicalPath } from "../core/project-identity.js";
 import { copilotTaskLabel } from "./copilot-team-runtime.js";
 
 /** Minimal host identity needed to resolve a logical Harbor player. */
@@ -191,7 +192,7 @@ export type CopilotCoordinatorLifecycleHook = (
   event: CopilotCoordinatorLifecycleEvent,
 ) => void | Promise<void>;
 
-/** Synchronous child admission check; throwing denies the native `task` before model work starts. */
+/** Synchronous root/child admission check; throwing rejects the host hook before model work starts. */
 export type CopilotCoordinatorAdmissionHook = (input: {
   type: "root" | "child";
   project: string;
@@ -331,8 +332,8 @@ export function copilotFixedAgentPath(id: string): string {
 }
 
 function samePath(left: string, right: string): boolean {
-  const normalize = (value: string) => process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value);
-  return normalize(left) === normalize(right);
+  try { return samePhysicalPath(left, right); }
+  catch { return false; }
 }
 
 /**
@@ -911,6 +912,8 @@ export function createCopilotCoordinatorGuard(
   };
   const counts = new Map<string, number>();
   const inFlight = new Set<string>();
+  /** Logical targets consumed after admission and retained through success/failure for this prompt. */
+  const delegatedAgents = new Map<string, Set<string>>();
   const maximumUnclaimedTaskCalls = 6;
   /** Keyed fixed-size identities only; raw host IDs can be attacker-sized. */
   const taskToolCallHash = (value: unknown): string | undefined =>
@@ -1428,6 +1431,16 @@ export function createCopilotCoordinatorGuard(
       observedModelConfirmed: false,
       observedReasoningConfirmed: false,
     };
+    admissionHook?.({
+      type: "root",
+      project,
+      rootRunId: runId,
+      runId,
+      agent: player.agent,
+      runtimeAgent: player.runtimeAgent,
+      taskLabel,
+      ...(player.agent === "talent-scout" ? { memberKind: "utility" as const } : {}),
+    });
     activeRoots.set(sessionId, root);
     startLifecycle(root, basis, { timestamp: new Date(root.startedAt).toISOString() }, player.model ?? selectedModel);
     setLifecycleState(root, "working", basis);
@@ -2247,6 +2260,7 @@ export function createCopilotCoordinatorGuard(
       pending.delete(sessionId);
       inFlight.delete(sessionId);
       counts.delete(sessionId);
+      delegatedAgents.delete(sessionId);
     }
     unclaimedTaskCalls.length = 0;
     if (root) {
@@ -2363,6 +2377,10 @@ export function createCopilotCoordinatorGuard(
         blockNextPromptForUnscopedContractEvent;
       const epoch = ++promptEpochSequence;
       rememberPromptEpoch(invocation.sessionId, epoch);
+      // A submitted user prompt is the sole reset boundary. Completion or
+      // failure of a child deliberately does not make that target reusable.
+      delegatedAgents.set(invocation.sessionId, new Set());
+      counts.delete(invocation.sessionId);
       promptContexts.set(invocation.sessionId, {
         project: input.workingDirectory,
         submittedAt: Date.now(),
@@ -2396,7 +2414,6 @@ export function createCopilotCoordinatorGuard(
         }
         const previousChild = pending.get(invocation.sessionId);
         if (previousChild) finishLifecycle(previousChild.lifecycle, "cancelled", "inferred");
-        counts.delete(invocation.sessionId);
         inFlight.delete(invocation.sessionId);
         pending.delete(invocation.sessionId);
         unclaimedTaskCalls.length = 0;
@@ -2649,6 +2666,10 @@ export function createCopilotCoordinatorGuard(
 
           const fixed = [...copilotFixedAgentIds].find(([, exact]) => exact === agentType);
           const logicalId = fixed?.[0] ?? agentType;
+          const promptDelegations = delegatedAgents.get(invocation.sessionId) ?? new Set<string>();
+          if (promptDelegations.has(logicalId)) {
+            return deny(`Agent Harbor already delegated to ${logicalId} in this user prompt`);
+          }
           let target: CopilotAgentIdentity;
           try { target = resolveCopilotPlayer(logicalId, snapshot.agents, input.workingDirectory); }
           catch (error) { return deny(publicCoordinatorError(error)); }
@@ -2698,6 +2719,10 @@ export function createCopilotCoordinatorGuard(
             runtimeAgent: target.id,
             taskLabel: lifecycle.taskLabel,
           });
+          // Admission consumes the target before native execution. A later
+          // child failure must not turn a retry into a second delegation.
+          promptDelegations.add(logicalId);
+          delegatedAgents.set(invocation.sessionId, promptDelegations);
           counts.set(invocation.sessionId, count + 1);
           inFlight.add(invocation.sessionId);
           pending.set(invocation.sessionId, { agent: logicalId, runtimeAgent: target.id, invocationHash, lifecycle });

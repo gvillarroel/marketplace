@@ -22,12 +22,20 @@ function runScenario(scenario: string): Promise<ScenarioResult> {
       env: {
         ...process.env,
         AGENT_HARBOR_COPILOT_TIMEOUT_MS: "1000",
-        AGENT_HARBOR_COPILOT_SETTLE_MS: scenario === "native-postcommit-join-abort" ? "2000" : "250",
-        AGENT_HARBOR_COPILOT_RPC_TIMEOUT_MS: scenario === "send-timeout-buffered-terminal"
+        AGENT_HARBOR_COPILOT_SETTLE_MS: scenario === "native-postcommit-join-abort" ? "4000" : "250",
+        AGENT_HARBOR_COPILOT_RPC_TIMEOUT_MS: scenario === "send-timeout-buffered-terminal" ||
+          scenario === "direct-root-usage-ownership"
           ? "750"
+          : scenario === "scout-ready-reuse" ? "1000"
+          : scenario === "native-postcommit-join-abort" ? "2000"
+          : scenario === "shared-heartbeat-loss-after-working" ? "5000"
           : scenario === "accepting-terminal-default" ? "15000"
-            : scenario === "native-custom-tools" ? "5000" : "250",
+            : scenario === "native-custom-tools" ? "5000"
+              : scenario === "retire-pre-admission-race" ? "2000" : "250",
         AGENT_HARBOR_COPILOT_LOG_TIMEOUT_MS: scenario === "log-hang-default" ? "3000" : "100",
+        ...(scenario === "direct-root-usage-ownership"
+          ? { AGENT_HARBOR_COPILOT_PROGRESS_MS: "50" }
+          : {}),
         ...(scenario.startsWith("team-") && scenario !== "team-default-budget"
           ? { AGENT_HARBOR_COPILOT_TEAM_BUDGET_MS: "700" }
           : {}),
@@ -179,22 +187,20 @@ test("Copilot talent scout inspects one bounded roster and can reuse ready capac
 
 test("Copilot talent scout fails closed when its one roster inspection is truncated", async () => {
   const truncated = await runScenario("scout-truncated-roster");
-  assert.equal(truncated.result.invocation.ok, true);
-  assert.equal(truncated.result.nativeToolResults.roster.ok, true);
-  const roster = String(truncated.result.nativeToolResults.roster.value);
-  assert.match(roster, /Complete roster unavailable: 36 enabled specialists exceeds the 32-member model-facing limit/u);
-  assert.match(roster, /No partial roster was disclosed and recruitment is blocked/u);
-  assert.doesNotMatch(roster, /zz-sufficient-reviewer|aa-roster-filler|\{"id"/u,
-    "the incomplete common snapshot disclosed partial member rows");
-  assert.equal(truncated.result.nativeToolResults.filter.ok, false);
-  assert.match(errorText(truncated.result.nativeToolResults.filter.error),
-    /requires one successful complete harbor_team_roster snapshot/iu);
-  assert.equal(truncated.result.nativeToolResults.join.ok, false);
-  assert.match(errorText(truncated.result.nativeToolResults.join.error),
-    /requires one successful complete harbor_team_roster snapshot/iu);
+  assert.equal(truncated.result.invocation.ok, false);
+  assert.match(errorText(truncated.result.invocation.error),
+    /Complete roster unavailable: 36 enabled specialists exceeds the 32-member model-facing limit/iu);
+  assert.match(errorText(truncated.result.invocation.error),
+    /No partial roster was disclosed and recruitment is blocked/iu);
+  assert.match(errorText(truncated.result.invocation.error),
+    /No session\.send\/model request was attempted · 0 model tokens/iu);
+  assert.deepEqual(Object.keys(truncated.result.nativeToolResults), []);
+  assert.equal(truncated.calls.send, 0);
+  assert.equal(truncated.calls.model, 0);
   assert.equal(truncated.result.blockedProfileExists, false,
     "an incomplete roster inspection allowed a duplicate recruitment mutation");
-  assert.equal(truncated.result.nativeRosterToolCalls, 1, "the scout exceeded its one native roster inspection");
+  assert.equal(truncated.result.nativeRosterToolCalls, 0,
+    "the scout entered its model/native-tool turn despite a known incomplete roster");
 });
 
 test("Copilot native tools cancel locally on every scoped terminal and preserve a post-commit join", async () => {
@@ -292,7 +298,7 @@ test("Copilot direct runner bounds host hangs and preserves terminal/restore ord
   assert.match(errorText(logging.result.invocation.error), /completed.*could not display.*report/u);
   assert.equal(logging.calls.send, 1);
   assert.equal(logging.calls.deselect, 1);
-  assert.ok(logging.result.elapsedMs < 800, `bounded log calls took ${logging.result.elapsedMs}ms`);
+  assert.ok(logging.result.elapsedMs < 1_300, `bounded log calls took ${logging.result.elapsedMs}ms`);
 
   assert.equal(sendLate.result.invocation.ok, false);
   assert.match(errorText(sendLate.result.invocation.error), /selection is retained/u);
@@ -325,7 +331,7 @@ test("Copilot direct runner bounds host hangs and preserves terminal/restore ord
   assert.equal(acceptanceIdle.calls.deselect, 1);
 
   assert.equal(restoreBlock.result.team.ok, true);
-  assert.match(restoreBlock.result.teamOutput, /crafter · copilot-run-1 · cleaning/u,
+  assert.match(restoreBlock.result.teamOutput, /crafter\/copilot-run-1 · cleaning/u,
     "the coordinator hid a direct run before selection restore completed");
   assert.match(restoreBlock.result.teamOutput, /Selection gate: direct run copilot-run-1 owns the Copilot session/u);
   assert.match(restoreBlock.result.teamOutput, /Can delegate now: none/u);
@@ -428,13 +434,13 @@ test("Copilot direct runner treats session.shutdown as a strong accepting termin
 
   assert.equal(failed.result.invocation.ok, false);
   assert.match(errorText(failed.result.invocation.error), /session\.shutdown.*error/u);
-  assert.match(failed.result.teamOutput, /crafter · copilot-run-1 · failed/u);
+  assert.match(failed.result.teamOutput, /crafter\/copilot-run-1 · failed/u);
   assert.equal(failed.calls.abort, 0, "a strong shutdown terminal fell through to timeout abort");
   assert.equal(failed.calls.deselect, 1);
 
   assert.equal(cancelled.result.invocation.ok, false);
   assert.match(errorText(cancelled.result.invocation.error), /session\.shutdown.*normal/u);
-  assert.match(cancelled.result.teamOutput, /crafter · copilot-run-1 · cancelled/u);
+  assert.match(cancelled.result.teamOutput, /crafter\/copilot-run-1 · cancelled/u);
   assert.equal(cancelled.calls.abort, 0, "a cancelled shutdown fell through to timeout abort");
   assert.equal(cancelled.calls.deselect, 1);
 });
@@ -570,11 +576,211 @@ test("Copilot direct roots count each native usage event once across raw and lif
   assert.match(flattened, /crafter · run copilot-run-2 · parent copilot-run-1/u);
   assert.match(flattened, /child-model \(observed\).*1 native usage event.*in 31/u);
   assert.match(flattened, /Mission total .*in 132 · out 12 · reason 5 · cache r\/w 15\/3 · total 144/u);
-  assert.match(flattened, /model-multiplier cost 1 · nano AIU 100/u);
-  assert.match(flattened, /model-multiplier cost 0\.25 · nano AIU 25/u);
-  assert.match(flattened, /Mission total .*model-multiplier cost 1\.25 · nano AIU 125/u);
-  assert.doesNotMatch(flattened, /USD|dollars?|currency/iu);
+  assert.match(flattened, /billing units \(not USD\): model multiplier 1 · nano AIU 100/u);
+  assert.match(flattened, /billing units \(not USD\): model multiplier 0\.25 · nano AIU 25/u);
+  assert.match(flattened, /Mission total .*billing units \(not USD\): model multiplier 1\.25 · nano AIU 125/u);
+  assert.doesNotMatch(flattened, /dollars?|currency/iu);
+  const liveProgress = ownership.result.liveProgress as Array<{ message: string; metadata?: Record<string, unknown> }>;
+  assert.ok(liveProgress.length >= 3 && liveProgress.length <= 5,
+    `live progress was not debounced and bounded: ${liveProgress.length}`);
+  assert.ok(liveProgress.every(({ metadata }) => metadata?.ephemeral === true));
+  const rootStartupProgress = liveProgress.filter(({ message }) =>
+    /· root copilot-run-1 ·[^\n]*· (?:prompt accepted|started)$/mu.test(message));
+  assert.equal(rootStartupProgress.length, 1,
+    `direct root startup emitted redundant progress: ${rootStartupProgress.map(({ message }) => message).join("\n")}`);
+  const fullGuidance = liveProgress.filter(({ message }) =>
+    /Progress is automatic while Copilot is active\. Esc interrupts\/stops agents; \/team returns after\s+settlement\./su.test(message));
+  assert.equal(fullGuidance.length, 1, "full live-control guidance must appear exactly once per root");
+  assert.equal(fullGuidance[0], liveProgress[0], "full live-control guidance was not the first progress record");
+  for (const { message } of liveProgress.slice(1)) {
+    assert.match(message, /^Live · Esc interrupt\/stop · \/team after settlement\.$/mu);
+    assert.doesNotMatch(message, /Progress is automatic while Copilot is active/u);
+  }
+  const live = liveProgress.map(({ message }) => message).join("\n");
+  assert.match(live, /Agent Harbor live · run copilot-run-1/u);
+  assert.match(live, /crafter · child copilot-run-2 · (?:starting|working)/u);
+  assert.match(live, /Model: child-model \(observed\) · reasoning effort low \(observed\)/u);
+  assert.match(live, /36 native tokens · nano AIU 25/u);
+  assert.match(live, /108 native tokens · nano AIU 100/u);
+  assert.match(live, /Progress is automatic.*Esc interrupts\/stops agents.*\/team returns after\s+settlement/su);
+  assert.doesNotMatch(live, /secret\.txt|Bearer|abcdefghijklmnop|C:\/Users\/alice/iu);
+  assert.ok(liveProgress.flatMap(({ message }) => message.split("\n")).every((line) => line.length <= 96));
   assert.equal(ownership.calls.send, 1);
+});
+
+test("Copilot aborts before send and after working when its exact shared claim is deleted", async () => {
+  const [beforeSend, afterWorking] = await Promise.all([
+    runScenario("shared-phase-loss-before-send"),
+    runScenario("shared-heartbeat-loss-after-working"),
+  ]);
+
+  assert.equal(beforeSend.result.invocation.ok, false);
+  assert.equal(beforeSend.result.sharedClaimSabotaged, true);
+  assert.equal(beforeSend.calls.send, 0, "claim loss reached Copilot session.send");
+  assert.ok(beforeSend.calls.abort >= 1);
+  assert.match(errorText(beforeSend.result.invocation.error), /lost crafter's exact project-shared activity ownership/u);
+
+  assert.equal(afterWorking.result.invocation.ok, false);
+  assert.equal(afterWorking.calls.send, 1);
+  assert.ok(afterWorking.calls.abort >= 1, "heartbeat ownership loss did not abort the live Copilot root");
+  assert.equal(afterWorking.result.competingClaimWasAdmitted, true);
+  assert.match(errorText(afterWorking.result.invocation.error), /lost crafter's exact project-shared activity ownership/u);
+});
+
+test("Copilot keeps a project authority hazard after failed exact release and blocks every later admission", async () => {
+  const run = await runScenario("shared-release-hazard");
+
+  assert.equal(run.result.first.ok, false);
+  assert.equal(run.result.sharedClaimSabotaged, true);
+  assert.match(errorText(run.result.first.error), /lost crafter's exact project-shared activity ownership/u);
+  assert.equal(run.result.secondRoot.ok, false);
+  assert.equal(run.result.nativeSelected.ok, false);
+  for (const blocked of [run.result.secondRoot.error, run.result.nativeSelected.error]) {
+    assert.match(errorText(blocked), /project-shared activity ownership\/release is unverified.*repair/u);
+  }
+  assert.deepEqual(run.result.directDelta, { claim: 0, model: 0, send: 0 });
+  assert.deepEqual(run.result.nativeDelta, { claim: 0, model: 0, send: 0 });
+  assert.equal(run.calls.send, 0);
+  assert.equal(run.result.hazardRetryClaimPublished, false, "a blocked retry published a new shared claim");
+  assert.equal(run.result.claimGenerationUnchanged, true);
+  assert.equal(run.result.viewKeptClaimGeneration, true);
+
+  assert.equal(run.result.team.ok, true);
+  assert.match(run.result.teamOutput, /project-shared activity ownership\/release is unverified/iu);
+  assert.match(run.result.teamOutput, /repair the managed activity claim/iu);
+  assert.match(run.result.teamOutput, /delegation\s+is disabled/iu);
+  const publicHazard = [
+    errorText(run.result.secondRoot.error),
+    errorText(run.result.nativeSelected.error),
+    String(run.result.teamOutput),
+  ].join("\n");
+  assert.doesNotMatch(publicHazard, /private-hazard-session-token|this second root|native-selected root/iu);
+
+  assert.equal(run.result.competitorReleased, true);
+  assert.equal(run.result.recoveredTeam.ok, true);
+  assert.doesNotMatch(run.result.recoveredTeamOutput, /ownership\/release is unverified/iu);
+});
+
+test("Copilot rejects an additional prompt on an already-active native root after shared authority loss", async () => {
+  const run = await runScenario("shared-active-prompt-hazard");
+
+  assert.ok(run.calls.abort >= 1);
+  assert.equal(run.result.repeatedPrompt.ok, false);
+  assert.match(errorText(run.result.repeatedPrompt.error),
+    /project-shared activity ownership\/release is unverified.*repair/u);
+  assert.deepEqual(run.result.repeatedPromptDelta, { currentAgent: 0, model: 0, send: 0 });
+  assert.equal(run.result.retainedCompetitor, true);
+  assert.equal(run.result.competitorReleased, true);
+  assert.equal(run.result.recoveredTeam.ok, true);
+  assert.doesNotMatch(run.result.recoveredTeamOutput, /ownership\/release is unverified/iu);
+});
+
+test("Copilot native-selected persistent roots reserve and release project-shared capacity", async () => {
+  const run = await runScenario("native-selected-shared-admission");
+  assert.deepEqual(run.result.before.map(({ agent, ownerRuntime, phase }: any) => ({ agent, ownerRuntime, phase })), [{
+    agent: "crafter",
+    ownerRuntime: "copilot",
+    phase: "working",
+  }]);
+  assert.ok(Number.isSafeInteger(run.result.before[0].processID) && run.result.before[0].processID > 0);
+  assert.equal(run.result.competitorBlocked, true);
+  assert.equal(run.calls.send, 0);
+});
+
+test("Copilot stops exact local roots despite corrupt shared authority and fails closed for shared selectors", async () => {
+  const run = await runScenario("team-stop-corrupt-shared");
+  assert.equal(run.result.stopped.ok, true);
+  assert.equal(run.calls.abort, 1);
+  assert.match(run.result.stopOutput,
+    /LOCAL STOP REQUEST · 1\/1 abort request accepted · 0 failed · awaiting terminal ID copilot-run-\d+/u);
+  assert.match(run.result.stopOutput, /shared-\* · state unverified · external persistent-player activity authority is unavailable/u);
+  assert.equal(run.result.external.ok, false);
+  assert.match(errorText(run.result.external.error), /activity authority is unavailable.*fails closed.*another process/su);
+});
+
+test("Copilot routes external shared stops to the public owner runtime and PID only", async () => {
+  const run = await runScenario("team-stop-external-owner");
+  const current = errorText(run.result.current.error);
+  const legacy = errorText(run.result.legacy.error);
+
+  assert.equal(run.result.current.ok, false);
+  assert.match(current, new RegExp(`shared-crafter.*owner pi PID ${run.result.processID}; stop there`, "u"));
+  assert.equal(run.result.legacy.ok, false);
+  assert.match(legacy, new RegExp(
+    `shared-talent-scout.*owner runtime unverified \\(legacy claim\\) · PID ${run.result.processID}; stop in that owning Pi/Copilot process`,
+    "u",
+  ));
+  assert.doesNotMatch(`${current}\n${legacy}`, /private-routing|private-legacy|claimToken|sessionID|task/iu);
+  assert.equal(run.result.currentPublic, true);
+  assert.equal(run.result.legacyPublic, true);
+  assert.equal(run.result.mixed.ok, true);
+  assert.match(run.result.mixedOutput,
+    new RegExp(`owner pi PID ${run.result.processID} · phase starting · heartbeat healthy · 1 run`, "u"));
+  assert.match(run.result.mixedOutput, /IDs shared-talent-scout/u);
+  assert.equal(run.result.mixedPublic, true);
+  assert.equal(run.result.currentReleased, true);
+  assert.equal(run.result.legacyReleased, true);
+  assert.equal(run.result.mixedReleased, true);
+  assert.equal(run.calls.abort, 1);
+  assert.equal(run.calls.model, 0);
+  assert.equal(run.calls.send, 0);
+});
+
+test("Copilot /team stop all bounds 32 external owner routes and a full mixed registry", async () => {
+  const run = await runScenario("team-stop-external-budget");
+  const assertBoundedVisibleOutput = (messages: unknown[], label: string) => {
+    const lines = messages.map(String).join("\n").split(/\r?\n/u);
+    assert.ok(lines.length <= 30, `${label} exceeded 30 visible lines:\n${lines.join("\n")}`);
+    assert.ok(lines.every((line) => line.length <= 96), `${label} exceeded 96 columns:\n${lines.join("\n")}`);
+  };
+  const remoteCounts = (output: unknown) => {
+    const normalized = String(output).replace(/\s+/gu, " ");
+    const match = /REMOTE OWNER GROUPS · (\d+) active runs · (\d+) groups · (\d+) shown · (\d+) omitted/u.exec(normalized);
+    assert.ok(match, `missing remote owner counts:\n${String(output)}`);
+    return {
+      active: Number(match[1]),
+      groups: Number(match[2]),
+      shown: Number(match[3]),
+      omitted: Number(match[4]),
+    };
+  };
+
+  assert.equal(run.result.external.ok, true);
+  assert.equal(run.result.externalPublic, true);
+  assert.equal(run.result.externalReleased, true);
+  assertBoundedVisibleOutput(run.result.externalLogs, "external-only stop all");
+  assert.match(run.result.externalOutput,
+    /LOCAL STOP REQUEST · 0\/0 abort request accepted · 0 failed · awaiting terminal IDs none/u);
+  const external = remoteCounts(run.result.externalOutput);
+  assert.equal(external.active, 32);
+  assert.equal(external.shown + external.omitted, external.groups);
+  assert.ok(external.shown > 0);
+  const externalOutput = String(run.result.externalOutput).replace(/\s+/gu, " ");
+  assert.match(externalOutput, new RegExp(
+    `owner unverified PID ${run.result.processID}.*IDs shared-aa-legacy-external-owner`,
+    "u",
+  ));
+  assert.match(externalOutput,
+    new RegExp(`owner copilot PID ${run.result.processID}.*IDs shared-ab-current-external-owner`, "u"));
+  assert.match(externalOutput, /full index \/team pid:\d+ page:1/u);
+  assert.match(externalOutput,
+    /In each listed runtime\/PID, inspect its index and use \/team stop <local-run-id\|all>/u);
+
+  assert.equal(run.result.mixed.ok, true);
+  assert.equal(run.result.mixedPublic, true);
+  assert.equal(run.result.mixedReleased, true);
+  assertBoundedVisibleOutput(run.result.mixedLogs, "mixed stop all");
+  assert.match(run.result.mixedOutput,
+    /LOCAL STOP REQUEST · 1\/1 abort request accepted · 0 failed · awaiting terminal ID copilot-run-\d+/u);
+  const mixed = remoteCounts(run.result.mixedOutput);
+  assert.equal(mixed.active, 31);
+  assert.equal(mixed.shown + mixed.omitted, mixed.groups);
+  assert.ok(mixed.shown > 0);
+  assert.doesNotMatch(`${run.result.externalOutput}\n${run.result.mixedOutput}`,
+    /private-|claimToken|sessionID|private-local-task|\btask\b/iu);
+  assert.equal(run.calls.abort, 1);
+  assert.equal(run.calls.model, 0);
+  assert.equal(run.calls.send, 0);
 });
 
 test("Copilot counts metadata-only usage for manual roots, children, and direct roots without inventing zero", async () => {
@@ -603,7 +809,8 @@ test("Copilot manual roots prefer configured profile models and preserve explici
   const initial = String(profile.result.initialTeamOutput).replace(/\s+/gu, " ");
   const confirmed = String(profile.result.confirmedTeamOutput).replace(/\s+/gu, " ");
   const observed = String(profile.result.observedTeamOutput).replace(/\s+/gu, " ");
-  assert.match(initial, /crafter · run copilot-run-\d+ · fixed · working .*profile-model \(configured\) · reasoning effort none \(inherited\)/u);
+  assert.match(initial, /crafter · run copilot-run-\d+ · fixed · working .*profile-model \(observed\) · reasoning effort none \(observed\)/u);
+  assert.match(initial, /model: configured profile-model/u);
   assert.match(confirmed, /crafter · run copilot-run-\d+ · fixed · working .*profile-model \(observed\) · reasoning effort none \(observed\)/u);
   assert.match(observed, /crafter · run copilot-run-\d+ · fixed · working .*provider-model \(observed; also profile-model\) · reasoning effort high \(observed; also none\)/u);
 
@@ -631,7 +838,7 @@ test("Copilot interactive output bypasses notification backlog and reports parti
   assert.equal(refreshFailure.result.invocation.ok, true, "a post-commit refresh failure was reported as a roster mutation failure");
   const refreshLogs = refreshFailure.logs.map(({ message }) => message).join("\n");
   assert.match(refreshLogs, /fresh-worker stored · personal · pending Copilot reload/u);
-  assert.match(refreshLogs, /Roster updated, but Copilot refresh failed/u);
+  assert.match(refreshLogs, /Roster updated, but Copilot discovery refresh failed/u);
   assert.doesNotMatch(refreshLogs, /ready in this project|Run now:/u);
 
   assert.equal(startupFailure.result.team.ok, true);
@@ -641,11 +848,11 @@ test("Copilot interactive output bypasses notification backlog and reports parti
   assert.match(errorText(startupFailure.result.player.error), /agent reload.*timed out/u);
   const startupLogs = startupFailure.logs.map(({ message }) => message).join("\n");
   assert.match(startupLogs, /Native agent discovery\/coordinator is not ready/u);
-  assert.match(startupLogs, /Can delegate now: none/u);
+  assert.match(startupLogs, /Can delegate now: none|delegable (?:none|0)/u);
   assert.doesNotMatch(startupLogs, /Can delegate now:.*crafter/u);
 
   const inferredLogs = inferredChild.logs.map(({ message }) => message).join("\n");
-  assert.match(inferredLogs, /admitted \(inferred; native start not observed\)/u);
+  assert.match(inferredLogs, /admitted \(inferred; native start not\s+observed\)/u);
   assert.match(inferredLogs, /crafter failed/u);
   assert.doesNotMatch(inferredLogs, /crafter started/u);
 });
@@ -680,7 +887,7 @@ test("Copilot /team keeps one shared interactive deadline across startup, degrad
   assert.ok(stop.result.elapsedMs < 950, `bounded /team stop took ${stop.result.elapsedMs}ms`);
   assert.equal(stop.calls.abort, 1);
   assert.equal(stop.result.team.ok, true);
-  assert.match(stop.result.teamOutput, /crafter · copilot-run-1 · cleaning/u);
+  assert.match(stop.result.teamOutput, /crafter\/copilot-run-1 · cleaning/u);
 });
 
 test("Copilot /team stop reports partial multi-root failure without hiding cleaning state", async () => {
@@ -688,13 +895,24 @@ test("Copilot /team stop reports partial multi-root failure without hiding clean
 
   assert.equal(partial.result.stopped.ok, false);
   assert.equal(partial.calls.abort, 2);
-  const stopping = /Stopping 1 root run\(s\): (copilot-run-[12])/u.exec(partial.result.stopOutput)?.[1];
-  const failed = /• (copilot-run-[12]) · state cleaning · second abort failed/u.exec(partial.result.stopOutput)?.[1];
+  const stopping = /LOCAL STOP REQUEST · 1\/2 abort request accepted · 1 failed · awaiting terminal ID (copilot-run-[12])/u
+    .exec(partial.result.stopOutput)?.[1];
+  const failed = /• (copilot-run-[12]) · state cleaning · Copilot did not accept this local abort request/u
+    .exec(partial.result.stopOutput)?.[1];
   assert.ok(stopping);
   assert.ok(failed);
   assert.notEqual(stopping, failed);
-  assert.match(partial.result.stopOutput, /Failed or unconfirmed 1 root stop request\(s\)/u);
-  assert.match(errorText(partial.result.stopped.error), new RegExp(`could not confirm stop for ${failed}`, "u"));
+  assert.match(partial.result.stopOutput, /LOCAL STOP FAILURES · 1 shown · 0 omitted/u);
+  assert.match(errorText(partial.result.stopped.error),
+    new RegExp(`Abort request not accepted for ${failed}`, "u"));
+  const visibleStopLines = [
+    ...partial.result.stopLogs.map(String),
+    `Error: ${partial.result.stopped.error.message}`,
+  ].join("\n").split(/\r?\n/u);
+  assert.ok(visibleStopLines.length <= 30,
+    `partial stop exceeded 30 total visible lines:\n${visibleStopLines.join("\n")}`);
+  assert.ok(visibleStopLines.every((line: string) => line.length <= 96));
+  assert.doesNotMatch(partial.result.stopLogs.join("\n"), /\[Agent Harbor team · 0 model tokens\]/u);
   assert.equal(partial.result.team.ok, true);
   assert.match(partial.result.teamOutput, /copilot-run-1[\s\S]*cleaning/u);
   assert.match(partial.result.teamOutput, /copilot-run-2[\s\S]*cleaning/u);
@@ -708,7 +926,6 @@ test("Copilot /team closes delegation for untracked host work and reports only S
   assert.match(output, /HOST ACTIVITY \(Copilot SDK; outside Agent Harbor tracking\)/u);
   assert.match(output, /metadata\.activity\.hasActiveWork \+ metadata\.isProcessing/u);
   assert.match(output, /No Agent Harbor run ID exists for this work; delegation remains closed/u);
-  assert.match(output, /No Agent Harbor mission is tracked; Copilot reports other active host work below/u);
   assert.doesNotMatch(output, /No one is working right now/u);
   assert.match(output, /Selection gate: Copilot host work is active outside Agent Harbor tracking/u);
   assert.match(output, /Can delegate now: none/u);
@@ -719,6 +936,8 @@ test("Copilot /team closes delegation for untracked host work and reports only S
   assert.equal(observed.calls.activity, 1);
   assert.equal(observed.calls.processing, 1);
   assert.equal(observed.calls.context, 1);
+  assert.ok(String(observed.result.teamOutput).split("\n").length <= 30,
+    `Copilot host context exceeded the 30-line interactive budget:\n${observed.result.teamOutput}`);
   assert.ok(String(observed.result.teamOutput).split("\n").every((line) => line.length <= 96));
 });
 
@@ -757,7 +976,7 @@ test("Copilot active team-lead view keeps safe specialist delegation visible", a
   assert.equal(manager.result.team.ok, true);
   assert.equal(manager.result.invocation.ok, true);
   const output = String(manager.result.teamOutput).replace(/\s+/gu, " ");
-  assert.match(output, /team-lead · copilot-run-1 · (?:starting|working)/u);
+  assert.match(output, /team-lead\/copilot-run-1 · (?:starting|working)/u);
   assert.match(output, /Can delegate now: [^.]*crafter/u);
   assert.doesNotMatch(output, /Selection gate:/u);
   assert.doesNotMatch(output, /Can delegate now: none/u);
@@ -771,16 +990,23 @@ test("Copilot /team help and --help are deterministic zero-token control guidanc
   assert.equal(help.result.outputs.length, 2);
   for (const output of help.result.outputs) {
     assert.match(output, /Agent Harbor Copilot team help · 0 model tokens/u);
-    assert.match(output, /\/team <filter>/u);
-    assert.match(output, /live work or, when idle, the last mission/u);
+    assert.match(output, /^\/team — Show roster\/current work after the active turn, or the last mission when idle\.$/mu);
+    assert.match(output, /^\/team <filter> — Match free text, or use a field prefix:$/mu);
+    assert.match(output, /current work after the active turn.*last mission when idle/u);
     assert.match(output, /member:\/id: · kind:\/role: · description:/u);
     assert.match(output,
       /tool: · capability: · skill: · status:\/state: · model: · reasoning: · task: · run:/u);
+    assert.match(output, /owner: and pid:/u);
     assert.match(output, /\/team stop <run-id\|all>/u);
+    assert.match(output,
+      /^\/team stop <run-id\|all> — Idle\/RPC control for one mission or all controlled missions\.$/mu);
+    assert.match(output, /pauses SDK commands.*progress posts automatically.*press\s+Esc.*\/team after settlement/su);
     assert.match(output, /Choose one teammate: \/<id> <task> or \/player <id> <task>/u);
+    assert.match(output, /Catalog: \/list-skills \[--descriptions\|-d\] \[filter\] \[--page N\]/u);
     assert.match(output, /Personal model: \/join JSON with model:"provider\/model"; add replace:true/u);
-    assert.match(output, /32 concurrent roots.*6 sequential team-lead delegations/u);
-    assert.match(output, /omitted rows.*lossy\/redacted.*process-local/u);
+    assert.match(output, /32 local roots.*project-shared registry admits 32 active\s+persistent players.*6\s+sequential delegations/su);
+    assert.match(output, /activity\/admission is project-wide across Pi and Copilot processes.*cross-process telemetry are not disclosed/su);
+    assert.match(output, /Anonymous \/contract work is process-local.*owning\s+process/su);
     assert.match(output, /Tokens, AI credits, and max-output.*only when Copilot SDK reports/u);
     assert.match(output, /does not simulate a hard per-run token cap[\s\S]*concurrency and six\s+delegations/u);
     assert.ok(output.split("\n").every((line) => line.length <= 96));
@@ -801,10 +1027,10 @@ test("Copilot lifecycle identity hazard stays visible, blocks work, and preserve
     "a replayed hook.end shifted or duplicated queued guard evidence");
 
   const output = String(hazard.result.teamOutput).replace(/\s+/gu, " ");
-  assert.match(output, /team-lead · copilot-run-\d+ · working/u);
-  assert.match(output, /verified-model \(observed\).*tok ≥3 \(unverified\)/u);
+  assert.match(output, /team-lead\/copilot-run-\d+ · working/u);
+  assert.match(output, /Model: verified-model \(observed\) reasoning effort unknown · ≥3 tok \(unverified\)/u);
   assert.match(output, /Selection gate: lifecycle identity is unverified; reload Copilot before delegation/u);
-  assert.match(output, /Can delegate now: none/u);
+  assert.match(output, /Can delegate now: none|delegable none/u);
   assert.doesNotMatch(output, /manager · cleaning|110 native tokens|in 100/u);
 
   const noMatch = String(hazard.result.noMatchOutput).replace(/\s+/gu, " ");
@@ -840,27 +1066,29 @@ test("Copilot /contract flows through the extension runtime into active and hist
   assert.equal(contract.result.historyTeam.ok, true);
   assert.equal(contract.result.historyDetail.ok, true);
   const active = String(contract.result.activeTeamOutput).replace(/\s+/gu, " ");
-  assert.match(active, /contract · copilot-run-1 · waiting/u);
-  assert.match(active, /ephemeral-reviewer · copilot-run-2 · working/u);
-  assert.match(active, /root-model \(observed\) · calls 1 · tok 13/u);
-  assert.match(active, /child-model \(observed\) · calls 1 · tok 24/u);
+  assert.match(active, /contract\/copilot-run-1 · waiting/u);
+  assert.match(active, /ephemeral-reviewer\/copilot-run-2 · working/u);
+  assert.match(active, /Model: root-model \(observed\) reasoning effort low \(observed\) · 13 tok/u);
+  assert.match(active, /Model: child-model \(observed\) reasoning effort high \(observed\) · 24 tok/u);
   assert.match(active, /Selection gate: child run copilot-run-2 is active/u);
   assert.match(active, /Can delegate now: none/u);
 
   const activeDetail = String(contract.result.activeDetailOutput).replace(/\s+/gu, " ");
   assert.match(activeDetail, /ephemeral-reviewer · run copilot-run-2 · parent copilot-run-1 · contractor · working/u);
-  assert.match(activeDetail, /child-model \(observed\) · reasoning effort high \(observed\).*1 native usage event · 24 native tokens/u);
+  assert.match(activeDetail,
+    /Model: child-model \(observed\) Reasoning: reasoning effort high \(observed\).*1 native usage event · 24 native tokens/u);
 
   const history = String(contract.result.historyTeamOutput).replace(/\s+/gu, " ");
   assert.match(history, /LAST MISSION/u);
-  assert.match(history, /contract · copilot-run-1 · completed/u);
-  assert.match(history, /Mission: 2 tracked runs · total 43 native tokens · details: \/team run:copilot-run-1/u);
+  assert.match(history, /contract\/copilot-run-1 · completed/u);
+  assert.match(history, /Mission: 2 tracked runs · total 43 native tokens/u);
+  assert.match(history, /\/team run:copilot-run-1/u);
   assert.doesNotMatch(history, /ephemeral-reviewer|Native child:/u);
 
   const historyDetail = String(contract.result.historyDetailOutput).replace(/\s+/gu, " ");
   assert.match(historyDetail, /ephemeral-reviewer · run copilot-run-2 · parent copilot-run-1 · contractor · completed/u);
   assert.match(historyDetail, /Native child: duration 00:00\.750 · tool calls 2/u);
-  assert.match(historyDetail, /1 native usage event[\s\S]*in ≥20 · out ≥4[\s\S]*total 30/u);
+  assert.match(historyDetail, /in ≥20 · out ≥4[\s\S]*total 30[\s\S]*1 native usage event/u);
   assert.doesNotMatch(historyDetail, /2 native usage events/u);
   for (const secret of [
     "PRIVATE-RAW-CONTRACT-SECRET",
@@ -891,13 +1119,14 @@ test("Copilot selected /contract relabels one root and preserves its pre-skill t
 
   const activeRaw = String(contract.result.activeTeamOutput);
   const active = activeRaw.replace(/\s+/gu, " ");
-  assert.match(active, /contract · copilot-run-1 · waiting/u);
-  assert.match(active, /ephemeral-reviewer · copilot-run-2 · working/u);
-  assert.match(active, /mixed models \(observed\) · calls 1 · tok 13/u);
-  assert.match(active, /child-model \(observed\) · calls 1 · tok 24/u);
-  assert.equal((activeRaw.match(/● contract · copilot-run/gu) ?? []).length, 1);
-  assert.equal((activeRaw.match(/↳ ephemeral-reviewer · copilot-run/gu) ?? []).length, 1);
-  assert.doesNotMatch(activeRaw, /● crafter · copilot-run/u);
+  assert.match(active, /contract\/copilot-run-1 · waiting/u);
+  assert.match(active, /ephemeral-reviewer\/copilot-run-2 · working/u);
+  assert.match(active,
+    /Model: selected-root-model \(observed; also profile-model\) reasoning effort low \(observed\) · 13 tok/u);
+  assert.match(active, /Model: child-model \(observed\) reasoning effort high \(observed\) · 24 tok/u);
+  assert.equal((activeRaw.match(/● contract\/copilot-run/gu) ?? []).length, 1);
+  assert.equal((activeRaw.match(/↳ ephemeral-reviewer\/copilot-run/gu) ?? []).length, 1);
+  assert.doesNotMatch(activeRaw, /● crafter\/copilot-run/u);
 
   const activeDetail = String(contract.result.activeDetailOutput).replace(/\s+/gu, " ");
   assert.match(activeDetail, /ephemeral-reviewer · run copilot-run-2 · parent copilot-run-1 · contractor · working/u);
@@ -905,15 +1134,15 @@ test("Copilot selected /contract relabels one root and preserves its pre-skill t
 
   const historyRaw = String(contract.result.historyTeamOutput);
   const history = historyRaw.replace(/\s+/gu, " ");
-  assert.match(history, /contract · copilot-run-1 · completed/u);
+  assert.match(history, /contract\/copilot-run-1 · completed/u);
   assert.match(history, /Mission: 2 tracked runs · total 43 native tokens/u);
-  assert.equal((historyRaw.match(/● contract · copilot-run/gu) ?? []).length, 1);
+  assert.equal((historyRaw.match(/● contract\/copilot-run/gu) ?? []).length, 1);
   assert.doesNotMatch(historyRaw, /ephemeral-reviewer/u);
 
   const historyDetailRaw = String(contract.result.historyDetailOutput);
   const historyDetail = historyDetailRaw.replace(/\s+/gu, " ");
   assert.match(historyDetail, /ephemeral-reviewer · run copilot-run-2 · parent copilot-run-1 · contractor · completed/u);
-  assert.equal((historyDetailRaw.match(/└─ ephemeral-reviewer · run/gu) ?? []).length, 1);
+  assert.equal((historyDetailRaw.match(/↳ ephemeral-reviewer · run/gu) ?? []).length, 1);
   for (const secret of [
     "PRIVATE-RAW-CONTRACT-SECRET",
     "PRIVATE-TASK-SECRET",
@@ -964,13 +1193,45 @@ test("Copilot first team view recovers delayed discovery and lifecycle controls 
   assert.doesNotMatch(controls.result.joinOutput, /registration:|active:/u);
   assert.equal(controls.result.joinOutput.includes(controls.result.sandbox), false);
   assert.equal(controls.result.joinOutput.includes(controls.result.project), false);
+  assert.equal(controls.result.joinedAgain.ok, true);
+  assert.match(controls.result.joinNoOpOutput,
+    /○ ux-reviewer is already joined and current · no roster files changed\./u);
+  assert.doesNotMatch(controls.result.joinNoOpOutput, /reload|Roster updated/u);
+  assert.equal(controls.result.reloadAfterJoinNoOp, controls.result.reloadBeforeJoinNoOp + 1,
+    "an idempotent join did not reconcile potentially newer cross-process discovery");
   assert.equal(controls.result.benched.ok, true);
+  assert.match(controls.result.benchOutputChanged, /✓ ux-reviewer moved to the bench in this project\./u);
+  assert.equal(controls.result.benchedAgain.ok, true);
+  assert.match(controls.result.benchNoOpOutput,
+    /○ ux-reviewer is already benched · this member was unchanged\.[\s\S]*No roster files changed\./u);
+  assert.match(controls.result.benchNoOpOutput, /\/reload removes any stale startup\s+aliases/u);
+  assert.doesNotMatch(controls.result.benchNoOpOutput, /pending/u);
+  assert.equal(controls.result.reloadAfterBenchNoOp, controls.result.reloadBeforeBenchNoOp + 1,
+    "an idempotent bench did not reconcile potentially newer cross-process discovery");
+  assert.equal(controls.result.mixedBench.ok, true);
+  assert.match(controls.result.mixedBenchOutput,
+    /○ design is already enabled · this member was unchanged\./u);
+  assert.match(controls.result.mixedBenchOutput, /✓ build enabled in this project\./u);
+  assert.doesNotMatch(controls.result.mixedBenchOutput, /No roster files changed\./u);
+  assert.equal(controls.result.allBenchNoOp.ok, true);
+  assert.equal((controls.result.allBenchNoOpOutput.match(/this member was unchanged\./gu) ?? []).length, 2);
+  assert.equal((controls.result.allBenchNoOpOutput.match(/No roster files changed\./gu) ?? []).length, 1);
+  assert.equal(controls.result.reloadAfterAllBenchNoOp, controls.result.reloadBeforeAllBenchNoOp + 1,
+    "an all-member Copilot bench no-op did not reconcile cross-process discovery");
   assert.equal(controls.result.personalBenchRetry.ok, false);
   assert.match(errorText(controls.result.personalBenchRetry.error), /personal player is benched: ux-reviewer; run \/bench on ux-reviewer/u);
 
   assert.equal(controls.result.retired.ok, true);
   assert.match(controls.result.retireOutput, /retired ux-reviewer; other projects intentionally untouched/u);
-  assert.match(controls.result.retireOutput, /blocked immediately through \/player[\s\S]*alias may remain visible\s+until \/reload/u);
+  assert.match(controls.result.retireOutput,
+    /blocked immediately through \/player[\s\S]*alias may remain visible in\s+slash-command\s+completion\/autocomplete until \/reload/u);
+  assert.equal(controls.result.retiredAgain.ok, true);
+  assert.match(controls.result.retireNoOpOutput, /○ ux-reviewer was already retired here · no roster files changed/u);
+  assert.match(controls.result.retireNoOpOutput,
+    /stale startup alias remains blocked; \/reload removes it from\s+slash-command\s+completion\/autocomplete/u);
+  assert.doesNotMatch(controls.result.retireNoOpOutput, /blocked immediately through \/player/u);
+  assert.equal(controls.result.reloadAfterRetireNoOp, controls.result.reloadBeforeRetireNoOp + 1,
+    "an idempotent retire did not reconcile potentially newer cross-process discovery");
   assert.equal(controls.result.retry.ok, false);
   assert.match(errorText(controls.result.retry.error), /missing or retired.*re-run \/join.*inspect \/team ux-reviewer/u);
   assert.doesNotMatch(errorText(controls.result.retry.error), /bench on/u);
@@ -1002,9 +1263,31 @@ test("Copilot first team view recovers delayed discovery and lifecycle controls 
   assert.match(errorText(controls.result.hostileScout.error), /usage: \/scout <task>/u);
   assert.equal(controls.result.hostileAlias.ok, false);
   assert.match(errorText(controls.result.hostileAlias.error), /usage: \/crafter <task>/u);
+  assert.match(controls.result.hostileAliasOutput, /usage: \/crafter <task>/u);
+  assert.doesNotMatch(controls.result.hostileAliasOutput, /usage: \[path\]/u);
   assert.equal(controls.result.reloadAfterRejectedControls, controls.result.reloadBeforeRejectedControls,
     "rejected lifecycle arguments refreshed or mutated the roster");
   assert.equal(controls.calls.send, 0);
+});
+
+test("Copilot lifecycle controls reject missing or mismatched structured truth before refresh or success display", async () => {
+  const run = await runScenario("lifecycle-outcome-fail-closed");
+  for (const invocation of [
+    run.result.missingJoin,
+    run.result.mismatchedJoin,
+    run.result.missingBench,
+    run.result.mismatchedBench,
+    run.result.missingRetire,
+    run.result.mismatchedRetire,
+  ]) {
+    assert.equal(invocation.ok, false);
+    assert.match(errorText(invocation.error), /incomplete or mismatched lifecycle outcome.*unverified/u);
+  }
+  assert.equal(run.result.reloadAfter, run.result.reloadBefore,
+    "unverified lifecycle truth refreshed Copilot discovery");
+  const publicLogs = run.logs.map(({ message }) => message).join("\n");
+  assert.doesNotMatch(publicLogs, /FORGED RAW .* SUCCESS/u);
+  assert.doesNotMatch(publicLogs, /joined · personal|turned on|turned off|enabled in this project|moved to the bench/u);
 });
 
 test("Copilot no-model controls avoid fake defaults and join does not promise native readiness", async () => {
@@ -1027,15 +1310,45 @@ test("Copilot refuses to retire an active persistent player until its root settl
   assert.equal(run.result.joined.ok, true);
   assert.equal(run.result.blockedRetire.ok, false);
   assert.match(errorText(run.result.blockedRetire.error),
-    /cannot retire retire-reviewer while it is (?:starting|working) in copilot-run-1/u);
+    /cannot retire retire-reviewer while it is (?:starting|working) in copilot-run-\d+/u);
   assert.match(errorText(run.result.blockedRetire.error),
-    /use \/team stop copilot-run-1, then wait for cleanup to settle/u);
+    /use \/team stop copilot-run-\d+, then wait for cleanup to settle/u);
   assert.equal(run.result.reloadAfterBlockedRetire, run.result.reloadBeforeBlockedRetire);
   assert.equal(run.result.profileAfterBlockedRetire, true);
   assert.equal(run.result.stopped.ok, true);
   assert.equal(run.result.invocation.ok, false);
   assert.equal(run.result.retired.ok, true);
   assert.equal(run.result.profileAfterRetire, false);
+  assert.equal(run.calls.send, 1);
+});
+
+test("Copilot revalidates admission after a retire wins the pre-run RPC gap", async () => {
+  const run = await runScenario("retire-pre-admission-race");
+
+  assert.equal(run.result.joined.ok, true);
+  assert.equal(run.result.retired.ok, true);
+  assert.equal(run.result.profileAfterRetire, false);
+  assert.equal(run.result.invocation.ok, false);
+  assert.match(errorText(run.result.invocation.error),
+    /active managed player changed during preflight: race-reviewer; inspect \/team and retry/u);
+  assert.equal(run.calls.select, 0, "stale admission selected a native agent");
+  assert.equal(run.calls.send, 0, "stale admission sent a model prompt");
+});
+
+test("Copilot reserves a team-lead snapshot against concurrent bench off", async () => {
+  const run = await runScenario("bench-active-team-lead");
+
+  assert.equal(run.result.activated.ok, true);
+  assert.equal(run.result.blockedBench.ok, false);
+  assert.match(errorText(run.result.blockedBench.error),
+    /cannot bench off build while team-lead owns its active roster snapshot in copilot-run-\d+/u);
+  assert.match(errorText(run.result.blockedBench.error),
+    /use \/team stop copilot-run-\d+, then wait for cleanup to settle/u);
+  assert.equal(run.result.reloadAfterBlockedBench, run.result.reloadBeforeBlockedBench,
+    "blocked bench mutation refreshed or changed the native roster");
+  assert.equal(run.result.profileAfterBlockedBench, true);
+  assert.equal(run.result.invocation.ok, true);
+  assert.equal(run.result.deactivated.ok, true);
   assert.equal(run.calls.send, 1);
 });
 

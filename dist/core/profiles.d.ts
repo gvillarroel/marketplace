@@ -36,11 +36,25 @@ export declare function decodePlayer(content: string, id: string): unknown;
  */
 export declare function renderPlayer(harness: HarnessName, player: PlayerDefinition, roster: "personal" | "sdlc", project?: string): string;
 /**
+ * Renders the user-level personal registration without binding it to any one project.
+ * OpenCode registrations therefore deny `external_directory`; the project-active copy is
+ * rendered separately with the exact project allowlist when the teammate is enabled.
+ */
+export declare function renderPlayerRegistration(harness: HarnessName, player: PlayerDefinition): string;
+/**
  * Tests whether an owned profile exactly matches its validated definition and current renderer.
  * Revision-4 profiles remain legacy-owned for safe repair, but only exact
  * revision-5 output is executable.
  */
 export declare function isCanonicalPlayerProfile(content: string, harness: HarnessName, player: PlayerDefinition, roster: "personal" | "sdlc", project?: string): boolean;
+/** Proves that a personal registration is the current project-independent representation. */
+export declare function isCanonicalPlayerRegistration(content: string, harness: HarnessName, player: PlayerDefinition): boolean;
+/**
+ * Accepts a portable registration or an exact revision-5 OpenCode registration emitted by the
+ * former project-bound renderer. Compatibility never trusts ownership alone: each recovered
+ * legacy project path must reproduce every byte of the supplied profile before it may be migrated.
+ */
+export declare function isCompatiblePlayerRegistration(content: string, harness: HarnessName, player: PlayerDefinition): boolean;
 /** Creates the filesystem layout and bound canonical renderer for one harness/project pair. */
 export declare function harnessSpec(name: HarnessName, home: string, project: string): HarnessSpec;
 export {};

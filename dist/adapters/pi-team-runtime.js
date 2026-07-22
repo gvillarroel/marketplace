@@ -1,9 +1,11 @@
 /** In-memory, zero-model observability for Agent Harbor runs hosted by Pi. */
 import { createHmac, randomBytes } from "node:crypto";
-import { basename, resolve } from "node:path";
+import { basename } from "node:path";
 import { publicMetadataText, publicTaskLabel } from "../core/public-metadata.js";
-import { wrapPlainLine, wrapPlainLines } from "../core/text-layout.js";
+import { canonicalProjectIdentity } from "../core/project-identity.js";
+import { takeTerminalColumns, terminalLineWidth, visibleTextWidth, wrapPlainLine, wrapPlainLines, } from "../core/text-layout.js";
 const usageKeys = ["input", "output", "reasoning", "cacheRead", "cacheWrite", "total"];
+const costKeys = ["input", "output", "cacheRead", "cacheWrite", "total"];
 const activeStates = new Set(["starting", "working", "cleaning"]);
 const terminalStates = new Set(["completed", "failed", "cancelled", "cleanup-error"]);
 export const maximumPiObservedMessages = 4_096;
@@ -19,7 +21,17 @@ export function piTaskLabel(task) {
     return publicTaskLabel(task);
 }
 function nativeFiniteNumber(value) {
-    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+        return undefined;
+    // Provider SDKs commonly derive cost by multiplying token counts and rates,
+    // so the incoming value can already contain a long binary tail. Fifteen
+    // significant digits are the reliably portable decimal precision of an
+    // IEEE-754 double; normalizing here keeps the native amount useful without
+    // rounding tiny positive costs to zero.
+    if (value === 0)
+        return 0;
+    const normalized = Number(value.toPrecision(15));
+    return Number.isFinite(normalized) ? normalized : value;
 }
 function nativeInteger(value) {
     return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
@@ -29,6 +41,34 @@ function addSafeInteger(left, right) {
         return { value: Number.MAX_SAFE_INTEGER, overflow: true };
     }
     return { value: left + right, overflow: false };
+}
+function decimalParts(value) {
+    const [mantissa, rawExponent = "0"] = value.toString().toLowerCase().split("e");
+    const [integer, fraction = ""] = mantissa.split(".");
+    return {
+        coefficient: BigInt(`${integer}${fraction}`),
+        exponent: Number(rawExponent) - fraction.length,
+    };
+}
+/**
+ * Adds the shortest decimal representations reported by providers. Native
+ * costs such as 0.000022 + 0.000028 must remain $0.00005 instead of exposing
+ * an IEEE-754 implementation artifact in the team UI.
+ */
+function sumFiniteNumbers(values) {
+    if (!values.length)
+        return { value: undefined, overflow: false };
+    const parts = values.map(decimalParts);
+    const exponent = Math.min(...parts.map((part) => part.exponent));
+    const coefficient = parts.reduce((total, part) => total + part.coefficient * (10n ** BigInt(part.exponent - exponent)), 0n);
+    const value = Number(`${coefficient}e${exponent}`);
+    return Number.isFinite(value)
+        ? { value, overflow: false }
+        : { value: Number.MAX_VALUE, overflow: true };
+}
+function addFiniteNumber(left, right) {
+    const result = sumFiniteNumbers([left, right]);
+    return { value: result.value ?? 0, overflow: result.overflow };
 }
 function sumSafeIntegers(values) {
     if (!values.length)
@@ -175,6 +215,13 @@ function messageKey(message, fingerprintKey) {
             cacheWrite: nativeInteger(usage.cacheWrite),
             reasoning: nativeInteger(usage.reasoning),
             totalTokens: nativeInteger(usage.totalTokens),
+            cost: usage.cost && typeof usage.cost === "object" ? {
+                input: nativeFiniteNumber(usage.cost.input),
+                output: nativeFiniteNumber(usage.cost.output),
+                cacheRead: nativeFiniteNumber(usage.cost.cacheRead),
+                cacheWrite: nativeFiniteNumber(usage.cost.cacheWrite),
+                total: nativeFiniteNumber(usage.cost.total),
+            } : undefined,
         },
     }, fingerprintKey);
     return { key: `message:${identity.digest}`, truncated: identity.truncated };
@@ -189,12 +236,17 @@ function modelFrom(value) {
     return provider && id ? { provider, id } : undefined;
 }
 function projectKey(project) {
-    const absolute = resolve(project);
-    return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+    return canonicalProjectIdentity(project);
 }
 function cloneUsage(run) {
     return Object.fromEntries(usageKeys.flatMap((key) => {
         const value = run.usage[key];
+        return value === undefined ? [] : [[key, value]];
+    }));
+}
+function cloneCost(run) {
+    return Object.fromEntries(costKeys.flatMap((key) => {
+        const value = run.cost[key];
         return value === undefined ? [] : [[key, value]];
     }));
 }
@@ -237,6 +289,8 @@ export class PiTeamRuntime {
             ...(input.thinking === undefined ? {} : { thinking: input.thinking }),
             usage: {},
             usageLowerBounds: new Set(),
+            cost: {},
+            costLowerBounds: new Set(),
             nativeMessages: 0,
             nativeMessagesLowerBound: false,
             seenMessageObjects: new WeakSet(),
@@ -302,6 +356,8 @@ export class PiTeamRuntime {
             run.nativeMessagesLowerBound = true;
             for (const field of usageKeys)
                 run.usageLowerBounds.add(field);
+            for (const field of costKeys)
+                run.costLowerBounds.add(field);
             this.emit(runId);
             return false;
         }
@@ -310,6 +366,8 @@ export class PiTeamRuntime {
             run.nativeMessagesLowerBound = true;
             for (const field of usageKeys)
                 run.usageLowerBounds.add(field);
+            for (const field of costKeys)
+                run.costLowerBounds.add(field);
         }
         if (identity && run.seenMessageKeys.has(identity.key))
             return false;
@@ -339,17 +397,24 @@ export class PiTeamRuntime {
             cacheWrite: nativeInteger(usage?.cacheWrite),
             total: nativeInteger(usage?.totalTokens),
         };
+        // Pi reports reasoning separately; totalTokens covers input, output and
+        // cache fields only (reasoning may be a subset of output). Do not use it
+        // to decide whether the native total is internally consistent.
         const componentFields = ["input", "output", "cacheRead", "cacheWrite"];
         const componentValues = componentFields.map((field) => incoming[field]);
-        const anyPositiveComponent = componentValues.some((value) => value !== undefined && value > 0);
-        const everyComponentZero = componentValues.every((value) => value === 0);
         // Presence is authoritative: an explicit all-zero native usage object is
-        // distinct from an omitted object. Contradictory totals remain unknown.
-        if (incoming.total === 0 && anyPositiveComponent)
-            incoming.total = undefined;
-        if (incoming.total !== undefined && incoming.total > 0 && everyComponentZero) {
-            for (const field of componentFields)
-                incoming[field] = undefined;
+        // distinct from an omitted object. When every counted component is present,
+        // a smaller total is discarded; a larger total stays authoritative while
+        // the contradictory components become lower bounds. Reasoning is separate.
+        if (incoming.total !== undefined && componentValues.every((value) => value !== undefined)) {
+            const componentTotal = sumSafeIntegers(componentValues);
+            if (componentTotal.overflow || componentTotal.value > incoming.total) {
+                incoming.total = undefined;
+            }
+            else if (componentTotal.value < incoming.total) {
+                for (const field of componentFields)
+                    incoming[field] = undefined;
+            }
         }
         for (const field of usageKeys) {
             const amount = incoming[field];
@@ -361,6 +426,41 @@ export class PiTeamRuntime {
                 run.usage[field] = next.value;
                 if (next.overflow)
                     run.usageLowerBounds.add(field);
+            }
+        }
+        const rawCost = usage?.cost && typeof usage.cost === "object"
+            ? usage.cost
+            : undefined;
+        const incomingCost = {
+            input: nativeFiniteNumber(rawCost?.input),
+            output: nativeFiniteNumber(rawCost?.output),
+            cacheRead: nativeFiniteNumber(rawCost?.cacheRead),
+            cacheWrite: nativeFiniteNumber(rawCost?.cacheWrite),
+            total: nativeFiniteNumber(rawCost?.total),
+        };
+        const costComponents = ["input", "output", "cacheRead", "cacheWrite"];
+        const costValues = costComponents.map((field) => incomingCost[field]);
+        if (incomingCost.total !== undefined && costValues.every((value) => value !== undefined)) {
+            const componentTotal = sumFiniteNumbers(costValues).value ?? 0;
+            const tolerance = Math.max(1e-12, Math.abs(componentTotal) * 1e-9, Math.abs(incomingCost.total) * 1e-9);
+            if (!Number.isFinite(componentTotal) || componentTotal > incomingCost.total + tolerance) {
+                incomingCost.total = undefined;
+            }
+            else if (componentTotal < incomingCost.total - tolerance) {
+                for (const field of costComponents)
+                    incomingCost[field] = undefined;
+            }
+        }
+        for (const field of costKeys) {
+            const amount = incomingCost[field];
+            if (amount === undefined) {
+                run.costLowerBounds.add(field);
+            }
+            else {
+                const next = addFiniteNumber(run.cost[field] ?? 0, amount);
+                run.cost[field] = next.value;
+                if (next.overflow)
+                    run.costLowerBounds.add(field);
             }
         }
         run.nativeMessages += 1;
@@ -412,8 +512,26 @@ export class PiTeamRuntime {
             return sumSafeIntegers(known).overflow || runs.some((run) => run.usage[field] === undefined || run.usageLowerBounds.includes(field));
         });
     }
+    missionCost(rootRunId) {
+        const runs = this.mission(rootRunId);
+        return Object.fromEntries(costKeys.flatMap((field) => {
+            const known = runs.flatMap((run) => run.cost[field] === undefined ? [] : [run.cost[field]]);
+            const aggregate = sumFiniteNumbers(known);
+            return aggregate.value === undefined ? [] : [[field, aggregate.value]];
+        }));
+    }
+    missionCostLowerBounds(rootRunId) {
+        const runs = this.mission(rootRunId);
+        const cost = this.missionCost(rootRunId);
+        return costKeys.filter((field) => {
+            if (cost[field] === undefined)
+                return false;
+            const known = runs.flatMap((run) => run.cost[field] === undefined ? [] : [run.cost[field]]);
+            return sumFiniteNumbers(known).overflow || runs.some((run) => run.cost[field] === undefined || run.costLowerBounds.includes(field));
+        });
+    }
     projectName(project) {
-        return basename(resolve(project)) || "project";
+        return basename(projectKey(project)) || "project";
     }
     snapshot(run) {
         const end = run.endedAt ?? this.now();
@@ -436,6 +554,8 @@ export class PiTeamRuntime {
             ...(run.thinking === undefined ? {} : { thinking: run.thinking }),
             usage: cloneUsage(run),
             usageLowerBounds: [...run.usageLowerBounds],
+            cost: cloneCost(run),
+            costLowerBounds: [...run.costLowerBounds],
             nativeMessages: run.nativeMessages,
             nativeMessagesLowerBound: run.nativeMessagesLowerBound,
         };
@@ -500,6 +620,12 @@ export function formatElapsed(milliseconds) {
 export function formatTokenCount(value, lowerBound = false) {
     return value === undefined ? "—" : `${lowerBound ? "≥" : ""}${new Intl.NumberFormat("en-US").format(value)}`;
 }
+export function formatCostAmount(value, lowerBound = false) {
+    if (value === undefined)
+        return "—";
+    const amount = value === 0 ? "0" : value.toString();
+    return `${lowerBound ? "≥" : ""}$${amount}`;
+}
 export function formatModel(run) {
     if (run.observedModels.length > 1 || run.observedModelsTruncated) {
         const models = run.observedModels.map(({ provider, id }) => `${provider}/${id}`).join(", ");
@@ -517,6 +643,15 @@ export function formatUsage(usage, lowerBounds = []) {
         `reason ${formatTokenCount(usage.reasoning, lower.has("reasoning"))}`,
         `cache r/w ${formatTokenCount(usage.cacheRead, lower.has("cacheRead"))}/${formatTokenCount(usage.cacheWrite, lower.has("cacheWrite"))}`,
         `total ${formatTokenCount(usage.total, lower.has("total"))}`,
+    ].join(" · ");
+}
+export function formatCost(cost, lowerBounds = []) {
+    const lower = new Set(lowerBounds);
+    return [
+        `cost in ${formatCostAmount(cost.input, lower.has("input"))}`,
+        `out ${formatCostAmount(cost.output, lower.has("output"))}`,
+        `cache r/w ${formatCostAmount(cost.cacheRead, lower.has("cacheRead"))}/${formatCostAmount(cost.cacheWrite, lower.has("cacheWrite"))}`,
+        `total ${formatCostAmount(cost.total, lower.has("total"))}`,
     ].join(" · ");
 }
 /** Waits for best-effort shutdown cleanup without allowing a provider to hang Pi forever. */
@@ -547,7 +682,7 @@ export function formatPiRunDetails(runs) {
         const detail = run.parentRunId ? "     " : "  ";
         lines.push(`${branch} ${run.agent} · run ${run.id}${run.parentRunId ? ` · parent ${run.parentRunId}` : ""} · ${run.kind} · ${run.state} · ${formatElapsed(run.elapsedMs)}`);
         lines.push(`${detail}Task: “${run.task}”`);
-        lines.push(`${detail}${formatModel(run)} · thinking setting ${run.thinking ?? "unknown"} · model turns ${run.nativeMessagesLowerBound ? "≥" : ""}${run.nativeMessages} · ${formatUsage(run.usage, run.usageLowerBounds)}`);
+        lines.push(`${detail}${formatModel(run)} · thinking setting ${run.thinking ?? "unknown"} · model turns ${run.nativeMessagesLowerBound ? "≥" : ""}${run.nativeMessages} · ${formatUsage(run.usage, run.usageLowerBounds)} · ${formatCost(run.cost, run.costLowerBounds)}`);
     }
     return wrapPlainLines(lines);
 }
@@ -558,12 +693,38 @@ export function formatPiMissionDetails(runtime, rootRunId) {
         return ["Team run unavailable."];
     const root = runs.find((run) => run.id === rootRunId) ?? runs[0];
     const lines = formatPiRunDetails(runs);
-    lines.push(`Mission total · ${formatElapsed(root.elapsedMs)} · ${formatUsage(runtime.missionUsage(rootRunId), runtime.missionUsageLowerBounds(rootRunId))}`);
+    lines.push(`Mission total · ${formatElapsed(root.elapsedMs)} · ${formatUsage(runtime.missionUsage(rootRunId), runtime.missionUsageLowerBounds(rootRunId))} · ${formatCost(runtime.missionCost(rootRunId), runtime.missionCostLowerBounds(rootRunId))}`);
     return wrapPlainLines(lines);
 }
 /** Final accounting is composed outside child evidence, so a lead never sees or reasons over it. */
 export function formatPiMissionReport(runtime, rootRunId) {
-    return ["", "TEAM RUN (native Pi telemetry)", ...formatPiMissionDetails(runtime, rootRunId)].join("\n");
+    const runs = runtime.mission(rootRunId);
+    if (!runs.length)
+        return "\nTEAM RUN (native Pi telemetry)\nTeam run unavailable.";
+    const root = runs.find((run) => run.id === rootRunId) ?? runs[0];
+    const marked = (value, limit) => {
+        const shown = piPublicIdentifier(value, limit) ?? "unobserved";
+        const probe = piPublicIdentifier(value, Math.min(1_000, limit + 1));
+        return `${shown}${probe !== undefined && probe !== shown ? " [abbr]" : ""}`;
+    };
+    const rows = runs.flatMap((run) => {
+        const route = ` · /team run:${run.id}`;
+        const identity = boundedTerminalLineWithSuffix(`${run.parentRunId ? "↳" : "●"} ${marked(run.agent, 22)} · ${run.state} · ${formatElapsed(run.elapsedMs)}`, route, terminalLineWidth);
+        const telemetry = boundedTerminalLine(`  model ${marked(formatModel(run), 44)} · thinking ${marked(run.thinking ?? "unknown", 14)} · ` +
+            `turns ${run.nativeMessagesLowerBound ? "≥" : ""}${run.nativeMessages}`);
+        const totals = boundedTerminalLine(`  usage total ${formatTokenCount(run.usage.total, run.usageLowerBounds.includes("total"))} tokens · ` +
+            `cost total ${formatCostAmount(run.cost.total, run.costLowerBounds.includes("total"))} · components in exact run detail`);
+        return [identity, telemetry, totals];
+    });
+    return [
+        "",
+        "TEAM RUN · native Pi telemetry · bounded summary",
+        ...rows,
+        `Mission duration: ${formatElapsed(root.elapsedMs)} · ${runs.length} tracked run${runs.length === 1 ? "" : "s"}`,
+        `Mission usage: ${formatUsage(runtime.missionUsage(rootRunId), runtime.missionUsageLowerBounds(rootRunId))}`,
+        `Mission cost: ${formatCost(runtime.missionCost(rootRunId), runtime.missionCostLowerBounds(rootRunId))}`,
+        "Details: copy any /team run:<id> route above · History: /team history-page:1",
+    ].flatMap((line) => wrapPlainLine(line)).slice(0, 30).join("\n");
 }
 export function formatPiLiveStatus(runtime, rootRunId) {
     const runs = runtime.mission(rootRunId);
@@ -571,6 +732,8 @@ export function formatPiLiveStatus(runtime, rootRunId) {
     const focus = active.at(-1) ?? runs.at(-1);
     const usage = runtime.missionUsage(rootRunId);
     const totalLabel = formatTokenCount(usage.total, runtime.missionUsageLowerBounds(rootRunId).includes("total"));
+    const cost = runtime.missionCost(rootRunId);
+    const costLabel = formatCostAmount(cost.total, runtime.missionCostLowerBounds(rootRunId).includes("total"));
     if (!focus)
         return "Agent Harbor · no active run";
     const counts = new Map();
@@ -579,12 +742,74 @@ export function formatPiLiveStatus(runtime, rootRunId) {
     const breakdown = ["working", "starting", "cleaning"]
         .flatMap((state) => counts.has(state) ? [`${counts.get(state)} ${state}`] : [])
         .join(" · ");
-    return wrapPlainLine(`Agent Harbor · ${active.length} active${breakdown ? ` (${breakdown})` : ""} · ${focus.agent} ${focus.state} · ${totalLabel} tok · ${formatElapsed(focus.elapsedMs)}`).join("\n");
+    return wrapPlainLine(`Agent Harbor · ${active.length} active${breakdown ? ` (${breakdown})` : ""} · ${focus.agent} ${focus.state} · ${totalLabel} tok · ${costLabel} observed · ${formatElapsed(focus.elapsedMs)}`).join("\n");
 }
 export function formatPiLiveWidget(runtime, rootRunId) {
     const runs = runtime.mission(rootRunId);
     return wrapPlainLines([...runs.slice(-8).flatMap((run) => [
             `${run.parentRunId ? "  └─" : "●"} ${run.agent} · run ${run.id} · ${run.state} · ${formatModel(run)} · thinking setting ${run.thinking ?? "unknown"} · ${formatElapsed(run.elapsedMs)}`,
-            `${run.parentRunId ? "     " : "  "}Task: “${run.task}” · model turns ${run.nativeMessagesLowerBound ? "≥" : ""}${run.nativeMessages} · ${formatTokenCount(run.usage.total, run.usageLowerBounds.includes("total"))} native tokens`,
+            `${run.parentRunId ? "     " : "  "}Task: “${run.task}” · model turns ${run.nativeMessagesLowerBound ? "≥" : ""}${run.nativeMessages} · ${formatTokenCount(run.usage.total, run.usageLowerBounds.includes("total"))} native tokens · ${formatCostAmount(run.cost.total, run.costLowerBounds.includes("total"))} observed cost`,
         ]), "Alt+H: stop active Agent Harbor work"]);
+}
+function boundedTerminalLine(value, width = terminalLineWidth) {
+    if (visibleTextWidth(value) <= width)
+        return value;
+    const [prefix] = takeTerminalColumns(value, Math.max(1, width - 1));
+    return `${prefix}…`;
+}
+function boundedTerminalLineWithSuffix(body, suffix, width) {
+    const line = `${body}${suffix}`;
+    if (visibleTextWidth(line) <= width)
+        return line;
+    const suffixWidth = visibleTextWidth(suffix);
+    const [rawPrefix] = takeTerminalColumns(body, Math.max(1, width - suffixWidth - 1));
+    const prefix = rawPrefix.trimEnd().replace(/(?:\s*·)+$/u, "").trimEnd();
+    return `${prefix}…${suffix}`;
+}
+function markedCompactField(value, limit, fallback) {
+    const display = piPublicIdentifier(value, limit) ?? fallback;
+    const probe = piPublicIdentifier(value, Math.min(1_000, limit + 1));
+    return `${display}${probe !== undefined && probe !== display ? " [abbr]" : ""}`;
+}
+const piLiveSurfaceWidth = 78;
+/** One bounded status surface shared by every active root in the current Pi project. */
+export function formatPiProjectLiveStatus(runtime, project) {
+    const active = runtime.activeProjectRuns(project);
+    if (!active.length)
+        return "Agent Harbor · no active run";
+    const focus = active[0];
+    const agent = markedCompactField(focus.agent, 18, "unknown-agent");
+    const elapsed = formatElapsed(focus.elapsedMs);
+    return boundedTerminalLineWithSuffix(`Harbor · ${agent} ${focus.state} · ${active.length} active · ` +
+        `${formatTokenCount(focus.usage.total, focus.usageLowerBounds.includes("total"))} tok · ` +
+        `cost ${formatCostAmount(focus.cost.total, focus.costLowerBounds.includes("total"))}`, ` · ${elapsed}`, piLiveSurfaceWidth);
+}
+/** Pi 0.81.x renders at most ten widget lines; always retain active focus and the stop hint. */
+export function formatPiProjectLiveWidget(runtime, project) {
+    const active = runtime.activeProjectRuns(project);
+    if (!active.length)
+        return [];
+    const roots = new Set(active.map(({ rootRunId }) => rootRunId)).size;
+    const focus = active[0];
+    const secondary = active.slice(1, 3);
+    const focusAgent = markedCompactField(focus.agent, 24, "unknown-agent");
+    const focusModel = markedCompactField(formatModel(focus), 42, "model unavailable");
+    const focusThinking = markedCompactField(focus.thinking, 18, "unknown");
+    const focusTask = markedCompactField(focus.task, 60, "task unavailable");
+    const lines = [
+        `Agent Harbor team · newest focus · ${roots} root${roots === 1 ? "" : "s"} · ${active.length} active`,
+        boundedTerminalLineWithSuffix(`${focus.parentRunId ? "↳" : "●"} ${focusAgent} · ${focus.state} · ${formatElapsed(focus.elapsedMs)}`, ` · exact /team run:${focus.id}`, piLiveSurfaceWidth),
+        boundedTerminalLineWithSuffix(`  Model: ${focusModel}`, ` · thinking ${focusThinking}`, piLiveSurfaceWidth),
+        `  Usage: ${formatTokenCount(focus.usage.total, focus.usageLowerBounds.includes("total"))} tok · ${formatCostAmount(focus.cost.total, focus.costLowerBounds.includes("total"))} observed cost`,
+        `  Task: “${focusTask}”`,
+        ...secondary.map((run) => {
+            const agent = markedCompactField(run.agent, 24, "unknown-agent");
+            return boundedTerminalLineWithSuffix(`${run.parentRunId ? "↳" : "●"} ${agent} · ${run.state} · ${formatElapsed(run.elapsedMs)}`, ` · exact /team run:${run.id}`, piLiveSurfaceWidth);
+        }),
+        ...(active.length > 3 ? [`+${active.length - 3} active run${active.length - 3 === 1 ? "" : "s"} omitted · /team status:working`] : []),
+        "Alt+H: stop active Agent Harbor work",
+    ];
+    // Every constructed row is independently clipped to one terminal line, so
+    // the host's ten-line cap cannot hide the newest active run or stop control.
+    return lines.map((line) => boundedTerminalLine(line, piLiveSurfaceWidth)).slice(0, 9);
 }

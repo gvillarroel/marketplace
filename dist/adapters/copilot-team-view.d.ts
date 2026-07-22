@@ -26,6 +26,8 @@ export declare function collectCopilotTeamMembers(project: string, native?: Copi
 export interface CopilotTeamViewOptions {
     readonly filter?: string;
     readonly title?: "team" | "bench";
+    /** Total wrapped lines available after the host reserves space for its own adjunct UI. */
+    readonly totalLineBudget?: number;
     readonly nextModel?: string;
     /** The host returned no usable current-model identity or its offline sentinel. */
     readonly nextModelUnreported?: boolean;
@@ -34,13 +36,15 @@ export interface CopilotTeamViewOptions {
     readonly native?: CopilotNativeRosterStatus;
     readonly selectionGate?: string;
 }
-/** Minimal process-local fallback used when authoritative roster rendering misses its shared deadline. */
+/** Minimal fallback used when authoritative roster rendering misses its deadline. */
 export declare function formatCopilotDegradedTeamView(project: string, runtime: CopilotTeamRuntime, options?: {
     title?: "team" | "bench";
     filter?: string;
     reasons?: readonly string[];
     budgetMs?: number;
     selectionGate?: string;
+    /** Total wrapped lines available after the host reserves space for its own adjunct UI. */
+    totalLineBudget?: number;
 }): string;
 /** Formats roster, active hierarchy, and last mission without inference or durable activity storage. */
 export declare function formatCopilotTeamView(project: string, runtime: CopilotTeamRuntime, options?: CopilotTeamViewOptions): Promise<string>;

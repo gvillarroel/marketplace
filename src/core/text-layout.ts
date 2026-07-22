@@ -119,6 +119,14 @@ function terminalTokens(value: string): TerminalToken[] {
   return tokens;
 }
 
+/** Removes ANSI/ECMA-48 and other zero-width terminal controls while retaining visible evidence. */
+export function stripTerminalControls(value: string): string {
+  return terminalTokens(value)
+    .filter(({ width }) => width > 0)
+    .map(({ value: token }) => token)
+    .join("");
+}
+
 /** Counts terminal columns after treating ANSI controls as zero-width units. */
 export function visibleTextWidth(value: string): number {
   return terminalTokens(value).reduce((sum, token) => sum + token.width, 0);

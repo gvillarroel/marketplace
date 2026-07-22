@@ -739,8 +739,8 @@ test("Copilot /contract relabels the same-prompt selected root without losing it
   assert.equal(identity.memberKind, "utility");
   assert.equal(identity.taskLabel, "validate and run one disposable contractor");
   assert.equal(lifecycle.filter((event) => event.type === "root.started").length, 1);
-  assert.equal(admissions.filter(({ type }) => type === "root").length, 0,
-    "relabeling the selected root reserved a duplicate runtime root");
+  assert.equal(admissions.filter(({ type }) => type === "root").length, 1,
+    "relabeling the selected root changed its single admission reservation");
   const tool = contractInput(sessionId, { definition: raw }, "harbor_contract");
   assert.equal((await coordinator.hooks.onPreToolUse(tool, { sessionId }))?.permissionDecision, "allow");
   const nativeInvocation = contractToolInvocation(sessionId, raw, {
@@ -783,7 +783,10 @@ test("Copilot /contract relabels the same-prompt selected root without losing it
   coordinator.observeEvent({
     type: "session.idle", id: "selected-root-idle", parentId: "selected-task-complete", data: { aborted: false },
   });
-  assert.deepEqual(admissions.map(({ type, memberKind }) => [type, memberKind]), [["child", "contractor"]]);
+  assert.deepEqual(admissions.map(({ type, memberKind }) => [type, memberKind]), [
+    ["root", undefined],
+    ["child", "contractor"],
+  ]);
   assert.equal(lifecycle.filter((event) => event.type === "run.usage" && event.kind === "root").length, 1);
   assert.equal(lifecycle.filter((event) => event.type === "run.usage" && event.kind === "child").length, 1);
   assert.equal(lifecycle.find((event) => event.type === "run.finished" && event.kind === "root")?.outcome, "completed");
@@ -810,14 +813,15 @@ test("Copilot hides ambiguous inline /contract details without reserving a wrapp
   assert.equal(root?.agent, "crafter");
   assert.equal(root?.taskLabel, "request references /contract; details hidden");
   assert.equal(lifecycle.some((event) => event.type === "run.identity"), false);
-  assert.equal(admissions.length, 0);
+  assert.equal(admissions.length, 1);
+  assert.equal(admissions[0].type, "root");
   assert.equal(JSON.stringify(lifecycle).includes("PRIVATE-INLINE-MENTION"), false);
   const denied = await coordinator.hooks.onPreToolUse(contractInput("ambiguous-inline-contract", {
     agent_type: "explore", description: "missing provenance", prompt: "must not run",
   }), { sessionId: "ambiguous-inline-contract" });
   assert.equal(denied?.permissionDecision, "deny");
   assert.match(denied?.permissionDecisionReason ?? "", /provenance is observed/u);
-  assert.equal(admissions.length, 0);
+  assert.equal(admissions.length, 1);
 });
 
 test("Copilot selected /contract skill activity closes abandoned wrappers and child admission still fails before model start", async () => {
@@ -870,8 +874,8 @@ test("Copilot selected /contract skill activity closes abandoned wrappers and ch
   assert.match(denied?.permissionDecisionReason ?? "", /selected child capacity unavailable/u);
   assert.equal(admissionLifecycle.filter((event) => event.type === "root.started").length, 1);
   assert.equal(admissionLifecycle.filter((event) => event.type === "child.started").length, 0);
-  assert.equal(admissions.filter(({ type }) => type === "root").length, 0,
-    "selected-root relabel attempted a duplicate root admission");
+  assert.equal(admissions.filter(({ type }) => type === "root").length, 1,
+    "selected-root relabel changed its single root admission");
   admission.observeEvent({
     type: "session.idle", id: "selected-child-admission-idle",
     parentId: `${admissionSession}-contract-complete`, data: { aborted: false },

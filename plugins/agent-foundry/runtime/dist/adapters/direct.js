@@ -1,5 +1,5 @@
 /** Zero-model adapter shared by CLI and native deterministic controls. */
-import { executeCommand } from "../core/commands.js";
+import { executeCommandResult } from "../core/commands.js";
 import { harborContext } from "./shared.js";
 function noModelOrchestrator(harness) {
     return {
@@ -13,6 +13,11 @@ function noModelOrchestrator(harness) {
  * cross the inference boundary, even if command routing regresses.
  */
 export function runDeterministicCommand(harness, command, args, project = process.cwd(), signal, catalogStyle = "plain") {
+    return runDeterministicCommandResult(harness, command, args, project, signal, catalogStyle)
+        .then(({ text }) => text);
+}
+/** Executes a deterministic control while preserving structured lifecycle mutation truth. */
+export function runDeterministicCommandResult(harness, command, args, project = process.cwd(), signal, catalogStyle = "plain") {
     return harborContext(harness, project, noModelOrchestrator(harness), catalogStyle)
-        .then((context) => executeCommand(command, args, context, signal));
+        .then((context) => executeCommandResult(command, args, context, signal));
 }
