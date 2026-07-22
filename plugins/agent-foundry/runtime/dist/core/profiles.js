@@ -6,7 +6,7 @@
  */
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { harborPlayerSkillToolName } from "./custom-tools.js";
 import { harnessProfileLayout } from "./harnesses.js";
 const toolMap = {
@@ -180,6 +180,14 @@ export function renderPlayer(harness, player, roster, project) {
     return common.join("\n");
 }
 /**
+ * Renders the user-level personal registration without binding it to any one project.
+ * OpenCode registrations therefore deny `external_directory`; the project-active copy is
+ * rendered separately with the exact project allowlist when the teammate is enabled.
+ */
+export function renderPlayerRegistration(harness, player) {
+    return renderPlayer(harness, player, "personal");
+}
+/**
  * Tests whether an owned profile exactly matches its validated definition and current renderer.
  * Revision-4 profiles remain legacy-owned for safe repair, but only exact
  * revision-5 output is executable.
@@ -187,6 +195,49 @@ export function renderPlayer(harness, player, roster, project) {
 export function isCanonicalPlayerProfile(content, harness, player, roster, project) {
     const canonical = renderPlayer(harness, player, roster, project);
     return content === canonical;
+}
+/** Proves that a personal registration is the current project-independent representation. */
+export function isCanonicalPlayerRegistration(content, harness, player) {
+    return content === renderPlayerRegistration(harness, player);
+}
+function legacyOpenCodeRegistrationProjects(content) {
+    const frontmatterEnd = content.indexOf("\n---\n", 4);
+    if (!content.startsWith("---\n") || frontmatterEnd < 0)
+        return [];
+    const frontmatter = content.slice(4, frontmatterEnd);
+    const projects = new Set();
+    const allowedPattern = /^    ("(?:[^"\\]|\\.)*"): allow$/gmu;
+    for (const match of frontmatter.matchAll(allowedPattern)) {
+        if (projects.size >= 8)
+            return [];
+        let pattern;
+        try {
+            pattern = JSON.parse(match[1]);
+        }
+        catch {
+            continue;
+        }
+        if (typeof pattern !== "string")
+            continue;
+        const project = pattern.endsWith("/**") || pattern.endsWith("\\**")
+            ? pattern.slice(0, -3)
+            : undefined;
+        if (project && isAbsolute(project))
+            projects.add(project);
+    }
+    return [...projects];
+}
+/**
+ * Accepts a portable registration or an exact revision-5 OpenCode registration emitted by the
+ * former project-bound renderer. Compatibility never trusts ownership alone: each recovered
+ * legacy project path must reproduce every byte of the supplied profile before it may be migrated.
+ */
+export function isCompatiblePlayerRegistration(content, harness, player) {
+    if (isCanonicalPlayerRegistration(content, harness, player))
+        return true;
+    if (harness !== "opencode")
+        return false;
+    return legacyOpenCodeRegistrationProjects(content).some((project) => isCanonicalPlayerProfile(content, harness, player, "personal", project));
 }
 /** Creates the filesystem layout and bound canonical renderer for one harness/project pair. */
 export function harnessSpec(name, home, project) {

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import test from "node:test";
 import { listManagedActiveIds, requireInvocablePlayer } from "../src/core/active.js";
-import { executeCommand } from "../src/core/commands.js";
+import { executeCommand, executeCommandResult } from "../src/core/commands.js";
 import {
   assertHarborCustomToolAccess,
   dispatchHarborCustomTool,
@@ -26,11 +26,17 @@ import { formatSkillCatalog, loadSkillCatalogSources, skillCatalogConfigPath } f
 import { bundledPlayers, scoutPlayer, skillCatalogSources, trustedSkillRepositories, trustedSkills } from "../src/core/defaults.js";
 import { GhResolver, InvalidSkillDocumentError, validateGithubSkill, validateGithubSkillCatalogSource } from "../src/core/github.js";
 import { isOwnedProfile, Roster, validatePlayer } from "../src/core/lifecycle.js";
-import { harnessSpec } from "../src/core/profiles.js";
+import { harnessSpec, renderPlayer, renderPlayerRegistration } from "../src/core/profiles.js";
 import { visibleTextWidth, wrapPlainText } from "../src/core/text-layout.js";
 import { createSkillCapsule, loadConfiguredSkills, validateRepositorySkill } from "../src/core/skills.js";
 import { filterTrustedSkills, formatScoutSkillMatches } from "../src/core/scout.js";
-import type { GithubResolver, GithubSkill, HarnessName, Orchestrator, TrustedGithubSkills } from "../src/core/types.js";
+import type { GithubResolver, GithubSkill, HarnessName, Orchestrator, PlayerDefinition, TrustedGithubSkills } from "../src/core/types.js";
+
+function latch(): { readonly promise: Promise<void>; readonly release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
 
 for (const harness of ["copilot", "opencode", "pi"] as const) {
   test(`${harness}: all five commands share the executable contract`, async () => {
@@ -46,13 +52,13 @@ for (const harness of ["copilot", "opencode", "pi"] as const) {
     const player = JSON.stringify({ name: "reviewer", description: "Review", prompt: "Review only", tools: ["read", "search"] });
 
     assert.match(await executeCommand("join", player, context), /joined reviewer/);
-    assert.match(await executeCommand("join", player, context), /joined reviewer/, "join must be idempotent");
-    assert.match(await executeCommand("bench", "off reviewer", context), /turned off/);
-    assert.match(await executeCommand("bench", "on reviewer", context), /turned on/);
+    assert.match(await executeCommand("join", player, context), /reviewer is already joined with the requested definition/, "join must be idempotent");
+    assert.match(await executeCommand("bench", "off reviewer", context), /moved to the bench in this project/);
+    assert.match(await executeCommand("bench", "on reviewer", context), /enabled in this project/);
     const listing = await executeCommand("bench", "list", context);
     assert.match(listing, /portfolio-management \| bundled \| bench/);
     assert.match(listing, /reviewer \| personal \| on/);
-    assert.match(await executeCommand("bench", "on portfolio-management", context), /turned on/);
+    assert.match(await executeCommand("bench", "on portfolio-management", context), /enabled in this project/);
     const spec = harnessSpec(harness, home, project);
     const portfolioManagement = join(project, spec.activeDir, `portfolio-management${spec.extension}`);
     const canonicalPortfolioManagement = await readFile(portfolioManagement, "utf8");
@@ -62,7 +68,7 @@ for (const harness of ["copilot", "opencode", "pi"] as const) {
       "utf8",
     );
     assert.match(await executeCommand("bench", "list portfolio-management", context), /portfolio-management \| bundled \| stale/);
-    assert.match(await executeCommand("bench", "on portfolio-management", context), /turned on/);
+    assert.match(await executeCommand("bench", "on portfolio-management", context), /enabled in this project/);
     assert.match(await executeCommand("bench", "list portfolio-management", context), /portfolio-management \| bundled \| on/);
     const skills = await executeCommand("list-skills", "zx", context);
     assert.match(skills, /^REPOSITORY\s+PATH\s+SKILL/mu);
@@ -86,15 +92,200 @@ for (const harness of ["copilot", "opencode", "pi"] as const) {
   });
 }
 
+test("OpenCode personal registration stays portable from project A to project B", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-opencode-portable-registration-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const projectA = join(root, "project-a");
+  const projectB = join(root, "project-b");
+  const player = {
+    name: "reviewer",
+    description: "Portable reviewer",
+    prompt: "Review only.",
+    tools: ["read", "search"],
+  } satisfies PlayerDefinition;
+  const specA = harnessSpec("opencode", home, projectA);
+  const specB = harnessSpec("opencode", home, projectB);
+  const rosterA = new Roster(specA);
+  const rosterB = new Roster(specB);
+
+  await rosterA.join(player);
+  const registrationPath = join(home, specA.registrationDir, `reviewer${specA.extension}`);
+  const activeAPath = join(projectA, specA.activeDir, `reviewer${specA.extension}`);
+  const registration = await readFile(registrationPath, "utf8");
+  const activeA = await readFile(activeAPath, "utf8");
+  assert.equal(registration, renderPlayerRegistration("opencode", player));
+  assert.match(registration, /^  external_directory: deny$/mu);
+  assert.equal(activeA, renderPlayer("opencode", player, "personal", projectA));
+  assert.notEqual(activeA, registration);
+
+  assert.match(await rosterB.bench("on reviewer", bundledPlayers), /reviewer: enabled in this project/u);
+  assert.match(await rosterB.bench("list reviewer", bundledPlayers), /^reviewer \| personal \| on$/mu);
+  const activeBPath = join(projectB, specB.activeDir, `reviewer${specB.extension}`);
+  assert.equal(await readFile(activeBPath, "utf8"), renderPlayer("opencode", player, "personal", projectB));
+  assert.equal(await readFile(registrationPath, "utf8"), registration, "project activation rewrote the portable registration");
+  assert.equal(await readFile(activeAPath, "utf8"), activeA, "project B activation changed project A");
+  assert.deepEqual(requireInvocablePlayer("opencode", projectB, "reviewer").definition, player);
+});
+
+test("OpenCode bench on safely migrates an exact legacy project-bound registration", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-opencode-legacy-registration-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const projectA = join(root, "project-a");
+  const projectB = join(root, "project-b");
+  const specA = harnessSpec("opencode", home, projectA);
+  const specB = harnessSpec("opencode", home, projectB);
+  const player = {
+    name: "legacy-reviewer",
+    description: "Legacy portable reviewer",
+    prompt: "Review only.",
+    tools: ["read"],
+  } satisfies PlayerDefinition;
+  const legacy = renderPlayer("opencode", player, "personal", projectA);
+  const registrationPath = join(home, specA.registrationDir, `legacy-reviewer${specA.extension}`);
+  const activeAPath = join(projectA, specA.activeDir, `legacy-reviewer${specA.extension}`);
+  await Promise.all([
+    mkdir(join(home, specA.registrationDir), { recursive: true }),
+    mkdir(join(projectA, specA.activeDir), { recursive: true }),
+  ]);
+  await Promise.all([writeFile(registrationPath, legacy, "utf8"), writeFile(activeAPath, legacy, "utf8")]);
+
+  const rosterB = new Roster(specB);
+  assert.match(await rosterB.bench("list legacy-reviewer", bundledPlayers), /legacy-reviewer \| personal \| stale/u);
+  assert.match(await rosterB.bench("on legacy-reviewer", bundledPlayers), /legacy-reviewer: enabled in this project/u);
+  assert.equal(await readFile(registrationPath, "utf8"), renderPlayerRegistration("opencode", player));
+  assert.equal(await readFile(activeAPath, "utf8"), legacy, "legacy migration changed project A");
+  assert.match(await new Roster(specA).bench("list legacy-reviewer", bundledPlayers), /legacy-reviewer \| personal \| on/u);
+  assert.equal(
+    await readFile(join(projectB, specB.activeDir, `legacy-reviewer${specB.extension}`), "utf8"),
+    renderPlayer("opencode", player, "personal", projectB),
+  );
+  assert.match(await rosterB.bench("list legacy-reviewer", bundledPlayers), /legacy-reviewer \| personal \| on/u);
+  assert.equal(requireInvocablePlayer("opencode", projectB, "legacy-reviewer").id, "legacy-reviewer");
+
+  const unsafePlayer = { ...player, name: "modified-legacy" };
+  const unsafeLegacy = renderPlayer("opencode", unsafePlayer, "personal", projectA)
+    .replace("  read: true", "  read: false");
+  const unsafeRegistration = join(home, specA.registrationDir, `modified-legacy${specA.extension}`);
+  const unsafeActiveB = join(projectB, specB.activeDir, `modified-legacy${specB.extension}`);
+  await writeFile(unsafeRegistration, unsafeLegacy, "utf8");
+  await assert.rejects(
+    () => rosterB.bench("on modified-legacy", bundledPlayers),
+    /stale personal profile: modified-legacy/u,
+  );
+  assert.equal(await readFile(unsafeRegistration, "utf8"), unsafeLegacy);
+  await assert.rejects(() => access(unsafeActiveB), /ENOENT/u);
+});
+
 test("bench tokenizes commas and spaces, deduplicates IDs, and preserves first-seen output order", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "harbor-bench-tokenization-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const roster = new Roster(harnessSpec("pi", join(root, "home"), join(root, "project")));
   assert.equal(
     await roster.bench("on design, portfolio-management, design", bundledPlayers),
-    "design: turned on\nportfolio-management: turned on",
+    "design: enabled in this project.\nportfolio-management: enabled in this project.",
   );
 });
+
+for (const harness of ["copilot", "opencode", "pi"] as const) {
+  test(`${harness}: lifecycle mutation truth reaches the command boundary exactly`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), `harbor-${harness}-mutation-truth-`));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const context = {
+      roster: new Roster(harnessSpec(harness, join(root, "home"), join(root, "project"))),
+      bundled: bundledPlayers,
+      orchestrator: { harness, run: async () => "model tripwire" } as Orchestrator,
+      github: {} as GithubResolver,
+      trustedSkills,
+    };
+    const definition = JSON.stringify({
+      name: "truth-reviewer",
+      description: "Review mutation truth",
+      prompt: "Review only",
+      tools: ["read"],
+    });
+
+    const joined = await executeCommandResult("join", definition, context);
+    assert.deepEqual(joined.lifecycle, { command: "join", player: "truth-reviewer", status: "changed" });
+    assert.deepEqual(joined.text.split(/\r?\n/u).slice(0, 2), [
+      "joined truth-reviewer",
+      "Roster registration and active profile updated.",
+    ]);
+
+    const sameJoin = await executeCommandResult("join", definition, context);
+    assert.deepEqual(sameJoin.lifecycle, { command: "join", player: "truth-reviewer", status: "already-current" });
+    assert.deepEqual(sameJoin.text.split(/\r?\n/u).slice(0, 2), [
+      "truth-reviewer is already joined with the requested definition.",
+      "No roster files changed.",
+    ]);
+
+    const off = await executeCommandResult("bench", "off truth-reviewer", context);
+    assert.deepEqual(off.lifecycle, {
+      command: "bench",
+      status: "changed",
+      rows: [{ id: "truth-reviewer", action: "off", status: "changed" }],
+    });
+    assert.equal(off.text, "truth-reviewer: moved to the bench in this project.");
+
+    const sameOff = await executeCommandResult("bench", "off truth-reviewer", context);
+    assert.deepEqual(sameOff.lifecycle, {
+      command: "bench",
+      status: "already-current",
+      rows: [{ id: "truth-reviewer", action: "off", status: "already-current" }],
+    });
+    assert.equal(sameOff.text,
+      "truth-reviewer: currently benched in this project · this member was unchanged.\nNo roster files changed.");
+
+    const on = await executeCommandResult("bench", "on truth-reviewer", context);
+    assert.equal(on.lifecycle?.status, "changed");
+    assert.equal(on.text, "truth-reviewer: enabled in this project.");
+    const sameOn = await executeCommandResult("bench", "on truth-reviewer", context);
+    assert.equal(sameOn.lifecycle?.status, "already-current");
+    assert.equal(sameOn.text,
+      "truth-reviewer: currently enabled in this project · this member was unchanged.\nNo roster files changed.");
+
+    await executeCommandResult("bench", "on design", context);
+    const mixed = await executeCommandResult("bench", "on design,build", context);
+    assert.deepEqual(mixed.lifecycle, {
+      command: "bench",
+      status: "changed",
+      rows: [
+        { id: "design", action: "on", status: "already-current" },
+        { id: "build", action: "on", status: "changed" },
+      ],
+    });
+    assert.equal(mixed.text, [
+      "design: currently enabled in this project · this member was unchanged.",
+      "build: enabled in this project.",
+    ].join("\n"));
+    assert.doesNotMatch(mixed.text, /no roster files changed/iu);
+
+    const allNoOp = await executeCommandResult("bench", "on design,build", context);
+    assert.equal(allNoOp.lifecycle?.status, "already-current");
+    assert.equal(allNoOp.text, [
+      "design: currently enabled in this project · this member was unchanged.",
+      "build: currently enabled in this project · this member was unchanged.",
+      "No roster files changed.",
+    ].join("\n"));
+
+    const retired = await executeCommandResult("retire", "truth-reviewer", context);
+    assert.deepEqual(retired.lifecycle, {
+      command: "retire",
+      player: "truth-reviewer",
+      status: "changed",
+    });
+    assert.equal(retired.text, "retired truth-reviewer; other projects intentionally untouched");
+    const retiredAgain = await executeCommandResult("retire", "truth-reviewer", context);
+    assert.deepEqual(retiredAgain.lifecycle, {
+      command: "retire",
+      player: "truth-reviewer",
+      status: "already-current",
+    });
+    assert.equal(retiredAgain.text,
+      "truth-reviewer is already retired here; other projects intentionally untouched\nNo roster files changed.");
+  });
+}
 
 test("join returns only after lifecycle worker handles permit immediate workspace cleanup", async () => {
   const root = await mkdtemp(join(tmpdir(), "harbor-worker-close-"));
@@ -163,7 +354,8 @@ test("exact revision-4 ownership remains repairable but is never invocable", asy
     assert.match(await roster.join({ ...player, replace: true }), /joined worker/);
     const repaired = await readFile(registration, "utf8");
     assert.match(repaired, /revision=5/);
-    assert.equal(repaired, await readFile(active, "utf8"));
+    assert.equal(repaired, renderPlayerRegistration(harness, player));
+    assert.equal(await readFile(active, "utf8"), renderPlayer(harness, player, "personal", spec.project));
   }
 });
 
@@ -863,8 +1055,40 @@ test("description view is explicit, searchable, and still omits skill bodies and
   assert.match(output, /Author small zx scripts[\s\S]*for automation\./u);
   assert.ok(output.split("\n").every((line) => visibleTextWidth(line) <= 96));
   assert.doesNotMatch(output, /a{40}|b{40}|instruction body/u);
-  assert.equal((await executeCommand("list-skills", "--descriptions kubernetes", context)).split("\n").length, 4);
+  assert.equal((await executeCommand("list-skills", "--descriptions kubernetes", context)).split("\n").length, 5);
   await assert.rejects(() => executeCommand("list-skills", "--unknown", context), /usage/);
+});
+
+test("skill catalog pagination reports exact ranges and rejects invalid pages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-catalog-pages-"));
+  const source = { kind: "github", scope: "repository", repo: "owner/paged", track: "refs/heads/main" } as const;
+  const entries = Array.from({ length: 18 }, (_, index) => ({
+    name: `skill-${index.toString().padStart(2, "0")}`,
+    repo: source.repo,
+    path: `skills/skill-${index.toString().padStart(2, "0")}/SKILL.md`,
+    track: source.track,
+  }));
+  const context = {
+    roster: new Roster(harnessSpec("opencode", join(root, "home"), join(root, "project"))),
+    bundled: bundledPlayers,
+    orchestrator: { harness: "opencode", run: async () => "unused" } as Orchestrator,
+    github: {
+      resolve: async () => ({ commit: "a".repeat(40), blob: "b".repeat(40) }),
+      load: async () => "unused",
+      listCatalog: async () => entries,
+    } as GithubResolver,
+    trustedSkills,
+    catalogSources: [source],
+  };
+  const page2 = await executeCommand("list-skills", "--page 2", context);
+  assert.match(page2, /Skill catalog · page 2\/3 · showing 9–16 of 18/u);
+  assert.match(page2, /skill-08/u);
+  assert.doesNotMatch(page2, /skill-07|skill-16/u);
+  assert.match(page2, /Previous: \/list-skills --page 1/u);
+  assert.match(page2, /Next: \/list-skills --page 3/u);
+  await assert.rejects(() => executeCommand("list-skills", "--page 0", context), /usage/u);
+  await assert.rejects(() => executeCommand("list-skills", "--page 4", context), /out of range.*1\.\.3/u);
+  await assert.rejects(() => executeCommand("list-skills", "--page 2 --page 3", context), /usage/u);
 });
 
 test("description view filters catalogs larger than 64 before its bounded metadata lookup", async (t) => {
@@ -1300,7 +1524,7 @@ test("retire is idempotent only when registration and active copies are both abs
   t.after(() => rm(root, { recursive: true, force: true }));
   const spec = harnessSpec("pi", join(root, "home"), join(root, "project"));
   const result = await new Roster(spec).retire("worker");
-  assert.match(result, /already absent/u);
+  assert.match(result, /already retired here/u);
   await Promise.all([
     assert.rejects(() => access(join(spec.home, spec.registrationDir, `worker${spec.extension}`)), /ENOENT/u),
     assert.rejects(() => access(join(spec.project, spec.activeDir, `worker${spec.extension}`)), /ENOENT/u),
@@ -1369,6 +1593,156 @@ test("concurrent roster mutations are serialized by one ownership-checked lock",
     new ObservedRoster(spec).join({ name: "two", description: "two", prompt: "two", tools: ["read"] }),
   ]);
   assert.equal(maximumWrites, 1);
+});
+
+test("bench, join, and retire abort without commit while waiting for the roster lock", async (t) => {
+  const cases = [
+    { command: "bench", args: "on design", target: "design" },
+    {
+      command: "join",
+      args: JSON.stringify({ name: "abort-target", description: "Target", prompt: "Wait", tools: ["read"] }),
+      target: "abort-target",
+    },
+    { command: "retire", args: "retire-target", target: "retire-target" },
+  ] as const;
+
+  for (const item of cases) {
+    const root = await mkdtemp(join(tmpdir(), `harbor-lock-abort-${item.command}-`));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const spec = harnessSpec("pi", join(root, "home"), join(root, "project"));
+    const targetPaths = {
+      registration: join(spec.home, spec.registrationDir, `${item.target}${spec.extension}`),
+      active: join(spec.project, spec.activeDir, `${item.target}${spec.extension}`),
+    };
+    let before: readonly [Buffer, Buffer] | undefined;
+    if (item.command === "retire") {
+      await new Roster(spec).join({
+        name: item.target, description: "Retire target", prompt: "Wait", tools: ["read"],
+      });
+      before = await Promise.all([
+        readFile(targetPaths.registration),
+        readFile(targetPaths.active),
+      ]);
+    }
+
+    const holderEntered = latch();
+    const releaseHolder = latch();
+    class HoldingRoster extends Roster {
+      protected override async applyChange(
+        change: { path: string; content?: string },
+        index: number,
+      ): Promise<void> {
+        if (index === 0) {
+          holderEntered.release();
+          await releaseHolder.promise;
+        }
+        await super.applyChange(change, index);
+      }
+    }
+    const holder = new HoldingRoster(spec).join({
+      name: `lock-holder-${item.command}`,
+      description: "Lock holder",
+      prompt: "Hold the roster lock",
+      tools: ["read"],
+    });
+    await holderEntered.promise;
+
+    const contentionObserved = latch();
+    class ContendedRoster extends Roster {
+      protected override async waitForMutationLock(signal?: AbortSignal): Promise<void> {
+        contentionObserved.release();
+        await super.waitForMutationLock(signal);
+      }
+    }
+    const roster = new ContendedRoster(spec);
+    const controller = new AbortController();
+    const context = {
+      roster,
+      bundled: bundledPlayers,
+      orchestrator: { harness: "pi", run: async () => "unused" } satisfies Orchestrator,
+      github: {} as GithubResolver,
+      trustedSkills,
+    };
+    const operation = executeCommandResult(item.command, item.args, context, controller.signal);
+    await contentionObserved.promise;
+    controller.abort();
+    try {
+      await assert.rejects(operation, { name: "AbortError" });
+    } finally {
+      releaseHolder.release();
+      await holder;
+    }
+
+    if (item.command === "retire") {
+      assert.deepEqual(await readFile(targetPaths.registration), before![0]);
+      assert.deepEqual(await readFile(targetPaths.active), before![1]);
+    } else {
+      await Promise.all([
+        assert.rejects(() => access(targetPaths.registration), /ENOENT/u),
+        assert.rejects(() => access(targetPaths.active), /ENOENT/u),
+      ]);
+    }
+  }
+});
+
+test("late abort cannot split bench, join, or retire transactions and each reports its result", async (t) => {
+  const cases = [
+    { command: "bench", args: "on design", target: "design" },
+    {
+      command: "join",
+      args: JSON.stringify({ name: "late-target", description: "Target", prompt: "Commit", tools: ["read"] }),
+      target: "late-target",
+    },
+    { command: "retire", args: "late-retire-target", target: "late-retire-target" },
+  ] as const;
+
+  for (const item of cases) {
+    const root = await mkdtemp(join(tmpdir(), `harbor-late-abort-${item.command}-`));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const spec = harnessSpec("pi", join(root, "home"), join(root, "project"));
+    const targetPaths = {
+      registration: join(spec.home, spec.registrationDir, `${item.target}${spec.extension}`),
+      active: join(spec.project, spec.activeDir, `${item.target}${spec.extension}`),
+    };
+    if (item.command === "retire") {
+      await new Roster(spec).join({
+        name: item.target, description: "Retire target", prompt: "Commit", tools: ["read"],
+      });
+    }
+
+    const controller = new AbortController();
+    class AbortAfterFirstStageRoster extends Roster {
+      protected override async applyChange(
+        change: { path: string; content?: string },
+        index: number,
+      ): Promise<void> {
+        await super.applyChange(change, index);
+        if (index === 0) controller.abort();
+      }
+    }
+    const context = {
+      roster: new AbortAfterFirstStageRoster(spec),
+      bundled: bundledPlayers,
+      orchestrator: { harness: "pi", run: async () => "unused" } satisfies Orchestrator,
+      github: {} as GithubResolver,
+      trustedSkills,
+    };
+    const result = await executeCommandResult(item.command, item.args, context, controller.signal);
+    assert.equal(controller.signal.aborted, true);
+    assert.equal(result.lifecycle?.command, item.command);
+    assert.equal(result.lifecycle?.status, "changed");
+
+    if (item.command === "retire") {
+      await Promise.all([
+        assert.rejects(() => access(targetPaths.registration), /ENOENT/u),
+        assert.rejects(() => access(targetPaths.active), /ENOENT/u),
+      ]);
+    } else if (item.command === "join") {
+      assert.deepEqual(await readFile(targetPaths.registration), await readFile(targetPaths.active));
+    } else {
+      assert.equal(isOwnedProfile(await readFile(targetPaths.active, "utf8"), item.target, "sdlc"), true);
+    }
+  }
 });
 
 const parentRenameBlockCodes = new Set(["EACCES", "EBUSY", "EPERM"]);

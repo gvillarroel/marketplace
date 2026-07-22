@@ -5,6 +5,8 @@ export interface PiTeamMember {
     readonly availability: "ready" | "bench" | "stale" | "conflict";
     readonly description: string;
     readonly capacity: string;
+    readonly tools?: readonly string[];
+    readonly skills?: readonly string[];
     readonly configuredModel?: string;
     readonly repairKind?: "bundled-profile" | "personal-active" | "personal-registration";
 }
@@ -17,6 +19,8 @@ export declare function collectPiTeamMembers(project: string): Promise<PiTeamMem
 export interface PiTeamViewOptions {
     readonly filter?: string;
     readonly title?: "team" | "bench";
+    /** A zero-model host discovery warning that must remain inside this bounded view. */
+    readonly discoveryWarning?: string;
     readonly nextModel?: {
         readonly provider: string;
         readonly id: string;

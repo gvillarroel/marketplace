@@ -26,7 +26,7 @@ const playerSkillPrefix = "harbor_skill_";
 const maximumDefinitionBytes = 30_000;
 const maximumTaskBytes = 30_000;
 const maximumInvocationIdentityBytes = 4_096;
-const maximumScoutRosterMembers = 32;
+export const maximumHarborTeamRosterMembers = 32;
 const maximumScoutRosterBytes = 16_384;
 const rosterSearchStopWords = new Set([
   "a", "al", "and", "con", "de", "del", "el", "en", "for", "la", "las", "los", "of", "para", "por", "the", "to", "un", "una", "with", "y",
@@ -88,11 +88,12 @@ function rosterMatchScore(fields: readonly { readonly value: string; readonly we
 export function formatHarborTeamRosterSnapshot(
   entries: readonly HarborTeamRosterEntry[],
   query = "",
+  benchOffCommand: "/bench off <id...>" | "/bench-off <id...>" = "/bench off <id...>",
 ): HarborFormattedTeamRoster {
   const total = entries.length;
-  if (total > maximumScoutRosterMembers) {
+  if (total > maximumHarborTeamRosterMembers) {
     return {
-      text: `Complete roster unavailable: ${total} enabled specialists exceeds the ${maximumScoutRosterMembers}-member model-facing limit. Disable unneeded members with /bench off, then start a new run. No partial roster was disclosed and recruitment is blocked.`,
+      text: `Complete roster unavailable: ${total} enabled specialists exceeds the ${maximumHarborTeamRosterMembers}-member model-facing limit. Disable unneeded bundled/personal members with ${benchOffCommand}, then start a new run. No partial roster was disclosed and recruitment is blocked.`,
       complete: false,
       total,
     };
@@ -137,7 +138,7 @@ export function formatHarborTeamRosterSnapshot(
   ].join("\n");
   if (Buffer.byteLength(text, "utf8") > maximumScoutRosterBytes) {
     return {
-      text: `Complete roster unavailable within the ${maximumScoutRosterBytes}-byte model-facing limit. Shorten public role/model metadata or disable unneeded members, then start a new run. No partial roster was disclosed and recruitment is blocked.`,
+      text: `Complete roster unavailable within the ${maximumScoutRosterBytes}-byte model-facing limit. Shorten public role/model metadata or disable unneeded bundled/personal members with ${benchOffCommand}, then start a new run. No partial roster was disclosed and recruitment is blocked.`,
       complete: false,
       total,
     };
@@ -532,6 +533,18 @@ function jsonObjectLiteral(value: unknown, label: string): string {
   return value;
 }
 
+function recruitmentPlayerDefinition(value: unknown): string {
+  const definition = jsonObjectLiteral(value, "player definition");
+  const parsed = JSON.parse(definition) as Record<string, unknown>;
+  if (parsed.replace === true) {
+    throw new Error(
+      "harbor_join_player recruits a new teammate and cannot replace an existing roster member; " +
+      "use the deterministic /join command manually for an intentional replacement",
+    );
+  }
+  return definition;
+}
+
 export type HarborValidatedCustomToolCall =
   | { readonly kind: "contract-preflight"; readonly definition: string }
   | { readonly kind: "player-skills"; readonly player: string }
@@ -562,7 +575,7 @@ export function validateHarborCustomToolArguments(name: string, value: unknown):
   }
   if (name === harborCustomToolNames.joinPlayer) {
     exactKeys(args, ["definition"]);
-    return { kind: "join-player", definition: jsonObjectLiteral(args.definition, "player definition") };
+    return { kind: "join-player", definition: recruitmentPlayerDefinition(args.definition) };
   }
   if (name === harborCustomToolNames.delegate) {
     exactKeys(args, ["agent", "task"]);

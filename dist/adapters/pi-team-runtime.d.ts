@@ -10,6 +10,15 @@ export interface PiNativeTokenUsage {
     readonly total?: number;
 }
 export type PiNativeUsageField = keyof PiNativeTokenUsage;
+/** Native provider cost reported by Pi, in USD. Missing fields stay unobserved. */
+export interface PiNativeCost {
+    readonly input?: number;
+    readonly output?: number;
+    readonly cacheRead?: number;
+    readonly cacheWrite?: number;
+    readonly total?: number;
+}
+export type PiNativeCostField = keyof PiNativeCost;
 export interface PiTeamRunSnapshot {
     readonly id: string;
     readonly sequence: number;
@@ -36,9 +45,16 @@ export interface PiTeamRunSnapshot {
     readonly usage: PiNativeTokenUsage;
     /** Fields whose visible value is a known lower bound because at least one turn lacked native usage. */
     readonly usageLowerBounds: readonly PiNativeUsageField[];
+    readonly cost: PiNativeCost;
+    /** Cost fields that are lower bounds because a native turn omitted cost or overflowed. */
+    readonly costLowerBounds: readonly PiNativeCostField[];
     readonly nativeMessages: number;
     /** True when message identity/retention bounds mean additional native turns may have been omitted. */
     readonly nativeMessagesLowerBound: boolean;
+    /** Durable activity owned by another Pi/Copilot process; telemetry and stop remain with that owner. */
+    readonly projectSharedExternal?: true;
+    readonly sharedActivityKind?: "direct" | "delegated";
+    readonly sharedHeartbeatOverdue?: true;
 }
 export interface PiRunStart {
     readonly project: string;
@@ -79,6 +95,8 @@ export declare class PiTeamRuntime {
     latestRoot(project: string): PiTeamRunSnapshot | undefined;
     missionUsage(rootRunId: string): PiNativeTokenUsage;
     missionUsageLowerBounds(rootRunId: string): PiNativeUsageField[];
+    missionCost(rootRunId: string): PiNativeCost;
+    missionCostLowerBounds(rootRunId: string): PiNativeCostField[];
     projectName(project: string): string;
     private snapshot;
     private require;
@@ -87,8 +105,10 @@ export declare class PiTeamRuntime {
 }
 export declare function formatElapsed(milliseconds: number): string;
 export declare function formatTokenCount(value: number | undefined, lowerBound?: boolean): string;
+export declare function formatCostAmount(value: number | undefined, lowerBound?: boolean): string;
 export declare function formatModel(run: PiTeamRunSnapshot): string;
 export declare function formatUsage(usage: PiNativeTokenUsage, lowerBounds?: readonly PiNativeUsageField[]): string;
+export declare function formatCost(cost: PiNativeCost, lowerBounds?: readonly PiNativeCostField[]): string;
 /** Waits for best-effort shutdown cleanup without allowing a provider to hang Pi forever. */
 export declare function settlePiRootPromises(promises: readonly Promise<unknown>[], timeoutMs?: number): Promise<boolean>;
 /** Formats selected run rows without inventing or leaking an aggregate. */
@@ -99,3 +119,7 @@ export declare function formatPiMissionDetails(runtime: PiTeamRuntime, rootRunId
 export declare function formatPiMissionReport(runtime: PiTeamRuntime, rootRunId: string): string;
 export declare function formatPiLiveStatus(runtime: PiTeamRuntime, rootRunId: string): string;
 export declare function formatPiLiveWidget(runtime: PiTeamRuntime, rootRunId: string): string[];
+/** One bounded status surface shared by every active root in the current Pi project. */
+export declare function formatPiProjectLiveStatus(runtime: PiTeamRuntime, project: string): string;
+/** Pi 0.81.x renders at most ten widget lines; always retain active focus and the stop hint. */
+export declare function formatPiProjectLiveWidget(runtime: PiTeamRuntime, project: string): string[];

@@ -7,6 +7,7 @@ export declare const harborCustomToolNames: Readonly<{
     readonly teamRoster: "harbor_team_roster";
 }>;
 export type HarborStaticCustomToolName = (typeof harborCustomToolNames)[keyof typeof harborCustomToolNames];
+export declare const maximumHarborTeamRosterMembers = 32;
 export type HarborScoutToolName = typeof harborCustomToolNames.teamRoster | typeof harborCustomToolNames.filterSkills | typeof harborCustomToolNames.joinPlayer;
 export interface HarborTeamRosterEntry {
     readonly id: string;
@@ -26,7 +27,7 @@ export interface HarborFormattedTeamRoster {
  * Produces the same complete, compact model-facing roster in every adapter.
  * A query ranks likely matches first but never hides other enabled members.
  */
-export declare function formatHarborTeamRosterSnapshot(entries: readonly HarborTeamRosterEntry[], query?: string): HarborFormattedTeamRoster;
+export declare function formatHarborTeamRosterSnapshot(entries: readonly HarborTeamRosterEntry[], query?: string, benchOffCommand?: "/bench off <id...>" | "/bench-off <id...>"): HarborFormattedTeamRoster;
 export interface HarborScoutCallTicket {
     readonly name: HarborScoutToolName;
     readonly nonce: number;

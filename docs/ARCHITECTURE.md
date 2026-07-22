@@ -1,6 +1,6 @@
 # Arquitectura de Agent Harbor
 
-Este documento describe la implementación actual de Agent Harbor 0.12.0. Es
+Este documento describe la implementación actual de Agent Harbor 0.12.1. Es
 operativo y explicativo; [REQUIREMENTS.md](REQUIREMENTS.md) sigue siendo la
 fuente normativa cuando exista una discrepancia.
 
@@ -89,9 +89,9 @@ mismo layout.
 | Copilot extensión | `plugins/agent-foundry/extensions/agent-harbor/extension.mjs` | `/team` con overview dinámico, controles client deterministas, `/player`, aliases `/<id>`, runner terminal seguro y guard de `team-lead`. |
 | Copilot custom tools | `extension.mjs` → `joinSession({ tools: copilotNativeTools })` | La API pública fija al arrancar la unión mínima: `harbor_contract`, las tres tools del scout (`harbor_team_roster`, filtro y join) y un `harbor_skill_<id>` sólo por cada rol fijo o perfil activo canónico que tenga skills. La consulta de roster queda ligada al scout, es read-only y acotada; no incluye loaders de players en banca ni delegación, no ejecuta un servidor/proceso auxiliar y nunca acepta un player ID aportado por el modelo. |
 | Copilot model-backed | `plugins/agent-foundry/skills/contract/SKILL.md` | Único wrapper Markdown: `/contract` hace preflight y crea exactamente un child. Los cuatro controles deterministas no tienen fallback skill. |
-| OpenCode server | export `.`/`./server` → `dist/adapters/opencode.js` | Plugin `AgentHarborPlugin`: commands, agents y tools lifecycle, delegación, skills y las tres tools aisladas del scout. |
-| OpenCode TUI | export `./tui` → `dist/adapters/opencode-tui.js` | Ocho entradas directas sin modelo; `/team` asigna dinámicamente su presupuesto de 30 líneas/96 columnas, conserva los nueve factory, ofrece detalle por filtro, reservations de lifecycle y stop verificado conciso. |
-| Pi | manifest `package.json.pi.extensions` y export `./pi` → `dist/adapters/pi.js` | `ExtensionAPI.registerCommand`/`registerTool`; `/team` usa overview dinámico y players reales mediante sesiones SDK en memoria. |
+| OpenCode server | export `.`/`./server` → `dist/adapters/opencode.js` | Plugin `AgentHarborPlugin`: agents, aliases directos de especialistas y tools acotadas de lead/scout/skills. No registra fallbacks lifecycle mediados por modelo ni una tool ambiental genérica `harbor`. |
+| OpenCode TUI | export `./tui` → `dist/adapters/opencode-tui.js` | Nueve entradas directas: ocho controles deterministas cero modelo y `/contract`, que crea exactamente un child. `/team` usa 30 líneas/96 columnas, detalle por filtro, diagnósticos paginados, claims cross-isolate y stop verificado. |
+| Pi | manifest `package.json.pi.extensions` y export `./pi` → `dist/adapters/pi.js` | `ExtensionAPI.registerCommand` publica controles y aliases; las custom tools se inyectan sólo en el child que las necesita, no mediante `registerTool`. `/team` usa overview dinámico y los players abren sesiones SDK en memoria. |
 | CLI universal | `package.json.bin.agent-harbor` → `dist/cli.js` | `agent-harbor <harness> <command> [args]`. |
 | API mínima | export `./core` → `dist/core/commands.js` | Contrato programático compartido de comandos. |
 
@@ -116,9 +116,11 @@ que falla si alguien intenta usarlo y llama a `executeCommand`:
 Copilot usa handlers client en `extension.mjs`; OpenCode usa
 `openCodeDirectCommands`; Pi usa handlers `registerCommand`; el CLI sirve como
 ruta portable. Copilot no publica fallbacks skill para controles deterministas:
-si la extensión experimental no está activa se usa el CLI directo. Los comandos
-canónicos de OpenCode sí pueden ser mediados por el modelo debido a la superficie
-del host, aunque el backend que finalmente ejecutan siga siendo determinista.
+si la extensión experimental no está activa se usa el CLI directo. OpenCode
+expone lifecycle y catálogo sólo por sus controles TUI directos o el CLI; al
+reconciliar configuración elimina únicamente aliases legacy exactos y conserva
+comandos extranjeros. El servidor no ofrece una ruta lifecycle mediada por
+modelo ni una tool genérica que el modelo pueda invocar.
 
 La TUI de OpenCode mantiene un epoch de display, comparte snapshots in-flight,
 serializa una sola mutación y liga cada prompt/alert a un token de ownership.
@@ -146,14 +148,18 @@ refresh autoritativo cuando puede y dirige a `/team member:<id>`; sólo ese esta
 runner. Así la confirmación no convierte persistencia en una promesa de
 disponibilidad.
 
-Los formatters Pi y Copilot prueban primero la vista completa y, si supera 30
-líneas envueltas, reducen en bucle sólo las cuotas de personales y actividad
-hasta entrar en el presupuesto. Los nueve miembros no personales de fábrica son
-invariantes; cada cuota omitida produce conteo y filtros. Sus vistas filtradas
-mantienen detalle rico y el límite común de 96 celdas por línea, pero no usan el
-presupuesto del overview sin filtro. OpenCode aplica el mismo ancho y conserva
-los nueve factory; además acota a 30 líneas tanto overview como filtros,
-cambiando de compacto a detalle sólo cuando la coincidencia es estrecha.
+Los formatters Pi y Copilot prueban primero la vista completa y acotan toda
+salida visible a 30 líneas envueltas de 96 celdas. En el overview reducen en
+bucle sólo las cuotas de personales y actividad: los nueve miembros no
+personales de fábrica son invariantes y cada cuota omitida produce conteo y
+filtros. Una consulta estrecha dedica el mismo presupuesto a detalle rico;
+Copilot descuenta además diagnóstico SDK/host y reparación del total, de modo
+que los adjuncts nunca se suman después de una vista ya completa. OpenCode aplica
+el mismo ancho y máximo a overview, filtros y ayuda, cambiando de compacto a
+detalle sólo cuando la coincidencia es estrecha y reservando el footer de
+privacidad en help. Los adapters acotan también los resultados masivos de stop
+al mismo alto/ancho y sustituyen el exceso por un conteo más una ruta de
+inspección; no vuelcan una fila ilimitada por cada owner externo.
 
 La normalización de modelo ocurre antes del rendering. Pi combina su placeholder
 0.80.10 `unknown/unknown` con máximo cero —o un modelo ausente— con la
@@ -183,24 +189,127 @@ Semántica común:
   descarga, muestra, instala ni cachea bodies. Un override visible del proyecto
   no amplía `trustedSkills` ni `trustedSkillRepositories`, usados para ejecución.
 
+### Actividad persistente compartida entre Pi y Copilot
+
+`PiTeamRuntime` y `CopilotTeamRuntime` conservan en memoria sólo el árbol rico
+local: IDs, tarea reducida, modelo/thinking o reasoning, usage/coste y hasta 32
+misiones terminales. En paralelo, todo root o child de un player nombrado toma
+un claim mínimo en `team-activity-v1`, implementado por
+`opencode-agent-activity.ts` pero separado del inventario nativo de OpenCode.
+Ese namespace converge por la identidad canónica del proyecto físico entre
+procesos Pi y Copilot, aunque usen homes de harness distintos. Los wrappers y
+children anónimos de `/contract` no entran: su telemetría e historial son
+process-local. Un claim v2 de este namespace sólo acepta `ownerRuntime` `pi` o
+`copilot`; `opencode` pertenece al namespace nativo separado y aquí degrada la
+autoridad.
+
+La admisión se serializa bajo el capacity lock del namespace compartido, con
+máximo 32 claims persistentes por proyecto entre roots y children. La última
+validación de definición corre dentro del gate antes de publicar `starting`; los
+runners nominales de Pi/Copilot que capturan un snapshot de manager/recruiter lo
+comparan también allí. El mismo gate excluye `retire`,
+`bench off` y reemplazo mientras el target está reclamado; un manager o scout
+protege conservadoramente todo su snapshot. El scout puede ignorar sólo su
+propio token exacto durante el join que él mismo ejecuta.
+
+La publicación usa el mismo binding, hard link atómico, identidad inode/device,
+token y mtime verificados que los claims OpenCode, pero en su namespace propio.
+El heartbeat vencido no libera ownership: con PID posiblemente vivo permanece
+visible, busy y contado. Reclaim exige PID definitivamente ausente y segunda
+lectura exacta. Release sólo confirma éxito cuando desaparece esa generación.
+Lecturas y admisiones toman el capacity lock para validar hasta 64 entradas
+no-lock y barrer generaciones muertas con una segunda comprobación exacta de
+PID/token/inode/mtime. El archivo transitorio del lock no consume ese cupo, por
+lo que 64 claims muertos no bloquean permanentemente `/team` ni la admisión; una
+entrada no-lock 65, un PID vivo/ambiguo/reutilizado o una generación cambiante
+siguen fallando cerrado. Un lock vencido sólo se recupera con PID definitivamente
+ausente y la misma generación exacta.
+Si una transición local ya no puede probarla, el adapter marca
+`cleanup-error`, solicita abort del root owner y conserva el hazard de release;
+no continúa declarando ownership seguro. En Pi ese hazard queda ligado a la
+claim/generación exacta: mantiene ocupado al player y su slot hasta release o
+recovery verificado, pero no se eleva al gate durable de todo el proyecto que
+Copilot aplica más adelante. Una lectura ambigua del store sí degrada la
+autoridad del inventario completo.
+
+Los formatters unen runs locales con claims externos como filas
+`shared-<player>`. La versión 2 expone sólo player, direct/delegated, fase,
+elapsed y runtime/PID owner para routing. La versión 1 conserva el PID conocido,
+pero se muestra como `owner runtime unverified (legacy claim)` porque no contiene
+`ownerRuntime`. El texto libre filtra por player, alias, runtime y PID divulgados,
+pero nunca por placeholders de tarea/modelo/usage omitidos. Tarea, modelo, usage,
+jerarquía, IDs nativos, token y path siguen en el proceso owner. Sólo ese proceso
+tiene la autoridad de stop. Si el store compartido no puede leerse, las vistas
+muestran `≥` actividad local visible, marcan
+disponibilidad como no verificada, conservan el warning en no-match y bloquean
+selección/delegación. Pi aún puede abortar sus roots locales y advierte que no
+verificó owners externos; Copilot hace fallar cerrado `/team stop` antes de
+afirmar que inspeccionó todo el proyecto.
+
 ### Observabilidad nativa de OpenCode
 
-`opencode-team-runtime.ts` combina roster determinista con `session.list`,
-`active`, `get` y `messages` v2 bajo límites y deadlines. Prueba un child por su
-title HMAC session/project-bound o una sesión directa por el `agent` raw exacto
-contra un miembro no conflictivo. Los mensajes sólo se proyectan después de esa
-prueba y nunca conservan assistant prose, reasoning o payloads de tools.
+El preflight del plugin de servidor usa el cliente v1 inyectado:
+`session.status` seguido de `session.messages` sólo para sesiones no idle, con
+32 actividades, ocho mensajes por sesión, concurrencia cuatro y deadlines
+cerrados. `opencode-team-runtime.ts`, en cambio, combina roster determinista con
+`session.list`, `active`, `get` y `messages` v2 para la vista y stop del TUI.
+Prueba un child por su title HMAC session/project-bound. Una sesión directa se
+liga primero por el claim filesystem exacto; sólo el fallback sin claim exige
+el `agent` raw exacto contra un miembro no conflictivo. Los mensajes sólo se
+proyectan después de esa prueba y nunca conservan assistant prose, reasoning o
+payloads de tools.
 Las custom tools del lead, scout y loader comparten una frontera de error que
 redacta y acota fallos SDK/Gh antes de devolverlos al host, omite `cause` y
 conserva el nombre `AbortError` sólo para cancelación.
 
-Los IDs nativos permanecen en un `WeakMap` privado asociado a cada run; la vista
-expone sólo `run-<digest>`. Para trabajo directo, una huella de la frontera de
-turno separa usage actual de agregados históricos. Stop vuelve a leer active y
-revalida cada sesión inmediatamente antes de su interrupt. Como OpenCode no
-ofrece compare-and-interrupt atómico, la UI declara la carrera residual y falla
-cerrado cuando no existe autoridad suficiente. Un refresh posterior no puede
-cambiar el resultado ya confirmado de un interrupt.
+La vista sólo calcula ready/idle/delegabilidad cuando `activeAuthoritative` es
+verdadero. Si falla una autoridad, muestra actividad visible como límite
+inferior `≥`, marca disponibilidad como no verificada, bloquea al lead y nunca
+convierte cero filas en “nadie trabaja”. El no-match degradado conserva warning
+y reparación. En OpenCode se abre `/team` y se escribe `diagnostics [page]` o
+`warnings [page]`; esas entradas recuperan todos los motivos sanitizados y sus
+pasos dentro del mismo límite visual.
+
+Los claims nativos de OpenCode viven en el namespace separado
+`opencode-activity-v1`, bajo el root runtime estable por usuario
+`~/.agent-harbor` (o `AGENT_HARBOR_ACTIVITY_HOME` explícito), independiente de
+`OPENCODE_CONFIG_DIR`. El directorio privado se deriva de la identidad canónica
+del proyecto físico, por lo que distintos config homes y spellings symlink del
+mismo repo convergen. Se publican por archivo completo + `fsync` + hard link
+atómico, con binding de directorios, device/inode bigint, token y mtime.
+Un heartbeat mantiene la frescura; TTL no basta para reclaim, que exige PID
+definitivamente ausente y relectura exacta. Esto coordina isolates y procesos
+del mismo usuario, pero no constituye una frontera contra un proceso hostil del
+mismo usuario: depende de operaciones de paths/identidad de Node y de las
+garantías del filesystem. No hay MCP, daemon ni transporte de red.
+
+La capacidad de 32 claims por proyecto se decide bajo otro lock filesystem
+privado y publicado atómicamente; así dos isolates no admiten ambos sobre un
+conteo obsoleto. Espera y stale recovery son acotados, y release sólo termina en
+éxito si desapareció la generación canónica exacta. Un fallo de release se
+propaga como hazard de recuperación, incluso junto al fallo original mediante
+`AggregateError` cuando corresponde.
+
+Los IDs nativos y tokens de claim permanecen en estructuras privadas; la vista
+expone sólo `run-<digest>` y nunca paths internos. `starting` delegado aún no
+tiene child ID público ni stop; `working` liga el child exacto y `cleaning` sólo
+existe para su cleanup. Direct usa `cleaning` sólo como reconciliación
+fail-closed de un terminal session-scoped no probado y puede volver a `working`
+si llega evidencia native busy de la generación vigente. Claims
+de otro PID son visibles pero sólo el proceso owner puede detenerlos. Para
+trabajo directo, una huella de la frontera de turno separa usage actual de
+agregados históricos. Stop vuelve a leer active y revalida cada sesión antes de
+interrupt; después sólo declara éxito al confirmar sesión inactiva y
+desaparición del claim exacto. Como OpenCode no ofrece
+compare-and-interrupt atómico, la UI declara la carrera residual y falla cerrado
+cuando no existe autoridad suficiente.
+
+La pérdida post-admission de la generación exacta fuerza un fence de
+recuperación y abort native; nunca se continúa model work sin ownership durable.
+
+La lista v2 solicita `máximo + 1` (65 para un máximo visible de 64) y considera
+truncado sólo si llegó ese elemento extra. Los cursores bidireccionales espurios
+de OpenCode 1.18.3 no bastan para declarar truncamiento.
 
 La clasificación, privacidad, telemetría, degradación, límites y reparación se
 documentan en [OPENCODE-TEAM-OBSERVABILITY.md](OPENCODE-TEAM-OBSERVABILITY.md).
@@ -239,7 +348,11 @@ La invocación nominal evita una inferencia de routing:
   al arrancar o discovery no pudo probar disponibilidad.
 - OpenCode configura `/<id>` con `agent: <id>`,
   `template: "$ARGUMENTS"` y `subtask: false`; el hook previo vuelve a validar
-  tarea, actividad y ownership.
+  tarea, actividad y ownership. El alias cargado conserva el
+  `playerDefinitionDigest` de su definición; antes de inferencia lo compara con
+  el perfil activo canónico y exige reload si cambió. Así, el roster live puede
+  habilitar delegación antes del reload sin afirmar que native selection o el
+  alias ya cargaron esa definición.
 - Pi registra `/<id>` y `runPlayer` abre una sesión SDK en memoria con la
   definición fija o recuperada del perfil activo. Tras `join` o `bench`, Pi
   sincroniza los nuevos IDs inmediatamente; Copilot y OpenCode los incorporan
@@ -259,9 +372,9 @@ cada especialista exitoso una sola vez y sintetizar sólo la evidencia devuelta.
 
 | Harness | Boundary de delegación | Controles ejecutables |
 | --- | --- | --- |
-| Copilot | `task` nativo + `createCopilotCoordinatorGuard` | Snapshot de agentes fuera del hook; target exacto enabled; path revalidado; admission contra actividad process-local antes del child; sin recursión/nesting; máximo seis y uno in-flight por prompt. `selectionEpoch` impide que un refresh tardío pise una selección más nueva. El host ejecuta y termina cada `task` síncrono. |
-| OpenCode | Tools exclusivas `harbor_team_roster` y `harbor_delegate` | Roster `ready|busy` une preflight v2 `active→get` con reservation process-local por proyecto/agente; target revalidado; resolución del turno raíz y modelo/variant acotados; modelo configurado del target o herencia del host; máximo seis, sin target repetido y uno in-flight. Cada llamada usa `runAgent`, publica fases starting/working/cleaning, acota evidencia, normaliza paths y borra el child con dos intentos y hazard fail-closed. |
-| Pi | Custom tools `harbor_delegate` y `harbor_team_roster` sólo en la sesión child del lead | Enum del roster enabled capturado al crearla, `executionMode: "sequential"`, máximo seis y sin target repetido. No existe registro global: cada dispatch reconstruye la definición y abre/limpia una sesión child; un especialista con `model` usa ese `provider/model` tras validar catálogo/auth y los demás heredan el modelo efectivo del lead. El recruiter recibe por separado su propio snapshot de roster, filtro y join; los demás children no heredan estas tools. |
+| Copilot | `task` nativo + `createCopilotCoordinatorGuard` | Snapshot de agentes fuera del hook; target exacto enabled; path revalidado; admission con claim persistente compartido por proyecto antes del child; contractors process-local; sin recursión/nesting; máximo seis y uno in-flight por prompt. `selectionEpoch` impide que un refresh tardío pise una selección más nueva. El host ejecuta y termina cada `task` síncrono. |
+| OpenCode | Tools exclusivas `harbor_team_roster` y `harbor_delegate` | Roster `ready|busy` completo hasta 32 especialistas; un exceso bloquea al lead sin truncar y repara con `/bench-off <id...>`. Une preflight v1 `session.status→session.messages` con claims filesystem privados compartidos entre isolates/procesos; target live revalidado, y los aliases directos verifican además su digest cargado; resolución del turno raíz y modelo/variant acotados; modelo configurado del target o herencia del host; máximo seis, sin target repetido y uno in-flight. Cada llamada usa `runAgent`: `starting` no autoriza stop del parent, `working` publica/verifica el child exacto y `cleaning` cubre sólo su borrado, con dos intentos y hazard fail-closed. |
+| Pi | Custom tools `harbor_delegate` y `harbor_team_roster` sólo en la sesión child del lead | Enum del roster enabled capturado al crearla, `executionMode: "sequential"`, máximo seis y sin target repetido. No existe registro global de tools: cada dispatch reconstruye la definición, toma un claim persistente project-shared y abre/limpia una sesión child; un especialista con `model` usa ese `provider/model` tras validar catálogo/auth y los demás heredan el modelo efectivo del lead. El recruiter recibe por separado su propio snapshot de roster, filtro y join; los demás children no heredan estas tools. |
 
 El guard transport-neutral de `src/core/custom-tools.ts` impone el mismo flujo
 del recruiter en los tres adapters: un roster completo, cero a tres filtros y
@@ -309,6 +422,19 @@ A revision-5 profile rendered by `renderPlayer` contains:
 - an `agent-foundry:profile` marker with the same ID and revision;
 - a canonical base64url-encoded JSON definition without `replace`;
 - composed player instructions.
+
+El registro personal global y la copia activa representan la misma definición,
+pero OpenCode ya no los trata como bytes idénticos. El registro se renderiza
+con `renderPlayerRegistration`, sin proyecto y con
+`permission.external_directory: deny`; cada copia activa se renderiza aparte
+con la allowlist del proyecto que la contiene. Copilot y Pi no tienen frontmatter
+dependiente del proyecto, por lo que sus dos representaciones siguen
+coincidiendo. Un registro OpenCode revision 5 creado por una versión anterior
+con un proyecto embebido sólo es fuente de migración si ese path permite
+reproducir exactamente todos sus bytes. Hasta migrarlo figura `stale`;
+`bench on` o un `join` compatible lo reemplaza por el registro portable dentro
+de la misma transacción que publica la copia activa del proyecto actual, sin
+tocar copias de otros proyectos.
 
 `isOwnedProfile` proves structural ownership; that alone does not authorize
 invocation. `isCanonicalPlayerProfile` additionally requires the decoded
@@ -360,6 +486,8 @@ directorios administrados; sólo retira su propio anchor vacío al cerrar.
 `join` y `retire` son transacciones de dos archivos. `Roster.bench` separa
 parsing, inventario y planificación; un `bench on|off` de varios IDs toma un
 solo lock, completa todo el plan y recién entonces ejecuta una sola transacción.
+Para un personal, `bench on` incluye el registro portable y la copia activa en
+ese plan, de modo que una migración OpenCode A→B tampoco puede quedar partida.
 
 ## Rendering y discovery seguro
 
@@ -373,9 +501,10 @@ solo lock, completa todo el plan y recién entonces ejecuta una sola transacció
 | `execute` | `execute` | `bash` | `bash` |
 
 OpenCode genera además una política de tools y permisos deny-by-default,
-deshabilita `task`, web, preguntas y la tool ambiental `skill`, y acota
-`external_directory` al proyecto. Estas allowlists son límites del SDK, no un
-sandbox del sistema operativo.
+deshabilita `task`, web, preguntas y la tool ambiental `skill`. Una copia
+activa acota `external_directory` a su proyecto; el registro global portable
+lo deniega por completo. Estas allowlists son límites del SDK, no un sandbox
+del sistema operativo.
 
 `src/core/active.ts` es la puerta de discovery de Agent Harbor:
 
@@ -446,9 +575,9 @@ La preparación puede fallar antes de que exista un child. Copilot aborta y
 elimina la session, detiene el client y limpia la cápsula; OpenCode borra la
 session; Pi cancela si corresponde, desuscribe eventos, hace `dispose` y limpia
 la cápsula. Una señal `AbortSignal` se propaga al SDK y a `gh`. En la superficie
-Pi, la espera del root compite además contra esa señal: el estado local se
-asienta como `cancelled` y libera UI/capacidad aunque un provider ignore el
-abort; el cleanup remoto sigue siendo best-effort cuando ese provider retorna.
+  Pi, la espera del slash compite además contra esa señal, pero si el provider
+  ignora abort el run conserva `cleaning`, UI, capacidad y claim hasta su
+  settlement real; sólo entonces se asienta y libera ownership.
 
 `src/core/evidence.ts` normaliza observabilidad opcional con schema
 `agent-harbor/evidence@1`. Conserva harness, identidad lógica/runtime,
@@ -460,13 +589,19 @@ síncronos o asíncronos del collector: observar nunca cambia ejecución ni
 cleanup.
 
 La vista interactiva Copilot es independiente de esa evidencia durable:
-`CopilotTeamRuntime` conserva sólo snapshots process-local por proyecto y
-`formatCopilotTeamView` combina esos runs con el roster determinista. Eventos
+`CopilotTeamRuntime` conserva snapshots ricos process-local por proyecto y
+`formatCopilotTeamView` los combina con el roster determinista y los claims
+persistentes project-shared de Pi/Copilot. Eventos
 `assistant.usage` se deduplican con HMAC efímero y los hooks del coordinador
 emiten sólo correlación, estados, modelo/reasoning y contadores nativos, nunca
 contenido. `/team` consume este estado sin iniciar inferencia. El runner directo
 espera `session.idle`/`session.error`; timeout pide abort y, si no hay settlement
 acotado, conserva selección y lock lógico hasta el terminal tardío.
+Un release/ownership compartido fallido se conserva además en un hazard por
+proyecto y generación: bloquea aliases, selección nativa, coordinator y eventos
+lifecycle tardíos antes de otra lectura de modelo o envío. Sólo un release
+verificado de ese mismo claim o un reload limpio lo retira; el settlement local
+por sí solo no borra el gate.
 
 ## Build and generated artifacts
 
@@ -480,7 +615,7 @@ same `dist` output.
 | `src/core/{bundled,roles}/*.md` | `dist/core/{bundled,roles}/*.md` and the same paths under the Copilot runtime | Editable roster definitions for every harness. |
 | `dist/core/*.js` | `plugins/agent-foundry/runtime/dist/core/*.js` | Runtime for the single Copilot plugin. |
 | `dist/adapters/{shared,copilot}.js` and `dist/core/custom-tools.js` | Same paths under the `agent-foundry` runtime | Deterministic Copilot preflight plus the transport-neutral custom-tool contracts used by the extension. |
-| `dist/adapters/{direct,copilot-coordinator,copilot-team-runtime,copilot-team-view}.js` | `plugins/agent-foundry/runtime/dist/adapters/` only | Client controls, coordinator guard, process-local activity, and `/team` rendering. |
+| `dist/adapters/{direct,copilot-coordinator,copilot-team-runtime,copilot-team-view,opencode-agent-activity}.js` | `plugins/agent-foundry/runtime/dist/adapters/` only | Client controls, coordinator guard, process-local rich activity, shared persistent-player claims, and `/team` rendering. |
 | Manifests, `plugins/*/agents`, `plugins/*/skills`, `extension.mjs` | Not generated | Copilot assets reviewed as source. |
 
 The `Copilot runtime is generated byte-for-byte from shared core` test protects

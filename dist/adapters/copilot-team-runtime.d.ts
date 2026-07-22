@@ -12,7 +12,7 @@ export interface CopilotNativeTokenUsage {
 }
 export type CopilotNativeUsageField = keyof CopilotNativeTokenUsage;
 export interface CopilotNativeBillingUsage {
-    /** Sum of Copilot's per-request model-multiplier cost values; not USD. */
+    /** Sum of Copilot's per-request model-multiplier billing units; not USD. */
     readonly modelMultiplier?: number;
     /** Sum of Copilot's native nano-AI-unit values. */
     readonly totalNanoAiu?: number;
@@ -50,6 +50,14 @@ export interface CopilotTeamRunSnapshot {
     readonly nativeCalls?: number;
     readonly durationMs?: number;
     readonly totalToolCalls?: number;
+    /** Durable activity owned by another Pi/Copilot process; telemetry and stop remain with that owner. */
+    readonly projectSharedExternal?: true;
+    readonly sharedActivityKind?: "direct" | "delegated";
+    /** Public routing hint for a project-shared owner; absent on legacy version-1 claims. */
+    readonly sharedOwnerRuntime?: "pi" | "copilot";
+    /** Public OS process identity for a project-shared owner. */
+    readonly sharedOwnerProcessID?: number;
+    readonly sharedHeartbeatOverdue?: true;
 }
 export interface CopilotRunStart {
     readonly project: string;
@@ -77,7 +85,7 @@ export interface CopilotUsageEvent {
         readonly reasoningTokens?: number;
         readonly cacheReadTokens?: number;
         readonly cacheWriteTokens?: number;
-        /** Copilot's model-multiplier cost for this request; not USD. */
+        /** Copilot's model-multiplier billing units for this request; not USD. */
         readonly cost?: number;
         readonly copilotUsage?: {
             readonly totalNanoAiu?: number;

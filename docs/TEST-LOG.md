@@ -1,10 +1,9 @@
-# Test log — 2026-07-20
+# Test log
 
-Validation was completed in the working tree from the published baseline
-commit `b3f6923e16f5e5de22065945850d4c2e0da63b77`. This file records only bounded,
-sanitized evidence. It intentionally excludes prompts, responses, hidden fixture
-values, temporary paths, commands selected by a model, raw errors and
-credentials.
+This append-only log records bounded, sanitized validation evidence; individual
+sections identify their date and relevant baseline. It intentionally excludes
+prompts, responses, hidden fixture values, temporary paths, commands selected by
+a model, raw errors, and credentials.
 
 ## Final offline gate
 
@@ -294,3 +293,58 @@ The corrective pass also verifies bounded authoritative recovery on the first
 guidance after `/join`, concise `/retire`, and class-specific inactive-player
 remediation for bundled benched, personal benched, stale/conflicted, and
 missing/retired identities.
+
+## Installed three-runtime team-management convergence gate
+
+Recorded at `2026-07-22T07:47:12-04:00` after repeated command-by-command TUI
+review. The final manual pass produced no new product criticism.
+
+| Command or check | Result |
+| --- | --- |
+| Pi 0.81.1 real RPC tour with a loopback provider | Passed: live widget and `/team` exposed member, task, state, exact run route, configured/observed model, thinking, 18 native tokens, and `$0.00005`; provider cancellation, pre-model bench rejection, and idempotent retire all passed |
+| Copilot CLI 1.0.73 real Linux TUI at 120×45 and 100×42 | Passed without login: roster, lead availability, SDLC coverage, shared activity scope, host telemetry provenance, join/reload guidance, retire, and idle stop remained visible and client-side |
+| OpenCode 1.18.4 real Linux TUI at 140×82 and 140×45 | Passed: nine-row roster and activity fit without scrolling; filtered bench results expose exact ranges and the next route; help and stop views remained zero-model |
+| OpenCode persistence/accounting comparison | Passed: sessions, database row counts, statistics, tokens, and cost were byte-identical before and after the tour |
+| Focused regressions from manual criticism | Passed: Pi provider decimal-tail normalization, bounded project widget, Pi stop text scope, and idempotent Copilot native abort |
+| `npm test` clean-build canonical gate | Passed: 498 tests, 0 failed, 0 skipped, 0 cancelled; 73 capture-hardening tests also passed; total wall time 78.5 s |
+| `npm run typecheck` and `git diff --check` | Passed |
+| `npm audit --audit-level=high` | Passed: 0 vulnerabilities |
+| `npm pack --dry-run --json --silent` | Passed: 6,896,133 bytes packed; 9,153,396 bytes unpacked |
+| MCP implementation scan | Passed: no MCP registration, server, daemon, or transport; matches are only disable flags, absence tests, and explanatory documentation |
+
+Manual review found and corrected two visible defects: Pi displayed the provider's
+IEEE-754 tail (`$0.000049999999999999996`) instead of the useful native decimal
+amount, and Copilot clipped its idle shared-activity explanation. The final
+clean-build stress gate then exposed and fixed a duplicate Copilot abort race:
+ownership loss and timeout now share one idempotent host-abort promise per run.
+
+Local ignored evidence is retained under
+`work/pi-local-provider-tour/runs/2026-07-22T112620-221Z/`,
+`work/copilot-real-final-20260722-0731/`, and
+`work/opencode-real-final-20260722-0744/`.
+
+## Independent subagent follow-up and final active-work gate
+
+Recorded at `2026-07-22T08:26:42-04:00`. The requested independent subagent
+first returned `NOT CLEAN` with four reproducible gaps: unnecessary Pi model
+abbreviation, an out-of-range OpenCode help example, missing catalog pagination
+syntax in Pi/Copilot help, and installed tours whose hashes or idle-only scope
+did not prove the final active-work experience. All four were corrected and the
+same subagent's bounded re-audit returned `CLEAN`.
+
+| Command or check | Result |
+| --- | --- |
+| Pi 0.81.1 final active RPC tour | Passed: complete `harbor-local/known-usage (observed)` identity, thinking, 18 tokens, `$0.00005`, task, exact run route, active provider cancellation, bench preflight, and idempotent retire |
+| Copilot CLI 1.0.73 final-hash active TUI tour | Passed: a real shared claim rendered `crafter/shared-crafter · working`, owner Pi/PID and `stop there`; exact owner release changed the next view to `0 active`; the complete tour remained client-side with 0 model tokens |
+| OpenCode 1.18.4 final-hash localhost lifecycle tour | Passed: joined/reloaded personal reviewer rendered working task, owner, observed `harbor-local/harbor-zero`, tokens and `$0`; active stop closed the provider connection after 99 ms and rendered `Stop confirmed` after 228 ms; benched alias made no provider request |
+| OpenCode 1.18.4 final-hash zero-model TUI tour | Passed: help contains the valid `/team status:bench page:2` example, filtered output exposes its next-page route, and sessions/database/statistics/tokens/cost remain byte-identical |
+| Catalog help and executable pagination | Passed: Pi and Copilot advertise `[--page N]`; the shared parser rejects invalid/duplicate pages and emits exact next/previous routes |
+| Shared custom-tool/no-MCP focal | Passed: 2 tests prove a minimal dynamic principal-bound tool union, common closed schemas, and no MCP surface |
+| Independent re-audit | `CLEAN` for all four findings; final Copilot and OpenCode artifact hashes match the current worktree/builds |
+| `npm test` clean-build canonical gate | Passed: 498 tests, 0 failed, 0 skipped, 0 cancelled; 73 capture-hardening tests passed; total wall time 79.5 s |
+
+Final ignored evidence is retained under
+`work/pi-local-provider-tour/runs/2026-07-22T120238-869Z/`,
+`work/copilot-real-final-20260722-0813-active/`,
+`work/opencode-lifecycle-20260722-081729-80f3b1a3a506/`, and
+`work/opencode-real-final-20260722-0822/`.

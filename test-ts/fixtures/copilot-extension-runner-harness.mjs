@@ -1,6 +1,6 @@
 import { registerHooks } from "node:module";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -13,6 +13,7 @@ const keepAlive = setInterval(() => {}, 1_000);
 const sandbox = await mkdtemp(join(tmpdir(), "harbor-copilot-extension-"));
 const project = join(sandbox, "project");
 process.env.COPILOT_HOME = join(sandbox, "copilot-home");
+process.env.AGENT_HARBOR_ACTIVITY_HOME = join(sandbox, "agent-harbor-activity-home");
 await mkdir(project, { recursive: true });
 if (scenario === "startup-profile-diagnostics") {
   process.chdir(project);
@@ -27,7 +28,7 @@ const listeners = new Set();
 const logs = [];
 const calls = {
   abort: 0, activity: 0, context: 0, currentAgent: 0, deselect: 0, list: 0, log: 0,
-  metadata: 0, processing: 0, reload: 0, select: 0, send: 0,
+  metadata: 0, model: 0, processing: 0, reload: 0, select: 0, send: 0,
 };
 const fixedAgentDirectory = join(root, "plugins", "agent-foundry", "agents");
 const agents = [
@@ -103,14 +104,19 @@ let selected = scenario === "native-reservation" || scenario === "inferred-child
   scenario === "guard-terminal-clear" || scenario === "restore-identity-mismatch" ||
   scenario === "team-partial-stop" ? agents[0] :
   scenario === "manual-profile-model" || scenario === "team-stop-budget" ||
-  scenario === "contract-selected-team-observability" ? agents[1] : undefined;
+  scenario === "contract-selected-team-observability" || scenario === "native-selected-shared-admission" ||
+  scenario === "team-stop-corrupt-shared" || scenario === "team-stop-external-owner" ||
+  scenario === "team-stop-external-budget" ||
+  scenario === "shared-active-prompt-hazard" ? agents[1] : undefined;
 let options;
 let releaseSelection;
 let releaseRestore;
 let releaseManagerSend;
 let releaseNativeList;
+let releaseAdmissionModel;
 let releaseJoinAuthentication;
 let holdNativeRosterList = false;
+let holdAdmissionModel = false;
 let holdJoinAuthentication = false;
 let firstSelection = true;
 let hostActive = scenario === "active-work" || scenario === "team-host-untracked-context";
@@ -119,9 +125,46 @@ let guardDecision;
 let busyAdmission;
 let gapStop;
 let postCommitAbortEmitted = false;
+let sharedClaimSabotaged = false;
+let hazardRetryClaimPublished = false;
 let logHangs = scenario === "log-hang" || scenario === "log-hang-default";
 let nativeRosterToolCalls = 0;
 const nativeToolResults = {};
+let competingSharedClaim;
+
+async function sharedActivityProjectDirectory() {
+  const activityRoot = join(process.env.AGENT_HARBOR_ACTIVITY_HOME, "agent-foundry", "team-activity-v1");
+  const projects = await readdir(activityRoot);
+  if (projects.length !== 1) throw new Error(`expected one shared activity project, observed ${projects.length}`);
+  return join(activityRoot, projects[0]);
+}
+
+async function removeSharedActivityClaim(agent) {
+  await rm(join(await sharedActivityProjectDirectory(), `${agent}.json`));
+}
+
+async function corruptSharedActivityStore() {
+  await writeFile(join(await sharedActivityProjectDirectory(), "foreign.json"), "{", "utf8");
+}
+
+async function downgradeSharedActivityClaimToLegacy(agent) {
+  const claimPath = join(await sharedActivityProjectDirectory(), `${agent}.json`);
+  const stored = JSON.parse(await readFile(claimPath, "utf8"));
+  await writeFile(claimPath, JSON.stringify({
+    version: 1,
+    owner: stored.owner,
+    project: stored.project,
+    agent: stored.agent,
+    kind: stored.kind,
+    phase: stored.phase,
+    slot: stored.slot,
+    sessionA: stored.sessionA,
+    sessionB: stored.sessionB,
+    startedAt: stored.startedAt,
+    processID: stored.processID,
+    claimToken: stored.claimToken,
+  }), "utf8");
+}
 
 function emit(event) {
   for (const listener of [...listeners]) listener(event);
@@ -183,7 +226,16 @@ const session = {
     },
     model: {
       getCurrent: async () => {
+        calls.model += 1;
         if (teamReadHangs) return never();
+        if (holdAdmissionModel) {
+          return new Promise((resolve) => {
+            releaseAdmissionModel = () => {
+              holdAdmissionModel = false;
+              resolve({ modelId: "host-model", reasoningEffort: null });
+            };
+          });
+        }
         if (scenario === "no-model-control-ux") return { modelId: "unknown/default", reasoningEffort: null };
         return { modelId: "host-model", reasoningEffort: null };
       },
@@ -295,6 +347,31 @@ const session = {
   async log(message, metadata) {
     calls.log += 1;
     logs.push({ message, metadata });
+    if (scenario === "shared-release-hazard" && message.includes("Prepared: selected talent-scout")) {
+      const { readSharedAgentActivities } = await import(pathToFileURL(join(
+        root, "plugins", "agent-foundry", "runtime", "dist", "adapters", "opencode-agent-activity.js",
+      )).href);
+      hazardRetryClaimPublished = readSharedAgentActivities(project)
+        .some(({ agent }) => agent === "talent-scout");
+    }
+    if ((scenario === "shared-phase-loss-before-send" || scenario === "shared-release-hazard") &&
+        !sharedClaimSabotaged &&
+        message.includes("Prepared: selected crafter")) {
+      sharedClaimSabotaged = true;
+      await removeSharedActivityClaim("crafter");
+      if (scenario === "shared-release-hazard") {
+        const { claimSharedAgentActivity } = await import(pathToFileURL(join(
+          root, "plugins", "agent-foundry", "runtime", "dist", "adapters", "opencode-agent-activity.js",
+        )).href);
+        competingSharedClaim = claimSharedAgentActivity(
+          project,
+          "crafter",
+          "direct",
+          `pi:${process.pid}:private-hazard-session-token`,
+          "pi",
+        );
+      }
+    }
     if (scenario === "stop-send-gap" && message.includes("no model call yet") && !gapStop) {
       gapStop = invoke("team", "stop all");
     }
@@ -309,6 +386,32 @@ const session = {
   },
   async send() {
     calls.send += 1;
+    if (scenario === "shared-heartbeat-loss-after-working") {
+      await removeSharedActivityClaim("crafter");
+      const { claimSharedAgentActivity } = await import(pathToFileURL(join(
+        root, "plugins", "agent-foundry", "runtime", "dist", "adapters", "opencode-agent-activity.js",
+      )).href);
+      competingSharedClaim = claimSharedAgentActivity(
+        project,
+        "crafter",
+        "direct",
+        `pi:${process.pid}:competing-crafter`,
+        "pi",
+      );
+      try {
+        await waitFor(() => calls.abort > 0, "heartbeat ownership loss to abort the Copilot root", 120, 50);
+      } finally {
+        competingSharedClaim?.release();
+        competingSharedClaim = undefined;
+      }
+      queueMicrotask(() => emit({
+        type: "session.idle",
+        id: "shared-heartbeat-loss-idle",
+        timestamp: new Date().toISOString(),
+        data: { aborted: true },
+      }));
+      return;
+    }
     if (scenario === "native-private-tool-error") {
       nativeToolResults.roster = await invokeNativeTool(
         "harbor_team_roster",
@@ -688,6 +791,7 @@ const session = {
           copilotUsage: { totalNanoAiu: 25 },
         },
       });
+      await wait(70);
       emit({
         type: "subagent.completed",
         id: "child-complete-1",
@@ -732,6 +836,7 @@ const session = {
           copilotUsage: { totalNanoAiu: 100 },
         },
       });
+      await wait(70);
       emit({
         type: "session.idle", id: "idle-root-1", parentId: "usage-event-root-1",
         timestamp: new Date(rootActivityAt + 6).toISOString(), data: { aborted: false },
@@ -897,7 +1002,8 @@ const session = {
       });
       return;
     }
-    if (scenario === "team-lead-active-access" || scenario === "retire-active-personal") {
+    if (scenario === "team-lead-active-access" || scenario === "retire-active-personal" ||
+        scenario === "bench-active-team-lead") {
       emit({
         type: "assistant.turn_start", id: `active-direct-turn-${scenario}`, parentId: null,
         timestamp: new Date().toISOString(), data: { turnId: `active-direct-turn-${scenario}`, model: "host-model" },
@@ -973,7 +1079,8 @@ const session = {
     if (scenario === "native-precommit-join-stop") releaseJoinAuthentication?.();
     if (scenario === "stop-before-send" || scenario === "stop-send-gap" || scenario === "native-reservation" ||
         scenario === "retire-active-personal" ||
-        scenario === "native-controller-team-stop" || scenario === "native-precommit-join-stop") {
+        scenario === "native-controller-team-stop" || scenario === "native-precommit-join-stop" ||
+        scenario === "team-stop-external-owner" || scenario === "team-stop-external-budget") {
       queueMicrotask(() => emit({
         type: "session.idle", id: `abort-idle-${scenario}`, timestamp: new Date().toISOString(),
         data: { aborted: true },
@@ -987,11 +1094,65 @@ globalThis.__agentHarborJoinSession = async (input) => {
   options = input;
   return session;
 };
+globalThis.__agentHarborValidatedSharedClaims = 0;
 const mockSource = "export const joinSession = (...args) => globalThis.__agentHarborJoinSession(...args);";
+const lifecycleOutcomeMockSource = `
+export async function runDeterministicCommandResult(_harness, command, args) {
+  if (command === "join") {
+    const player = JSON.parse(args).name;
+    return {
+      text: "FORGED RAW JOIN SUCCESS",
+      ...(player === "missing-join" ? {} : {
+        lifecycle: { command: "join", player: "different-join", status: "changed" },
+      }),
+    };
+  }
+  if (command === "bench") {
+    return {
+      text: "FORGED RAW BENCH SUCCESS",
+      ...(args === "on design" ? {} : {
+        lifecycle: {
+          command: "bench",
+          status: "changed",
+          rows: [{ id: "design", action: "on", status: "changed" }],
+        },
+      }),
+    };
+  }
+  if (command === "retire") {
+    return {
+      text: "FORGED RAW RETIRE SUCCESS",
+      ...(args === "missing-retire" ? {} : {
+        lifecycle: { command: "retire", player: "different-retire", status: "changed" },
+      }),
+    };
+  }
+  throw new Error("unexpected deterministic command in lifecycle outcome fixture");
+}
+`;
+const sharedActivityURL = pathToFileURL(join(
+  root, "plugins", "agent-foundry", "runtime", "dist", "adapters", "opencode-agent-activity.js",
+)).href;
+const sharedActivityCounterSource = `
+import * as activity from ${JSON.stringify(sharedActivityURL)};
+export * from ${JSON.stringify(sharedActivityURL)};
+export function claimValidatedSharedAgentActivity(...args) {
+  globalThis.__agentHarborValidatedSharedClaims += 1;
+  return activity.claimValidatedSharedAgentActivity(...args);
+}
+`;
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === "@github/copilot-sdk/extension") {
       return { url: `data:text/javascript,${encodeURIComponent(mockSource)}`, shortCircuit: true };
+    }
+    if (scenario === "lifecycle-outcome-fail-closed" &&
+        specifier === "../../runtime/dist/adapters/direct.js") {
+      return { url: `data:text/javascript,${encodeURIComponent(lifecycleOutcomeMockSource)}`, shortCircuit: true };
+    }
+    if (scenario === "shared-release-hazard" &&
+        specifier === "../../runtime/dist/adapters/opencode-agent-activity.js") {
+      return { url: `data:text/javascript,${encodeURIComponent(sharedActivityCounterSource)}`, shortCircuit: true };
     }
     return nextResolve(specifier, context);
   },
@@ -1036,10 +1197,10 @@ async function invoke(name, args) {
   }
 }
 
-async function waitFor(predicate, label) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+async function waitFor(predicate, label, attempts = 100, intervalMs = 10) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (predicate()) return;
-    await wait(10);
+    await wait(intervalMs);
   }
   throw new Error(`timed out waiting for ${label}`);
 }
@@ -1339,12 +1500,15 @@ if (["native-tool-abort", "native-tool-session-error", "native-tool-session-idle
       data: { sessionId: invocation.sessionId, turnId: `partial-stop-turn-${suffix}`, model: "host-model" },
     });
   }
+  const stopLogStart = logs.length;
   const stopped = await invoke("team", "stop all");
+  const stopLogs = logs.slice(stopLogStart).map(({ message }) => message);
   const stopOutput = logs.map(({ message }) => message)
     .findLast((message) => message.includes("Agent Harbor Copilot stop"));
   const team = await invoke("team", "");
   result = {
     stopped,
+    stopLogs,
     stopOutput,
     team,
     teamOutput: logs.map(({ message }) => message)
@@ -1433,6 +1597,61 @@ if (["native-tool-abort", "native-tool-session-error", "native-tool-session-idle
     retired,
     profileAfterRetire: existsSync(join(project, ".github", "agents", "retire-reviewer.agent.md")),
   };
+} else if (scenario === "retire-pre-admission-race") {
+  const definition = JSON.stringify({
+    name: "race-reviewer",
+    description: "Review lifecycle admission races",
+    prompt: "Review safely",
+    tools: ["read"],
+  });
+  const joined = await invoke("join", definition);
+  agents.push({
+    id: "race-reviewer",
+    name: "race-reviewer",
+    userInvocable: true,
+    path: join(project, ".github", "agents", "race-reviewer.agent.md"),
+  });
+  holdAdmissionModel = true;
+  const pending = invoke("player", "race-reviewer must not start from a stale admission");
+  await waitFor(() => typeof releaseAdmissionModel === "function", "player preflight blocked on current model");
+  const retired = await invoke("retire", "race-reviewer");
+  const profileAfterRetire = existsSync(join(project, ".github", "agents", "race-reviewer.agent.md"));
+  releaseAdmissionModel?.();
+  const invocation = await pending;
+  result = { joined, retired, profileAfterRetire, invocation };
+} else if (scenario === "bench-active-team-lead") {
+  const activated = await invoke("bench", "on build");
+  agents.push({
+    id: "build",
+    name: "build",
+    userInvocable: true,
+    path: join(project, ".github", "agents", "build.agent.md"),
+  });
+  const pending = invoke("team-lead", "coordinate the active build specialist");
+  await waitFor(() => calls.send === 1, "active manager prompt before bench mutation");
+  const reloadBeforeBlockedBench = calls.reload;
+  const blockedBench = await invoke("bench", "off build");
+  const reloadAfterBlockedBench = calls.reload;
+  const profileAfterBlockedBench = existsSync(join(project, ".github", "agents", "build.agent.md"));
+  emit({
+    type: "session.idle",
+    id: "active-manager-idle-bench",
+    parentId: "active-direct-turn-bench-active-team-lead",
+    timestamp: new Date(Date.now() + 1).toISOString(),
+    data: { aborted: false },
+  });
+  releaseManagerSend?.();
+  const invocation = await pending;
+  const deactivated = await invoke("bench", "off build");
+  result = {
+    activated,
+    blockedBench,
+    reloadBeforeBlockedBench,
+    reloadAfterBlockedBench,
+    profileAfterBlockedBench,
+    invocation,
+    deactivated,
+  };
 } else if (scenario === "lifecycle-identity-hazard") {
   const invocation = { sessionId: session.sessionId };
   await options.hooks.onUserPromptSubmitted({
@@ -1449,9 +1668,17 @@ if (["native-tool-abort", "native-tool-session-error", "native-tool-session-idle
   const firstInput = toolInput("one");
   const firstDecision = await options.hooks.onPreToolUse(firstInput, invocation);
   await options.hooks.onPostToolUseFailure({ ...firstInput, error: "bounded cleanup one" }, invocation);
+  await options.hooks.onUserPromptSubmitted({
+    sessionId: session.sessionId,
+    workingDirectory: project,
+    prompt: "prepare the second auditable manager decision",
+  }, invocation);
   const secondInput = toolInput("two");
   const secondDecision = await options.hooks.onPreToolUse(secondInput, invocation);
   await options.hooks.onPostToolUseFailure({ ...secondInput, error: "bounded cleanup two" }, invocation);
+  if (firstDecision?.permissionDecision !== "allow" || secondDecision?.permissionDecision !== "allow") {
+    throw new Error(`guard evidence setup was not admitted: ${JSON.stringify({ firstDecision, secondDecision })}`);
+  }
 
   const future = Date.now() + 60_000;
   emit({
@@ -1614,6 +1841,28 @@ if (["native-tool-abort", "native-tool-session-error", "native-tool-session-idle
   const team = await invoke("team", "member:offline-reviewer");
   const teamOutput = logs.map(({ message }) => message).findLast((message) => message.includes("Agent Harbor Copilot team"));
   result = { joined, joinOutput, team, teamOutput };
+} else if (scenario === "lifecycle-outcome-fail-closed") {
+  const reloadBefore = calls.reload;
+  const missingJoin = await invoke("join", JSON.stringify({
+    name: "missing-join", description: "Missing truth", prompt: "Work", tools: ["read"],
+  }));
+  const mismatchedJoin = await invoke("join", JSON.stringify({
+    name: "mismatched-join", description: "Mismatched truth", prompt: "Work", tools: ["read"],
+  }));
+  const missingBench = await invoke("bench", "on design");
+  const mismatchedBench = await invoke("bench", "on build");
+  const missingRetire = await invoke("retire", "missing-retire");
+  const mismatchedRetire = await invoke("retire", "mismatched-retire");
+  result = {
+    missingJoin,
+    mismatchedJoin,
+    missingBench,
+    mismatchedBench,
+    missingRetire,
+    mismatchedRetire,
+    reloadBefore,
+    reloadAfter: calls.reload,
+  };
 } else if (scenario === "control-surface-ux") {
   const bench = await invoke("bench", "list design");
   const benchOutput = logs.map(({ message }) => message).findLast((message) => message.includes("Agent Harbor Copilot bench"));
@@ -1626,10 +1875,30 @@ if (["native-tool-abort", "native-tool-session-error", "native-tool-session-idle
   });
   const joined = await invoke("join", definition);
   const joinOutput = logs.map(({ message }) => message).findLast((message) => message.includes("Agent Harbor /join"));
+  const reloadBeforeJoinNoOp = calls.reload;
+  const joinedAgain = await invoke("join", definition);
+  const reloadAfterJoinNoOp = calls.reload;
+  const joinNoOpOutput = logs.map(({ message }) => message).findLast((message) => message.includes("Agent Harbor /join"));
   const benched = await invoke("bench", "off ux-reviewer");
+  const benchOutputChanged = logs.map(({ message }) => message).findLast((message) => message.includes("Agent Harbor /bench"));
+  const reloadBeforeBenchNoOp = calls.reload;
+  const benchedAgain = await invoke("bench", "off ux-reviewer");
+  const reloadAfterBenchNoOp = calls.reload;
+  const benchNoOpOutput = logs.map(({ message }) => message).findLast((message) => message.includes("Agent Harbor /bench"));
+  await invoke("bench", "on design");
+  const mixedBench = await invoke("bench", "on design,build");
+  const mixedBenchOutput = logs.map(({ message }) => message).findLast((message) => message.includes("Agent Harbor /bench"));
+  const reloadBeforeAllBenchNoOp = calls.reload;
+  const allBenchNoOp = await invoke("bench", "on design,build");
+  const reloadAfterAllBenchNoOp = calls.reload;
+  const allBenchNoOpOutput = logs.map(({ message }) => message).findLast((message) => message.includes("Agent Harbor /bench"));
   const personalBenchRetry = await invoke("player", "ux-reviewer inspect while benched");
   const retired = await invoke("retire", "ux-reviewer");
   const retireOutput = logs.map(({ message }) => message).findLast((message) => message.includes("Agent Harbor /retire"));
+  const reloadBeforeRetireNoOp = calls.reload;
+  const retiredAgain = await invoke("retire", "ux-reviewer");
+  const reloadAfterRetireNoOp = calls.reload;
+  const retireNoOpOutput = logs.map(({ message }) => message).findLast((message) => message.includes("Agent Harbor /retire"));
   const retry = await invoke("player", "ux-reviewer inspect again");
   const privateJoined = await invoke("join", JSON.stringify({
     name: "private-metadata",
@@ -1650,12 +1919,20 @@ if (["native-tool-abort", "native-tool-session-error", "native-tool-session-idle
   const hostileJoin = await invoke("join", { definition: "x".repeat(200_000) });
   const hostileScout = await invoke("scout", { task: "x".repeat(200_000) });
   const hostileAlias = await invoke("crafter", { task: "x".repeat(200_000) });
+  const hostileAliasOutput = logs.map(({ message }) => message)
+    .findLast((message) => message.includes("[Agent Harbor player · crafter"));
   const reloadAfterRejectedControls = calls.reload;
   result = {
-    bench, benchOutput, bundledRetry, joined, joinOutput, benched, personalBenchRetry,
-    retired, retireOutput, retry, privateJoined, privateJoinOutput, privateTeam, privateTeamOutput,
+    bench, benchOutput, bundledRetry, joined, joinOutput,
+    joinedAgain, joinNoOpOutput, reloadBeforeJoinNoOp, reloadAfterJoinNoOp,
+    benched, benchOutputChanged, benchedAgain, benchNoOpOutput, reloadBeforeBenchNoOp, reloadAfterBenchNoOp,
+    mixedBench, mixedBenchOutput, allBenchNoOp, allBenchNoOpOutput,
+    reloadBeforeAllBenchNoOp, reloadAfterAllBenchNoOp,
+    personalBenchRetry,
+    retired, retireOutput, retiredAgain, retireNoOpOutput, reloadBeforeRetireNoOp, reloadAfterRetireNoOp,
+    retry, privateJoined, privateJoinOutput, privateTeam, privateTeamOutput,
     oversizedTeam, oversizedJoin, oversizedBench, oversizedRetire, oversizedListSkills,
-    hostileJoin, hostileScout, hostileAlias,
+    hostileJoin, hostileScout, hostileAlias, hostileAliasOutput,
     reloadBeforeRejectedControls, reloadAfterRejectedControls, sandbox, project,
   };
 } else if (scenario === "inactive-personal-repair") {
@@ -1821,7 +2098,7 @@ if (["native-tool-abort", "native-tool-session-error", "native-tool-session-idle
     guardDecision,
   };
 } else if (scenario === "direct-root-usage-ownership") {
-  const invocation = await invoke("team-lead", "observe one direct and one delegated provider call");
+  const invocation = await invoke("team-lead", "observe C:/Users/alice/secret.txt with Bearer abcdefghijklmnop");
   const team = await invoke("team", "");
   result = {
     invocation,
@@ -1830,6 +2107,7 @@ if (["native-tool-abort", "native-tool-session-error", "native-tool-session-idle
       .findLast((message) => message.includes("TEAM RUN (native Copilot telemetry)")),
     teamOutput: logs.map(({ message }) => message)
       .findLast((message) => message.includes("Agent Harbor Copilot team")),
+    liveProgress: logs.filter(({ message }) => message.includes("[Agent Harbor live")),
   };
 } else if (scenario === "metadata-only-usage-parity") {
   const invocation = { sessionId: session.sessionId };
@@ -1878,7 +2156,7 @@ if (["native-tool-abort", "native-tool-session-error", "native-tool-session-idle
     data: { providerCallId: "metadata-only-manual-root-request", model: "metadata-only-manual-root-model" },
   });
   emit({ type: "session.idle", id: "metadata-only-manual-root-idle", data: { aborted: false } });
-  const manualTeam = await invoke("team", "run:copilot-run");
+  const manualTeam = await invoke("team", "model:metadata-only");
   const manualTeamOutput = logs.map(({ message }) => message)
     .findLast((message) => message.includes("Agent Harbor Copilot team"));
 
@@ -1967,7 +2245,7 @@ if (["native-tool-abort", "native-tool-session-error", "native-tool-session-idle
     .findLast((message) => message.includes("Agent Harbor Copilot bench"));
   const abortAfterBenchLists = calls.abort;
   await invoke("team", "");
-  const childId = logs.flatMap(({ message }) => [...message.matchAll(/^↳ crafter · (copilot-run-\d+) ·/gmu)].map((match) => match[1])).at(-1);
+  const childId = logs.flatMap(({ message }) => [...message.matchAll(/^↳ crafter\/(copilot-run-\d+) ·/gmu)].map((match) => match[1])).at(-1);
   const direct = await invoke("crafter", "must not race reserved child");
   const stopped = await invoke("team", `stop ${childId}`);
   await options.hooks.onPostToolUseFailure({ ...toolInput, error: "test cleanup" }, invocation);
@@ -2122,6 +2400,333 @@ if (["native-tool-abort", "native-tool-session-error", "native-tool-session-idle
     historyTeamOutput,
     historyDetail,
     historyDetailOutput,
+  };
+} else if (scenario === "shared-phase-loss-before-send" || scenario === "shared-heartbeat-loss-after-working") {
+  const invocation = await invoke("crafter", scenario === "shared-phase-loss-before-send"
+    ? "lose the exact shared claim before prompt send"
+    : "lose the exact shared claim after working is published");
+  result = {
+    invocation,
+    sharedClaimSabotaged,
+    competingClaimWasAdmitted: scenario === "shared-heartbeat-loss-after-working",
+  };
+} else if (scenario === "shared-release-hazard") {
+  const activity = await import(pathToFileURL(join(
+    root, "plugins", "agent-foundry", "runtime", "dist", "adapters", "opencode-agent-activity.js",
+  )).href);
+  const first = await invoke("crafter", "lose shared authority before this private task can be sent");
+  const claimBeforeRetries = activity.readSharedAgentActivities(project);
+  const beforeDirect = { ...calls };
+  const beforeDirectClaims = globalThis.__agentHarborValidatedSharedClaims;
+  const secondRoot = await invoke("scout", "this second root must remain outside the model");
+  const directDelta = {
+    claim: globalThis.__agentHarborValidatedSharedClaims - beforeDirectClaims,
+    model: calls.model - beforeDirect.model,
+    send: calls.send - beforeDirect.send,
+  };
+
+  selected = agents[2];
+  const beforeNative = { ...calls };
+  const beforeNativeClaims = globalThis.__agentHarborValidatedSharedClaims;
+  let nativeSelected;
+  try {
+    await options.hooks.onUserPromptSubmitted({
+      sessionId: session.sessionId,
+      workingDirectory: project,
+      prompt: "this native-selected root must not be admitted",
+    }, { sessionId: session.sessionId });
+    nativeSelected = { ok: true };
+  } catch (error) {
+    nativeSelected = { ok: false, error: errorShape(error) };
+  }
+  const nativeDelta = {
+    claim: globalThis.__agentHarborValidatedSharedClaims - beforeNativeClaims,
+    model: calls.model - beforeNative.model,
+    send: calls.send - beforeNative.send,
+  };
+  const claimAfterRetries = activity.readSharedAgentActivities(project);
+  const claimGenerationUnchanged = claimBeforeRetries.length === 1 && claimAfterRetries.length === 1 &&
+    claimBeforeRetries[0].agent === "crafter" && claimAfterRetries[0].agent === "crafter" &&
+    claimBeforeRetries[0].claimToken === claimAfterRetries[0].claimToken &&
+    claimBeforeRetries[0].sessionID === claimAfterRetries[0].sessionID;
+
+  const team = await invoke("team", "");
+  const teamOutput = logs.map(({ message }) => message)
+    .findLast((message) => message.includes("Agent Harbor Copilot team"));
+  const claimAfterView = activity.readSharedAgentActivities(project);
+  const viewKeptClaimGeneration = claimAfterView.length === 1 && claimBeforeRetries.length === 1 &&
+    claimAfterView[0].claimToken === claimBeforeRetries[0].claimToken;
+
+  const competitorReleased = competingSharedClaim?.release() ?? false;
+  competingSharedClaim = undefined;
+  const recoveredTeam = await invoke("team", "");
+  const recoveredTeamOutput = logs.map(({ message }) => message)
+    .findLast((message) => message.includes("Agent Harbor Copilot team"));
+  result = {
+    first,
+    secondRoot,
+    nativeSelected,
+    team,
+    teamOutput,
+    recoveredTeam,
+    recoveredTeamOutput,
+    sharedClaimSabotaged,
+    hazardRetryClaimPublished,
+    claimGenerationUnchanged,
+    viewKeptClaimGeneration,
+    competitorReleased,
+    directDelta,
+    nativeDelta,
+  };
+} else if (scenario === "shared-active-prompt-hazard") {
+  const activity = await import(pathToFileURL(join(
+    root, "plugins", "agent-foundry", "runtime", "dist", "adapters", "opencode-agent-activity.js",
+  )).href);
+  await options.hooks.onUserPromptSubmitted({
+    sessionId: session.sessionId,
+    workingDirectory: project,
+    prompt: "start one native root before authority is lost",
+  }, { sessionId: session.sessionId });
+  const beforeLoss = activity.readSharedAgentActivities(project);
+  await removeSharedActivityClaim("crafter");
+  competingSharedClaim = activity.claimSharedAgentActivity(
+    project,
+    "crafter",
+    "direct",
+    `pi:${process.pid}:private-active-root-hazard`,
+    "pi",
+  );
+  await waitFor(() => calls.abort > 0, "active native root ownership-loss abort", 100, 30);
+
+  const beforeRepeatedPrompt = { ...calls };
+  let repeatedPrompt;
+  try {
+    await options.hooks.onUserPromptSubmitted({
+      sessionId: session.sessionId,
+      workingDirectory: project,
+      prompt: "a queued prompt must not bypass the project hazard",
+    }, { sessionId: session.sessionId });
+    repeatedPrompt = { ok: true };
+  } catch (error) {
+    repeatedPrompt = { ok: false, error: errorShape(error) };
+  }
+  const repeatedPromptDelta = {
+    currentAgent: calls.currentAgent - beforeRepeatedPrompt.currentAgent,
+    model: calls.model - beforeRepeatedPrompt.model,
+    send: calls.send - beforeRepeatedPrompt.send,
+  };
+
+  const terminalAt = Date.now() + 1_000;
+  emit({
+    type: "assistant.turn_start",
+    id: "active-hazard-turn",
+    timestamp: new Date(terminalAt).toISOString(),
+    data: { sessionId: session.sessionId, turnId: "active-hazard-turn", model: "profile-model" },
+  });
+  emit({
+    type: "session.idle",
+    id: "active-hazard-idle",
+    parentId: "active-hazard-turn",
+    timestamp: new Date(terminalAt + 1).toISOString(),
+    data: { sessionId: session.sessionId, aborted: true },
+  });
+  const retained = activity.readSharedAgentActivities(project);
+  const retainedCompetitor = beforeLoss.length === 1 && retained.length === 1 &&
+    retained[0].agent === "crafter" && retained[0].claimToken !== beforeLoss[0].claimToken;
+  const competitorReleased = competingSharedClaim.release();
+  competingSharedClaim = undefined;
+  const recoveredTeam = await invoke("team", "");
+  const recoveredTeamOutput = logs.map(({ message }) => message)
+    .findLast((message) => message.includes("Agent Harbor Copilot team"));
+  result = {
+    repeatedPrompt,
+    repeatedPromptDelta,
+    retainedCompetitor,
+    competitorReleased,
+    recoveredTeam,
+    recoveredTeamOutput,
+  };
+} else if (scenario === "native-selected-shared-admission") {
+  const activity = await import(pathToFileURL(join(
+    root, "plugins", "agent-foundry", "runtime", "dist", "adapters", "opencode-agent-activity.js",
+  )).href);
+  await options.hooks.onUserPromptSubmitted({
+    sessionId: session.sessionId,
+    workingDirectory: project,
+    prompt: "native selected crafter must reserve project-shared capacity",
+  }, { sessionId: session.sessionId });
+  const before = activity.readSharedAgentActivities(project).map(({ agent, ownerRuntime, processID, phase }) => ({
+    agent, ownerRuntime, processID, phase,
+  }));
+  let competitorBlocked = false;
+  try {
+    const competitor = activity.claimSharedAgentActivity(
+      project, "crafter", "direct", `pi:${process.pid}:native-selection-competitor`, "pi",
+    );
+    competitor.release();
+  } catch (error) {
+    competitorBlocked = /busy in another direct or delegated run/u.test(String(error?.message));
+  }
+  const nativeSelectedTurnAt = Date.now() + 1_000;
+  emit({
+    type: "assistant.turn_start",
+    id: "native-selected-shared-turn",
+    timestamp: new Date(nativeSelectedTurnAt).toISOString(),
+    data: { sessionId: session.sessionId, turnId: "native-selected-shared-turn", model: "profile-model" },
+  });
+  emit({
+    type: "session.idle",
+    id: "native-selected-shared-idle",
+    parentId: "native-selected-shared-turn",
+    timestamp: new Date(nativeSelectedTurnAt + 1).toISOString(),
+    data: { sessionId: session.sessionId, aborted: false },
+  });
+  await waitFor(() => activity.readSharedAgentActivities(project).length === 0, "native selected root claim release");
+  result = { before, competitorBlocked };
+} else if (scenario === "team-stop-corrupt-shared") {
+  await options.hooks.onUserPromptSubmitted({
+    sessionId: session.sessionId,
+    workingDirectory: project,
+    prompt: "keep one exact local root controllable",
+  }, { sessionId: session.sessionId });
+  await corruptSharedActivityStore();
+  const stopped = await invoke("team", "stop all");
+  const stopOutput = logs.map(({ message }) => message)
+    .findLast((message) => message.includes("Agent Harbor Copilot stop"));
+  const external = await invoke("team", "stop shared-ghost");
+  emit({
+    type: "session.idle",
+    id: "corrupt-shared-local-idle",
+    timestamp: new Date(Date.now() + 1_000).toISOString(),
+    data: { sessionId: session.sessionId, aborted: true },
+  });
+  result = { stopped, stopOutput, external };
+} else if (scenario === "team-stop-external-owner") {
+  const activity = await import(pathToFileURL(join(
+    root, "plugins", "agent-foundry", "runtime", "dist", "adapters", "opencode-agent-activity.js",
+  )).href);
+  const currentClaim = activity.claimSharedAgentActivity(
+    project, "crafter", "direct", `pi:${process.pid}:private-routing-session`, "pi",
+  );
+  const current = await invoke("team", "stop shared-crafter");
+  const currentPublic = !JSON.stringify(current).includes(currentClaim.snapshot.claimToken) &&
+    !JSON.stringify(current).includes(currentClaim.snapshot.sessionID);
+  const currentReleased = currentClaim.release();
+
+  const legacyClaim = activity.claimSharedAgentActivity(
+    project, "talent-scout", "direct", `pi:${process.pid}:private-legacy-session`, "pi",
+  );
+  const legacyPath = join(await sharedActivityProjectDirectory(), "talent-scout.json");
+  const stored = JSON.parse(await readFile(legacyPath, "utf8"));
+  const legacyStored = {
+    version: 1,
+    owner: stored.owner,
+    project: stored.project,
+    agent: stored.agent,
+    kind: stored.kind,
+    phase: stored.phase,
+    slot: stored.slot,
+    sessionA: stored.sessionA,
+    sessionB: stored.sessionB,
+    startedAt: stored.startedAt,
+    processID: stored.processID,
+    claimToken: stored.claimToken,
+  };
+  await writeFile(legacyPath, JSON.stringify(legacyStored), "utf8");
+  const legacy = await invoke("team", "stop shared-talent-scout");
+  const legacyPublic = !JSON.stringify(legacy).includes(legacyClaim.snapshot.claimToken) &&
+    !JSON.stringify(legacy).includes(legacyClaim.snapshot.sessionID);
+  const legacyReleased = legacyClaim.release();
+
+  await options.hooks.onUserPromptSubmitted({
+    sessionId: session.sessionId,
+    workingDirectory: project,
+    prompt: "keep one exact local root controllable during stop all",
+  }, { sessionId: session.sessionId });
+  const mixedClaim = activity.claimSharedAgentActivity(
+    project, "talent-scout", "direct", `pi:${process.pid}:private-mixed-stop-session`, "pi",
+  );
+  const mixed = await invoke("team", "stop all");
+  const mixedOutput = logs.map(({ message }) => message)
+    .findLast((message) => message.includes("Agent Harbor Copilot stop"));
+  const mixedPublic = !String(mixedOutput).includes(mixedClaim.snapshot.claimToken) &&
+    !String(mixedOutput).includes(mixedClaim.snapshot.sessionID);
+  const mixedReleased = mixedClaim.release();
+  result = {
+    current,
+    legacy,
+    mixed,
+    mixedOutput,
+    currentPublic,
+    legacyPublic,
+    mixedPublic,
+    currentReleased,
+    legacyReleased,
+    mixedReleased,
+    processID: process.pid,
+  };
+} else if (scenario === "team-stop-external-budget") {
+  const activity = await import(pathToFileURL(join(
+    root, "plugins", "agent-foundry", "runtime", "dist", "adapters", "opencode-agent-activity.js",
+  )).href);
+  const claimOwners = async (count, prefix) => {
+    const claims = [];
+    for (let index = 0; index < count; index += 1) {
+      const suffix = String(index).padStart(2, "0");
+      const agent = index === 0 ? `aa-legacy-${prefix}`
+        : index === 1 ? `ab-current-${prefix}`
+        : `${prefix}-${suffix}`;
+      const ownerRuntime = ["pi", "copilot"][index % 2];
+      const secret = `private-${prefix}-session-task-${suffix}`;
+      const claim = activity.claimSharedAgentActivity(
+        project, agent, "direct", `${ownerRuntime}:${process.pid}:${secret}`, ownerRuntime,
+      );
+      if (index === 0 || index % 11 === 0) await downgradeSharedActivityClaimToLegacy(agent);
+      claims.push({ agent, claim, secret });
+    }
+    return claims;
+  };
+  const outputIsPublic = (output, claims) => claims.every(({ claim, secret }) =>
+    !String(output).includes(secret) &&
+    !String(output).includes(claim.snapshot.claimToken) &&
+    !String(output).includes(claim.snapshot.sessionID));
+  const releaseOwners = (claims) => claims.map(({ claim }) => claim.release()).every(Boolean);
+
+  const externalClaims = await claimOwners(32, "external-owner");
+  const externalLogStart = logs.length;
+  const external = await invoke("team", "stop all");
+  const externalLogs = logs.slice(externalLogStart).map(({ message }) => message);
+  const externalOutput = externalLogs.findLast((message) => message.includes("Agent Harbor Copilot stop"));
+  const externalPublic = outputIsPublic(externalOutput, externalClaims);
+  const externalReleased = releaseOwners(externalClaims);
+  await waitFor(() => activity.readSharedAgentActivities(project).length === 0, "hostile external owner release");
+
+  await options.hooks.onUserPromptSubmitted({
+    sessionId: session.sessionId,
+    workingDirectory: project,
+    prompt: "private-local-task-must-not-appear beside hostile external owners",
+  }, { sessionId: session.sessionId });
+  const mixedClaims = await claimOwners(31, "mixed-owner");
+  const mixedLogStart = logs.length;
+  const mixed = await invoke("team", "stop all");
+  const mixedLogs = logs.slice(mixedLogStart).map(({ message }) => message);
+  const mixedOutput = mixedLogs.findLast((message) => message.includes("Agent Harbor Copilot stop"));
+  const mixedPublic = outputIsPublic(mixedOutput, mixedClaims) &&
+    !String(mixedOutput).includes("private-local-task-must-not-appear");
+  const mixedReleased = releaseOwners(mixedClaims);
+
+  result = {
+    external,
+    externalLogs,
+    externalOutput,
+    externalPublic,
+    externalReleased,
+    mixed,
+    mixedLogs,
+    mixedOutput,
+    mixedPublic,
+    mixedReleased,
+    processID: process.pid,
   };
 } else if (scenario === "inferred-child") {
   const invocation = { sessionId: session.sessionId };

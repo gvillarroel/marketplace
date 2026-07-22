@@ -2,20 +2,27 @@
 
 The Agent Harbor Copilot extension exposes the roster and current work without
 asking a model to summarize either one. `/team [filter]` is a native client
-command and labels its output `0 model tokens`. It reads the project-local
-roster, session model settings, and an in-memory run registry; it does not send
-a prompt, create a child, or write activity history to disk. While work is
-active it shows that live hierarchy; only when the project is idle does it add
+command and labels its output `0 model tokens`. It combines the project-local
+roster and session model settings with two activity layers: rich run telemetry
+and history held by this Copilot process, plus private filesystem claims for
+named persistent players shared project-wide with Pi and other Copilot
+processes. `/team` itself does not send a prompt, create a child, or write
+activity history. Copilot CLI 1.0.73
+marks extension SDK commands unavailable while an agent turn is active. During
+that interval Agent Harbor instead posts bounded, debounced, content-free live
+progress to the session timeline. `Esc` is the native live interrupt/stop
+control; `/team` becomes available again after settlement. When callable,
+`/team` shows the current hierarchy; only when the project is idle does it add
 the most recent mission, regardless of its terminal outcome.
 
 ## Commands
 
 | Command | Model work | Purpose |
 | --- | --- | --- |
-| `/team` | None (`0 model tokens`) | Show lead capacity, SDLC coverage, roster, and live work; when idle, show the last mission. |
-| `/team help` or `/team --help` | None (`0 model tokens`) | Explain searchable fields, cancellation syntax, limits, redaction, and process-local history. |
-| `/team <filter>` | None (`0 model tokens`) | Search member IDs, descriptions, kind/status, capabilities, tools, skills, model/reasoning, safe task label, or run ID. |
-| `/team stop <run-id\|all>` | None (`0 model tokens`) | Request cancellation of one controlled root, the root that owns a supplied child ID, or every controlled root in the current project. |
+| `/team` | None (`0 model tokens`) | After an active TUI turn settles, show lead capacity, SDLC coverage, roster, work, and the last mission. |
+| `/team help` or `/team --help` | None (`0 model tokens`) | Explain searchable fields, host command gating, native Escape control, limits, redaction, and process-local history. |
+| `/team <filter>` | None (`0 model tokens`) | Search member IDs, descriptions, kind/status, capabilities, tools, skills, model/reasoning, safe task label, run ID, or the disclosed owner runtime/PID of a shared row. |
+| `/team stop <run-id\|all>` | None (`0 model tokens`) | Idle/RPC control that requests cancellation of one controlled root, the root owning a supplied child ID, or every controlled project root. The active TUI uses `Esc`. |
 | `/bench list [filter]` | None (`0 model tokens`) | Show the same enriched roster view, limited by an optional filter; filter text never invokes `/team stop`. |
 | `/bench on <id...>` | None (`0 model tokens`) | Activate owned bundled or personal teammates in the current project. |
 | `/bench off <id...>` | None (`0 model tokens`) | Deactivate owned bundled or personal teammates in the current project without deleting personal registration. |
@@ -44,7 +51,8 @@ before model use and says so. A newly introduced convenience `/<id>` alias still
 appears after reload. `/retire` removes the owned persistent registration and
 active copy in the current project, without printing either managed path.
 Active copies previously made in other projects are deliberately outside that
-transaction and remain there.
+transaction and remain there. A startup alias is blocked immediately but can
+remain visible in slash-command completion/autocomplete until `/reload`.
 Empty tasks, inactive IDs, unmanaged profiles, double-booking, and capacity
 violations stop during preflight, before `session.send`.
 
@@ -86,8 +94,28 @@ mutation by itself does not require a new loader when `harbor_skill_<id>` was
 already part of the startup union.
 
 In this document, `enabled`/`ready` describes roster availability. `active`
-work means a live root or child in `starting`, `working`, or `cleaning`; an
+work means a live root or child in `starting`, `working`, `waiting`, or
+`cleaning`; an
 enabled teammate can be idle, and an enabled teammate with active work is busy.
+
+## Live TUI progress
+
+The extension consumes native lifecycle, model, reasoning, usage, and billing
+events while Copilot is working. It emits root and child starts immediately,
+coalesces prompt acceptance and the matching native root-start into one startup
+record, debounces subsequent event bursts to one per configured interval, and
+never emits more than twelve live progress records per root. Each record uses
+only the public process-local root/run IDs, agent, state, elapsed time, and
+model, reasoning, native-token, or nano-AIU fields that Copilot has actually
+reported. It never includes the prompt, task label, response, reasoning body,
+tool input/output, error body, native IDs, paths, URLs, or credentials.
+
+The first record explains the native controls in full: progress is automatic,
+`Esc` interrupts or stops agents, and `/team` returns after settlement. Later
+records use only a compact one-line `Esc`/`/team` reminder. Terminal child/root
+messages remain prioritized in the bounded notification queue. This timeline
+is observability only; it does not send an assistant message, prompt a model,
+or consume model tokens.
 
 ## What `/team` reports
 
@@ -102,18 +130,29 @@ identity is `unavailable`, never delegable, and includes a reload repair hint.
 The first `/team` performs a bounded authoritative refresh and retry when the
 startup registry is incomplete. It reports degraded discovery only if that
 retry still cannot establish native readiness.
-The unfiltered overview is assembled against a dynamic budget of at most 30
-wrapped lines and 96 terminal cells per line. It always keeps all nine factory
-member IDs with kind and effective state, then spends remaining space on
-personal members and activity. Omitted personal members and active runs are
-reported with exact counts and actionable `kind:personal`, `member:<id>`, or
-`run:<id>` filters. This overview budget is distinct from a filtered view:
-`/team <filter>` can retain richer matching detail while every line remains
-bounded to 96 cells. The inventory itself is unchanged and remains capped at 32
-visible roster rows. A filter with no match still preserves global discovery,
+Every visible `/team` result is assembled against a total budget of at most 30
+wrapped lines and 96 terminal cells per line. The unfiltered overview always
+keeps all nine factory member IDs with kind and effective state, then spends
+remaining space on personal members and activity. Omitted personal members and
+active runs are reported with exact counts and actionable `kind:personal`,
+`member:<id>`, or `run:<id>` filters. SDK, host, degraded-authority, and repair
+blocks appended by the extension consume that same total 30-line budget rather
+than expanding it.
+A filtered view spends the same total budget differently: each compact locally
+owned activity row retains the full public agent/run IDs, elapsed time, safe
+task label, complete effective model and reasoning provenance, and token total.
+A row imported from the shared persistent-player registry deliberately omits
+those process-local fields while retaining elapsed time and owner routing.
+`/team <filter>` can retain richer matching detail within the same 30×96 bound.
+The inventory itself is unchanged and remains capped at 32 visible roster rows.
+A filter with no match still preserves global discovery,
 selection-restoration, and lifecycle-identity gates. A degraded or unscoped
 view preserves session-global reload guidance without exposing a project-scoped
 roster, run ID, or task.
+
+Footer commands are grouped by purpose before wrapping, so no continuation line
+starts with an orphan `·` separator. Help consistently uses `—` between each
+primary `/team` form and its explanation.
 
 Filters are case-insensitive and field-aware. Unprefixed text uses substring
 matching for member/agent ID, description, capacity, configured or observed
@@ -121,9 +160,16 @@ model, safe task label, and run ID; kind, roster availability, run state, and
 reasoning effort require an exact value. Prefixes make the target explicit:
 `tool:`, `capability:`, `skill:`, `model:`, `task:`, `run:`, `id:`/`member:`,
 and `description:` use substring matching, while `status:`/`state:`,
-`reasoning:`, and `kind:`/`role:` use exact matching. Tool, capability, skill,
+`reasoning:`, `kind:`/`role:`, `owner:`, and `pid:` use exact matching. Tool, capability, skill,
 and description fields search roster metadata; task, run, and reasoning search
-activity; status, model, member, and kind can match either surface.
+activity; status, model, member, and kind can match either surface. `owner:pi`,
+`owner:copilot`, and `pid:<pid>` search only the public routing fields of an
+external shared row and do not trigger an “undisclosed telemetry” warning.
+An external `shared-*` row is searchable only through fields it actually
+discloses (player/run alias, kind, state, shared activity kind, and owner
+runtime/PID routing). Task, model, and reasoning filters never match “not disclosed”
+placeholders. The result instead counts external active rows that could not be
+evaluated and explicitly says that matching covered disclosed fields only.
 
 Lead access separates enabled specialists from those callable at this instant.
 `Can delegate now` becomes `none` while a sequential child is active, a direct
@@ -131,12 +177,25 @@ non-manager owns the Copilot session, a run is still settling, or selection
 restoration is unverified. The view includes the blocking run and repair or wait
 action instead of advertising theoretical eligibility as immediate capacity.
 
-Activity is grouped by root mission and child. A run includes a process-local
-ID, parent ID when applicable, member, kind, state, elapsed time, a redacted
-task label, configured/inherited/currently observed model and reasoning effort,
-native usage-event count, token fields, child duration, and child tool-call
-count when Copilot provides them. Historical observations are rendered as
-additional evidence, never mixed into the current model or reasoning value.
+Locally owned activity is grouped by root mission and child. A local run
+includes a process-local ID, parent ID when applicable, member, kind, state,
+elapsed time, a redacted task label, configured/inherited/currently observed
+model and reasoning effort, native usage-event count, token fields, child
+duration, and child tool-call count when Copilot provides them. Historical
+observations are process-local and rendered as additional evidence, never mixed
+into the current model or reasoning value.
+
+Named persistent-player roots and children also hold one project-shared claim.
+A version-2 claim exposes only the player, direct/delegated kind, phase, start
+time, owner runtime `pi|copilot`/PID, and an opaque public `shared-<player>` row
+to another Pi or Copilot process. Version-1 claims remain readable and retain a
+known PID, but identify the owner runtime as unverified because that field is
+absent. The other process does not receive the task label, model,
+reasoning, usage, native IDs, hierarchy, claim token/path, or stop capability.
+The compact row retains the full player ID, elapsed time, and the exact owner
+routing hint. It marks the claimed player busy while
+leaving unrelated specialists eligible; a remote claim does not falsely claim
+Copilot's single-session selection gate.
 Before native response evidence, `configured` means Copilot's agent registry
 declared the model and `inherited` means the run uses the current host setting.
 An event emitted by the native run can then establish `observed`; Agent Harbor
@@ -189,14 +248,49 @@ identity is also a lower bound: an exact same-run replay is deduplicated, while
 cross-run or identity-enriched ambiguity is omitted and triggers the reload
 gate instead of being assigned to either member.
 
-The registry is process-local and project-scoped. Project identity is admitted
-only after native metadata or lifecycle evidence verifies it. Until then,
-`/team` renders an unscoped degraded view and `/team stop` fails closed rather
-than reading or cancelling work in `process.cwd()` by assumption. It never
-stores prompt, response, tool-result, error-body, or reasoning content. Task
-labels are lossy, bounded to 72 Unicode code points, strip terminal controls,
-and redact common path, URL, credential, bearer, JWT, and secret patterns. This
-is a display safeguard, not a universal secret detector.
+The rich runtime and its terminal history remain process-local and
+project-scoped. Persistent-player claims use the canonical physical project
+identity under the stable per-user Agent Harbor activity root, in a namespace
+shared only by Pi and Copilot activity. A capacity lock serializes admission up
+to 32 active persistent claims per project. Publication, phase changes, and
+release are verified against the exact filesystem generation; this coordination
+is not a privilege boundary against hostile code running as the same OS user.
+A v2 `opencode` owner in this namespace is malformed and degrades authority;
+OpenCode activity uses its separate native namespace.
+
+If exact ownership or release fails, Copilot retains a project-scoped hazard
+after the local run settles. Aliases, native-selected work, coordinator roots
+and children, and late lifecycle observations all fail before another model
+lookup or prompt send. The hazard clears only when release of that exact claim
+generation succeeds (or the extension reloads into clean state); `/team` keeps
+the gate and repair visible meanwhile.
+
+A heartbeat-overdue claim remains visible, busy, and capacity-counted while its
+owner PID is not definitely absent. It therefore continues to block admission;
+the owning process must recover or restart. A later admission may reclaim it
+only after the PID is definitely absent and a second exact identity/token/mtime
+read still matches. Malformed, ambiguous, or unreadable claim state makes
+activity authority unavailable. `/team` then reports only a `≥` lower bound of
+process-visible activity, marks persistent availability unverified, preserves
+the warning on a filter miss, and closes selection/delegation instead of turning
+missing rows into `ready` or “nobody is working.”
+
+Inventory reads and admission sweep definitely-dead overdue generations under
+the same capacity lock, after validating the bounded directory inventory. The
+capacity-lock file is transient metadata rather than one of the 64 bounded
+claim/foreign entries, so a full 64-claim dead inventory can be reclaimed but a
+sixty-fifth non-lock entry still fails closed. Dead overdue locks use the same
+exact double-read recovery; live, ambiguous, or possible PID-reuse owners remain
+busy/unavailable and are never reclaimed automatically.
+
+Project identity is admitted only after native metadata or lifecycle evidence
+verifies it. Until then, `/team` renders an unscoped degraded view and `/team
+stop` fails closed rather than reading or cancelling work in `process.cwd()` by
+assumption. Neither activity layer stores prompt, response, tool-result,
+error-body, or reasoning content. Local task labels are lossy, bounded to 72
+Unicode code points, strip terminal controls, and redact common path, URL,
+credential, bearer, JWT, and secret patterns. This is a display safeguard, not
+a universal secret detector.
 
 ## Disposable `/contract` visibility
 
@@ -205,7 +299,9 @@ child. The root keeps the wrapper's model and usage; the child keeps its native
 model, reasoning, usage, duration, and tool-call evidence. Completion, failure,
 or cancellation is visible as one mission, but the validated contractor prompt,
 descriptor, tool results, and child response are never copied into the
-observability registry. Even a prompt containing `/contract` in the middle is
+observability registry. Both wrapper and anonymous child telemetry are
+process-local and never enter the shared persistent-player claim count. Even a
+prompt containing `/contract` in the middle is
 given a generic private task label before the skill event arrives. This also
 covers the qualified `/agent-foundry/contract` spelling supported when skill
 names collide; a mere textual mention gets the same conservative label but
@@ -272,17 +368,50 @@ native lifecycle value, but the extension normalizes it to the single visible
 `cleaning` appears only after a real abort, terminal teardown, or restoration
 begins.
 
-`/team stop` requests cancellation; it does not claim that Copilot has already
-stopped. Supplying a child run ID resolves and aborts its owning root. The root
+`/team stop` is retained for idle and programmatic/RPC use; Copilot CLI 1.0.73
+does not let the TUI invoke that SDK command during an active agent turn. The
+native live control is `Esc`. When `/team stop` is callable, it requests
+cancellation and does not claim that Copilot has already stopped. Supplying a
+child run ID resolves and aborts its owning root. The root
 and descendants remain active as `cleaning` until a verified terminal event
 produces `completed`, `failed`, `cancelled`, or `cleanup-error`; selection stays
 gated throughout that interval.
+
+Rows named `shared-<player>` are ownership notices, not remote control handles.
+Only the Pi or Copilot process holding the exact claim and native abort handle
+can stop that work. A targeted or `all` stop reports remote matches as owned by
+the exact displayed runtime/PID; a legacy claim keeps its known PID and marks
+only the runtime as unverified. If the shared claim inventory cannot be read
+authoritatively, Copilot's `/team stop` fails closed before claiming that all
+project work was inspected. Mass-stop output remains inside the same
+30-line/96-cell budget, counts omitted detail, and points back to `/team` for
+inspection. `Esc` likewise controls only work owned by this Copilot session.
 
 For `team-lead`, the coordinator emits content-minimized, redacted lifecycle
 metadata correlated to native session, turn, tool-call, and child IDs. The
 extension admits a child against the same project registry before Copilot starts
 the native `task`, so a persistent player cannot be double-booked through direct
-and delegated paths. Observer failures never change the delegation decision.
+and delegated paths, including work owned by another Pi or Copilot process.
+Non-authoritative telemetry observer failures never change the delegation
+decision; shared activity admission and ownership checks are safety gates and
+fail closed.
+
+The direct `/player`/`<id>` runner publishes a `starting` claim only after a
+final live player-definition check—and, for manager/recruiter roots, a final
+roster-snapshot check—under the cross-process capacity gate. Coordinator
+admission also claims a named root or child before its native `task` and
+revalidates the current persistent definition. The exact generation is verified
+again when work becomes `working` or `cleaning` and on later local runtime
+updates. Losing it after admission marks the run `cleanup-error` and requests a
+native root abort; failure to remove the exact claim at settlement is reported
+as unverified cleanup and leaves future admission fail-closed.
+
+Destructive roster changes (`bench off`, `retire`, and same-ID replacement)
+share that cross-process gate with new admissions. A specialist claim protects
+that specialist; a `team-lead` or `talent-scout` claim protects the roster
+snapshot it may be using. A scout may exclude only its own exact claim token
+while committing its scoped mutation. Store or gate ambiguity rejects the
+mutation rather than racing it against persistent work.
 
 Before every native `task` decision, the guard reads Copilot's current agent.
 Third-party agents remain untouched. A manually selected `team-lead` is guarded
@@ -308,6 +437,10 @@ zero-token help, and generated-runtime byte equality. `/contract` regressions
 cover both native task-event orders, pre-tool identity, cross-mission replay,
 privacy, exact-one child admission, second-child ambiguity, nested-task denial,
 terminal outcomes, selected-root relabeling, and extension-to-render behavior.
+Cross-process coverage in `test-ts/shared-runtime-activity.test.ts` exercises Pi
+and Copilot physical-project convergence, double-booking, destructive-mutation
+gates, heartbeat-overdue visibility, owner-only stop guidance, release, and
+truthful degraded authority.
 The native Copilot SDK smoke starts the
 installed CLI with `--plugin-dir`, exercises `/team`, `/team <filter>`,
 `/bench list <filter>`, `/join`, `/retire`, and invalid `/player` preflight, and

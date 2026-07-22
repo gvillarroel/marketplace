@@ -11,7 +11,7 @@ import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolv
 import { setTimeout as delay } from "node:timers/promises";
 import { bundledPlayers, trustedSkills } from "./defaults.js";
 import { isHarborId } from "./identity.js";
-import { decodePlayer, isCanonicalPlayerProfile } from "./profiles.js";
+import { decodePlayer, isCanonicalPlayerProfile, isCanonicalPlayerRegistration, isCompatiblePlayerRegistration, renderPlayerRegistration, } from "./profiles.js";
 import { validateConfiguredSkillReferences } from "./skills.js";
 const piBuiltInCommands = [
     "settings", "model", "scoped-models", "export", "import", "share", "copy", "name", "session", "changelog",
@@ -540,12 +540,12 @@ async function stage(message) {
   if (current.exists && desired && current.content === desired.toString("base64")) {
     const step = { stepId, name, before: current, after: current, noop: true };
     steps.set(stepId, step);
-    return { before: current, after: current };
+    return { before: current, after: current, status: "already-current" };
   }
   if (!current.exists && !desired) {
     const step = { stepId, name, before: current, after: current, noop: true };
     steps.set(stepId, step);
-    return { before: current, after: current };
+    return { before: current, after: current, status: "already-current" };
   }
   const beforePath = current.exists ? journal(stepId, "before") : undefined;
   const nextPath = desired ? journal(stepId, "next") : undefined;
@@ -574,7 +574,7 @@ async function stage(message) {
     }
     const step = { stepId, name, before: current, after, beforePath, nextPath, noop: false };
     steps.set(stepId, step);
-    return { before: current, after };
+    return { before: current, after, status: "changed" };
   } catch (error) {
     if (nextPath) {
       try { const owned = await snapshot(nextPath); if (next && sameSnapshot(owned, next)) await removePrivate(nextPath, next); } catch {}
@@ -861,7 +861,10 @@ class LifecycleDirectoryWorker {
             expected: this.toWire(expected),
             content: content === undefined ? null : content.toString("base64"),
         });
-        return snapshotFromWire(result.after);
+        if (result?.status !== "changed" && result?.status !== "already-current") {
+            throw new Error("lifecycle worker returned an invalid mutation status");
+        }
+        return { after: snapshotFromWire(result.after), status: result.status };
     }
     async verify(stepId) { await this.request("verify", { stepId }); }
     async rollback(stepId) { await this.request("rollback", { stepId }); }
@@ -1026,6 +1029,11 @@ export class Roster {
     lifecycleHostExecutable() { return process.execPath; }
     /** Testable environment boundary; executable selection never asks a shell to resolve it. */
     lifecycleHostEnvironment() { return process.env; }
+    /** Abortable contention wait; protected so lock/abort ordering can be tested without sleeps. */
+    async waitForMutationLock(signal) {
+        signal?.throwIfAborted();
+        await delay(25, undefined, signal ? { signal } : undefined);
+    }
     nodeRuntime() {
         this.lifecycleRuntime ??= resolveLifecycleNodeRuntime(this.lifecycleHostExecutable(), this.lifecycleHostEnvironment(), [this.spec.home, this.spec.project, process.cwd()]);
         return this.lifecycleRuntime;
@@ -1113,7 +1121,7 @@ export class Roster {
     // same persistent registration. `wx` provides exclusive acquisition. A dead owner's lock is removed
     // only after its structured ownership record is re-read unchanged; foreign or malformed locks are
     // collisions, never cleanup candidates. Release likewise verifies the token before deleting the file.
-    async withMutationLock(action) {
+    async withMutationLock(action, signal) {
         const path = contained(this.spec.home, join(this.spec.home, this.spec.registrationDir, ".roster.lock"));
         if (this.boundDirectories)
             throw new Error("nested roster mutation is not allowed");
@@ -1126,9 +1134,12 @@ export class Roster {
         let lockDirectory;
         let ownsLock = false;
         try {
+            signal?.throwIfAborted();
             lockDirectory = await this.bindDirectory(dirname(path));
+            signal?.throwIfAborted();
             const record = JSON.stringify({ owner: "agent-harbor", pid: lockDirectory.worker.pid, token });
             for (let attempt = 0; attempt < 200 && !ownsLock; attempt += 1) {
+                signal?.throwIfAborted();
                 await lockDirectory.worker.assertCanonical();
                 try {
                     await lockDirectory.worker.acquireLock(basename(path), Buffer.from(record, "utf8"));
@@ -1137,7 +1148,9 @@ export class Roster {
                 catch (error) {
                     if (error?.code !== "EEXIST")
                         throw error;
+                    signal?.throwIfAborted();
                     const current = await lockDirectory.worker.snapshot(basename(path));
+                    signal?.throwIfAborted();
                     if (current.content === undefined)
                         continue;
                     let owner;
@@ -1166,15 +1179,18 @@ export class Roster {
                             throw signalError;
                     }
                     if (!alive) {
+                        signal?.throwIfAborted();
                         await lockDirectory.worker.removeExact(basename(path), current);
                         continue;
                     }
-                    await delay(25);
+                    await this.waitForMutationLock(signal);
                 }
             }
             if (!ownsLock)
                 throw new Error("roster is busy; retry the operation");
+            signal?.throwIfAborted();
             await this.bindDirectory(contained(this.spec.project, join(this.spec.project, this.spec.activeDir)));
+            signal?.throwIfAborted();
             value = await action();
         }
         catch (error) {
@@ -1214,7 +1230,7 @@ export class Roster {
         }
         await target.directory.worker.assertCanonical();
         const stepId = `step-${_index}-${randomUUID()}`;
-        const after = await target.directory.worker.stage(target.name, stepId, expected, desired);
+        const { after, status } = await target.directory.worker.stage(target.name, stepId, expected, desired);
         await target.directory.worker.assertCanonical();
         transaction.staged.push({
             path: change.path,
@@ -1222,6 +1238,7 @@ export class Roster {
             stepId,
             before: expected,
             after,
+            status,
         });
     }
     async verifyStagedChange(change) {
@@ -1261,6 +1278,9 @@ export class Roster {
                 for (const [index, change] of changes.entries()) {
                     await this.applyChange(change, index);
                 }
+                if (transaction.staged.length !== changes.length || transaction.staged.some((item, index) => item.path !== changes[index]?.path)) {
+                    throw new Error("lifecycle transaction did not report every staged mutation outcome");
+                }
                 for (const change of transaction.staged)
                     await this.verifyStagedChange(change);
             }
@@ -1292,6 +1312,7 @@ export class Roster {
             if (cleanupErrors.length) {
                 throw new AggregateError(cleanupErrors, "mutation committed but transaction cleanup was incomplete");
             }
+            return transaction.staged.map(({ status }) => status);
         }
         finally {
             if (this.activeTransaction === transaction)
@@ -1304,31 +1325,64 @@ export class Roster {
         return { registration, active };
     }
     /**
-     * Validates and joins a personal player by writing identical registration and active profiles.
-     * Unmanaged collisions are never replaced. A differing owned profile requires `replace: true`,
-     * and both files either verify successfully or are restored to their prior exact bytes.
+     * Validates and joins a personal player by writing a portable user registration and a
+     * project-bound active profile. Unmanaged collisions are never replaced. A differing owned
+     * profile requires `replace: true`, and both files either verify successfully or are restored
+     * to their prior exact bytes.
      */
-    async join(input) {
+    async joinResult(input, signal) {
+        signal?.throwIfAborted();
         const player = validatePlayer(input);
-        const content = this.spec.renderPlayer(player, "personal");
-        if (Buffer.byteLength(content, "utf8") > 30_000)
+        const registrationContent = renderPlayerRegistration(this.spec.name, player);
+        const activeContent = this.spec.renderPlayer(player, "personal");
+        if ([registrationContent, activeContent].some((content) => Buffer.byteLength(content, "utf8") > 30_000)) {
             throw new Error("profile exceeds 30000 bytes");
+        }
         return this.withMutationLock(async () => {
             const paths = this.paths(player.name);
             const current = await Promise.all([this.existingBound(paths.registration), this.existingBound(paths.active)]);
+            signal?.throwIfAborted();
             for (const collision of current)
                 if (collision !== undefined && !isOwnedProfile(collision, player.name, "personal"))
                     throw new Error("unmanaged collision");
-            if (current[0] === undefined && (await this.registrationEntries()).length >= 200) {
-                throw new Error("personal roster limit reached (200); retire an existing personal member before joining another");
+            if (current[0] === undefined) {
+                const registrations = await this.registrationEntries();
+                signal?.throwIfAborted();
+                if (registrations.length >= 200) {
+                    throw new Error("personal roster limit reached (200); retire an existing personal member before joining another");
+                }
             }
-            if (!player.replace && current.some((value) => value !== undefined &&
-                !isCanonicalPlayerProfile(value, this.spec.name, player, "personal", this.spec.project))) {
+            signal?.throwIfAborted();
+            const registrationCompatible = current[0] === undefined ||
+                isCompatiblePlayerRegistration(current[0], this.spec.name, player);
+            const activeCanonical = current[1] === undefined ||
+                isCanonicalPlayerProfile(current[1], this.spec.name, player, "personal", this.spec.project);
+            if (!player.replace && (!registrationCompatible || !activeCanonical)) {
                 throw new Error("replace:true required");
             }
-            await this.transaction([{ path: paths.registration, content }, { path: paths.active, content }]);
-            return `joined ${player.name}\ncommand: /${player.name} <request>\nregistration: ${paths.registration}\nactive: ${paths.active}`;
-        });
+            // This is the cancellation boundary. Once transaction staging begins,
+            // ignore later aborts so the verified multi-file commit can finish and
+            // its truthful lifecycle outcome reaches the caller.
+            signal?.throwIfAborted();
+            const fileStatuses = await this.transaction([
+                { path: paths.registration, content: registrationContent },
+                { path: paths.active, content: activeContent },
+            ]);
+            const status = fileStatuses.includes("changed") ? "changed" : "already-current";
+            const summary = status === "changed"
+                ? `joined ${player.name}\nRoster registration and active profile updated.`
+                : `${player.name} is already joined with the requested definition.\nNo roster files changed.`;
+            return {
+                kind: "join",
+                player: player.name,
+                status,
+                text: `${summary}\ncommand: /${player.name} <request>\nregistration: ${paths.registration}\nactive: ${paths.active}`,
+            };
+        }, signal);
+    }
+    /** Text-compatible lifecycle API. Native adapters should prefer `joinResult()`. */
+    async join(input, signal) {
+        return (await this.joinResult(input, signal)).text;
     }
     async bundledBenchInventory(bundled, filter) {
         const rows = [];
@@ -1401,7 +1455,7 @@ export class Roster {
                 definition = undefined;
             }
             const registrationCanonical = definition !== undefined &&
-                isCanonicalPlayerProfile(registration, this.spec.name, definition, "personal", this.spec.project);
+                isCanonicalPlayerRegistration(registration, this.spec.name, definition);
             rows.push({
                 id,
                 roster: "personal",
@@ -1427,17 +1481,24 @@ export class Roster {
             if (roster === "personal" && active !== undefined && !isOwnedProfile(await this.existingBound(paths.registration), id, "personal")) {
                 throw new Error(`personal registration missing: ${id}`);
             }
-            return { path: paths.active };
+            return { changes: [{ path: paths.active }] };
         }
         const registration = definition ? undefined : await this.existingBound(paths.registration);
         if (!definition && (!registration || !isOwnedProfile(registration, id, "personal")))
             throw new Error(`unknown player: ${id}`);
         try {
+            if (definition) {
+                return { changes: [{ path: paths.active, content: this.spec.renderPlayer(definition, "sdlc") }] };
+            }
+            const personal = validatePlayer(decodePlayer(registration, id));
+            if (!isCompatiblePlayerRegistration(registration, this.spec.name, personal)) {
+                throw new Error("registration is not canonical");
+            }
             return {
-                path: paths.active,
-                content: definition
-                    ? this.spec.renderPlayer(definition, "sdlc")
-                    : this.spec.renderPlayer(validatePlayer(decodePlayer(registration, id)), "personal"),
+                changes: [
+                    { path: paths.registration, content: renderPlayerRegistration(this.spec.name, personal) },
+                    { path: paths.active, content: this.spec.renderPlayer(personal, "personal") },
+                ],
             };
         }
         catch {
@@ -1445,32 +1506,69 @@ export class Roster {
         }
     }
     /** Completes every collision/read/render preflight before returning transaction input. */
-    async planBenchMutation(command, bundled) {
-        const changes = [];
-        for (const id of command.ids)
-            changes.push(await this.planBenchPlayer(id, command.action, bundled));
-        return changes;
+    async planBenchMutation(command, bundled, signal) {
+        const plans = [];
+        for (const id of command.ids) {
+            signal?.throwIfAborted();
+            plans.push(await this.planBenchPlayer(id, command.action, bundled));
+            signal?.throwIfAborted();
+        }
+        return plans;
     }
     /**
      * Lists roster state or deterministically turns bundled/personal players on and off.
      * Turning a personal player off removes only its owned active copy; its registration remains the
      * source of truth. Turning it on requires a recoverable current registration.
      */
-    async bench(args, bundled) {
+    async benchResult(args, bundled, signal) {
+        signal?.throwIfAborted();
         const command = parseBenchCommand(args, bundled);
         if (command.kind === "list")
-            return this.listBench(command.filter, bundled);
+            return { kind: "list", text: await this.listBench(command.filter, bundled) };
         return this.withMutationLock(async () => {
-            const changes = await this.planBenchMutation(command, bundled);
-            await this.transaction(changes);
-            return command.ids.map((id) => `${id}: turned ${command.action}`).join("\n");
-        });
+            const plans = await this.planBenchMutation(command, bundled, signal);
+            signal?.throwIfAborted();
+            const fileStatuses = await this.transaction(plans.flatMap(({ changes }) => changes));
+            let statusIndex = 0;
+            const rows = command.ids.map((id, index) => {
+                const statuses = fileStatuses.slice(statusIndex, statusIndex + plans[index].changes.length);
+                statusIndex += plans[index].changes.length;
+                return {
+                    id,
+                    action: command.action,
+                    status: statuses.includes("changed") ? "changed" : "already-current",
+                };
+            });
+            const status = rows.some((row) => row.status === "changed")
+                ? "changed"
+                : "already-current";
+            const textRows = rows.map(({ id, action, status: rowStatus }) => rowStatus === "changed"
+                ? action === "on"
+                    ? `${id}: enabled in this project.`
+                    : `${id}: moved to the bench in this project.`
+                : action === "on"
+                    ? `${id}: currently enabled in this project · this member was unchanged.`
+                    : `${id}: currently benched in this project · this member was unchanged.`);
+            if (status === "already-current")
+                textRows.push("No roster files changed.");
+            return {
+                kind: "mutation",
+                status,
+                rows,
+                text: textRows.join("\n"),
+            };
+        }, signal);
+    }
+    /** Text-compatible lifecycle API. Native adapters should prefer `benchResult()`. */
+    async bench(args, bundled, signal) {
+        return (await this.benchResult(args, bundled, signal)).text;
     }
     /**
      * Removes an owned personal registration and this project's owned active copy transactionally.
      * Active copies in other projects are intentionally outside the transaction and remain untouched.
      */
-    async retire(id) {
+    async retireResult(id, signal) {
+        signal?.throwIfAborted();
         // Names newly reserved by a host must remain removable when an older
         // Agent Harbor version already created a verified personal profile.
         if (!isHarborId(id))
@@ -1478,16 +1576,33 @@ export class Roster {
         return this.withMutationLock(async () => {
             const paths = this.paths(id);
             const registration = await this.existingBound(paths.registration);
+            signal?.throwIfAborted();
             const active = await this.existingBound(paths.active);
+            signal?.throwIfAborted();
             if (registration === undefined && active === undefined) {
-                return `retired ${id}; already absent; other projects intentionally untouched`;
+                return {
+                    kind: "retire",
+                    player: id,
+                    status: "already-current",
+                    text: `${id} is already retired here; other projects intentionally untouched\nNo roster files changed.`,
+                };
             }
             if (!isOwnedProfile(registration, id, "personal"))
                 throw new Error("owned registration not found");
             if (active !== undefined && !isOwnedProfile(active, id, "personal"))
                 throw new Error("unmanaged collision");
+            signal?.throwIfAborted();
             await this.transaction([{ path: paths.registration }, { path: paths.active }]);
-            return `retired ${id}; other projects intentionally untouched`;
-        });
+            return {
+                kind: "retire",
+                player: id,
+                status: "changed",
+                text: `retired ${id}; other projects intentionally untouched`,
+            };
+        }, signal);
+    }
+    /** Text-compatible lifecycle API. Native adapters should prefer `retireResult()`. */
+    async retire(id, signal) {
+        return (await this.retireResult(id, signal)).text;
     }
 }

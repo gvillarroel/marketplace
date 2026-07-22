@@ -341,8 +341,8 @@ test("OpenCode team lead propagates the originating user model to its child prom
   assert.ok(config.agent["team-lead"].prompt.includes(rolePlayers.get("team-lead")!.prompt));
   assert.match(config.agent["team-lead"].prompt, /complete every required gate/);
   await plugin["chat.message"]!(
-    { sessionID: "parent", messageID: "user-root", model: originatingModel, variant: openCodeModel.variant },
-    { message: { id: "user-root", model: originatingModel }, parts: [] } as any,
+    { sessionID: "parent", messageID: "user-root", model: originatingModel, variant: openCodeModel.variant, agent: "team-lead" },
+    { message: { id: "user-root", model: originatingModel, agent: "team-lead" }, parts: [] } as any,
   );
   const codexParams = { metadata: { session: "must-be-removed" }, keep: true };
   await plugin["chat.params"]!(

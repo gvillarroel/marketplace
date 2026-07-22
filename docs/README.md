@@ -18,3 +18,5 @@
 - [Simplification plan](SIMPLIFICATION-PLAN.md): scope and metrics for the core
   simplification.
 - [Test evidence](TEST-LOG.md): recorded validations and results.
+- [Status report — 2026-07-22](STATUS-2026-07-22.md): dated application
+  readiness, runtime evidence, risks, and release follow-up.

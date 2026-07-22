@@ -1,5 +1,7 @@
 /** Small terminal-layout helpers shared by deterministic human-readable views. */
 export declare const terminalLineWidth = 96;
+/** Removes ANSI/ECMA-48 and other zero-width terminal controls while retaining visible evidence. */
+export declare function stripTerminalControls(value: string): string;
 /** Counts terminal columns after treating ANSI controls as zero-width units. */
 export declare function visibleTextWidth(value: string): number;
 /** Splits at a terminal-column boundary without cutting a grapheme or ANSI sequence. */

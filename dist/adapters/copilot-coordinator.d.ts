@@ -153,7 +153,7 @@ export interface CopilotCoordinatorRunFinishedEvent extends CopilotCoordinatorRu
 export type CopilotCoordinatorLifecycleEvent = CopilotCoordinatorRootStartedEvent | CopilotCoordinatorChildStartedEvent | CopilotCoordinatorRunStateEvent | CopilotCoordinatorRunIdentityEvent | CopilotCoordinatorRunModelEvent | CopilotCoordinatorRunReasoningEvent | CopilotCoordinatorRunUsageEvent | CopilotCoordinatorRunFinishedEvent;
 /** Best-effort observer; callback failures never change delegation behavior. */
 export type CopilotCoordinatorLifecycleHook = (event: CopilotCoordinatorLifecycleEvent) => void | Promise<void>;
-/** Synchronous child admission check; throwing denies the native `task` before model work starts. */
+/** Synchronous root/child admission check; throwing rejects the host hook before model work starts. */
 export type CopilotCoordinatorAdmissionHook = (input: {
     type: "root" | "child";
     project: string;

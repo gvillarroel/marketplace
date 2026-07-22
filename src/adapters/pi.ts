@@ -1,4 +1,5 @@
 /** Pi extension entrypoint, zero-model controls, live team status, and delegation. */
+import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 import * as hostPiSdk from "@earendil-works/pi-coding-agent";
 import type {
@@ -11,7 +12,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { listInvocablePlayers, listManagedActiveIds, loadPiActivePlayer } from "../core/active.js";
-import { parseContractDefinition } from "../core/commands.js";
+import { parseContractDefinition, type HarborLifecycleOutcome } from "../core/commands.js";
 import {
   assertHarborCustomToolAccess,
   formatHarborTeamRosterSnapshot,
@@ -19,27 +20,35 @@ import {
   harborCustomToolPolicy,
   harborStaticCustomToolSpecs,
   HarborScoutTurnGuard,
+  maximumHarborTeamRosterMembers,
   validateHarborCustomToolArguments,
 } from "../core/custom-tools.js";
 import { bundledPlayers, rolePlayers, scoutPlayer, trustedSkills } from "../core/defaults.js";
 import { GhResolver } from "../core/github.js";
 import { commandNames, type ContractDefinition, type PlayerDefinition } from "../core/types.js";
-import { wrapPlainText } from "../core/text-layout.js";
-import { normalizeDelegatedTaskPaths } from "../core/profiles.js";
+import { visibleTextWidth, wrapPlainText } from "../core/text-layout.js";
+import { normalizeDelegatedTaskPaths, playerDefinitionDigest } from "../core/profiles.js";
+import { canonicalProjectIdentity, sameCanonicalProject } from "../core/project-identity.js";
 import { publicErrorText, publicMetadataText } from "../core/public-metadata.js";
 import { filterTrustedSkills, formatScoutSkillMatches } from "../core/scout.js";
 import { PiOrchestrator, type PiSessionOptions } from "../orchestrators/pi.js";
-import { runDeterministicCommand } from "./direct.js";
+import { runDeterministicCommandResult } from "./direct.js";
 import {
-  formatPiLiveStatus,
-  formatPiLiveWidget,
   formatPiMissionReport,
+  formatPiProjectLiveStatus,
+  formatPiProjectLiveWidget,
   PiTeamRuntime,
   settlePiRootPromises,
   type PiRunObserver,
   type PiTeamMemberKind,
 } from "./pi-team-runtime.js";
 import { collectPiTeamMembers, formatPiTeamView } from "./pi-team-view.js";
+import {
+  claimValidatedSharedAgentActivity,
+  readSharedAgentActivities,
+  withSharedRosterMutationGate,
+  type OpenCodeAgentActivityClaim,
+} from "./opencode-agent-activity.js";
 
 type NoticeLevel = "info" | "warning" | "error";
 const preflightZeroLine = "Preflight stopped · no model was called · 0 model tokens.";
@@ -48,7 +57,9 @@ const maximumPiCompletionItems = 50;
 const piCompletionCacheTtlMs = 750;
 const maximumPiTaskBytes = 30_000;
 const maximumPiFilterBytes = 4_096;
+const maximumPiStopSelectorBytes = 256;
 const maximumPiDefinitionBytes = 100_000;
+const maximumPiTeamOutputLines = 30;
 
 interface StartedPiRun {
   readonly runId: string;
@@ -58,10 +69,10 @@ interface StartedPiRun {
 const commandSyntax: Record<string, string> = {
   team: "/team [filter|stop <run-id|all>]",
   bench: "/bench [list [filter]|on <id...>|off <id...>]",
-  join: "/join {\"name\":\"...\",\"description\":\"...\",\"prompt\":\"...\",\"tools\":[\"read\"]}",
+  join: "/join {\"name\":\"reviewer\",\"description\":\"Review\",\"prompt\":\"Review\",\"tools\":[\"read\"]}",
   retire: "/retire <personal-id>",
-  contract: "/contract {\"name\":\"...\",...,\"task\":\"...\"}",
-  "list-skills": "/list-skills [--descriptions|-d] [filter]",
+  contract: "/contract {\"name\":\"a\",\"description\":\"Audit\",\"prompt\":\"Audit\",\"tools\":[\"read\"],\"task\":\"Review\"}",
+  "list-skills": "/list-skills [--descriptions|-d] [filter] [--page N]",
   scout: "/scout <capability needed>",
 };
 
@@ -236,8 +247,25 @@ function zeroModelResult(command: string, result: string): string {
   return wrapPlainText(`Agent Harbor /${command} · 0 model tokens\n${result}`);
 }
 
+function boundedPiTeamOutput(
+  text: string,
+  mandatoryTail: readonly string[] = [],
+): string {
+  const primary = wrapPlainText(text).split("\n");
+  const tail = mandatoryTail.length ? wrapPlainText(mandatoryTail.join("\n")).split("\n") : [];
+  if (primary.length + tail.length <= maximumPiTeamOutputLines) {
+    return [...primary, ...tail].join("\n");
+  }
+  const omission = (count: number) => `+${count} /team lines omitted; narrow with a field filter or /team run:<id>.`;
+  const prefixLimit = Math.max(0, maximumPiTeamOutputLines - tail.length - 1);
+  const prefix = primary.slice(0, prefixLimit);
+  while (prefix.length && !prefix[prefix.length - 1].trim()) prefix.pop();
+  const omitted = primary.length - prefix.length;
+  return [...prefix, omission(omitted), ...tail].slice(0, maximumPiTeamOutputLines).join("\n");
+}
+
 function stopResult(result: string): string {
-  return wrapPlainText(`Agent Harbor stop · 0 model tokens\n${result}`);
+  return boundedPiTeamOutput(`Agent Harbor stop · 0 model tokens\n${result}`);
 }
 
 function requireBoundedArguments(value: string, maximumBytes: number, label: string): string {
@@ -256,6 +284,60 @@ function commandHelp(command: string): string {
           ? "1 model child when active"
           : "0 model tokens";
   return `Usage: ${syntax}\nCost: ${cost}.`;
+}
+
+function piTeamHelp(value: string): string {
+  const match = /^(?:help|--help)(?:\s+page:([1-9]\d*))?$/u.exec(value);
+  if (!match) throw new Error("usage: /team help [page:1|page:2|page:3]");
+  const page = Number(match[1] ?? 1);
+  const pages: readonly (readonly string[])[] = [
+    [
+      "Agent Harbor /team help · page 1/3 · 0 model tokens",
+      "TEAM STATUS AND COMPLETE INDEXES",
+      "Overview: /team",
+      "Every teammate: /team roster-page:1",
+      "Every active run: /team activity-page:1",
+      "Every retained mission: /team history-page:1",
+      "Exact teammate: /team member:<id>",
+      "Exact run telemetry: /team run:<id>",
+      "Roster-first maintenance: /bench list page:1",
+      "States: ready/idle, starting, working, cleaning, bench, stale, conflict.",
+      "Symbols: ● ready/working · ○ benched · ! unhealthy · ↳ child.",
+      "Next: /team help page:2",
+    ],
+    [
+      "Agent Harbor /team help · page 2/3 · 0 model tokens",
+      "FILTERS AND ZERO-MODEL CONTROLS",
+      "Fields: member:, kind:, description:, capability:, tool:, skill:, status:, model:,",
+      "thinking:, task:, run:, owner:, pid:, heartbeat:.",
+      "Examples: /team status:working · /team member:reviewer · /team owner:copilot.",
+      "Every structured field requires a value; unknown prefixes are rejected.",
+      "Stop one/all: /team stop <run-id|all>",
+      "Bench: /bench list page:1 · /bench on <id...> · /bench off <id...>",
+      "Retire personal: /retire <personal-id>",
+      "Refresh native aliases after changes: /reload",
+      "Previous: /team help page:1 · Next: /team help page:3",
+    ],
+    [
+      "Agent Harbor /team help · page 3/3 · 0 model tokens",
+      "MODEL WORK AND DEFINITIONS",
+      `Direct teammate: /<id> <task> · ${commandHelp("team-lead").split("\n")[1]}`,
+      "Disposable child (exactly one):",
+      commandSyntax.contract,
+      "Contract requires name, description, prompt, tools, task; optional skills and model.",
+      `Recruit: ${commandSyntax.scout} · 1 recruiter model child.`,
+      "Persistent teammate:",
+      commandSyntax.join,
+      "Join requires name, description, prompt, tools; optional skills, model, replace:true.",
+      "Observed tokens/cost are provider facts; unreported values stay unobserved.",
+      "Capacity: 32 local roots; 32 shared Pi/Copilot persistent claims; contractors excluded",
+      "from shared claims. A new team-lead needs two free shared slots for root + first child.",
+      "Alt+H or /team stop requests cancellation; cleaning remains until terminal settlement.",
+      "Previous: /team help page:2 · Back: /team",
+    ],
+  ];
+  if (page > pages.length) throw new Error(`team help page ${page} is out of range; available pages: 1-${pages.length}`);
+  return wrapPlainText(pages[page - 1].join("\n"));
 }
 
 function humanError(command: string, error: unknown, deterministic = false): string {
@@ -290,7 +372,12 @@ function withoutViewHeader(view: string): string {
   return view.split(/\r?\n/gu).slice(1).join("\n");
 }
 
-function conciseLifecycleResult(command: string, args: string, raw: string): string {
+function conciseLifecycleResult(
+  command: string,
+  args: string,
+  raw: string,
+  lifecycle?: HarborLifecycleOutcome,
+): string {
   if (command === "join") {
     const input = JSON.parse(args) as {
       name: string;
@@ -299,6 +386,7 @@ function conciseLifecycleResult(command: string, args: string, raw: string): str
       skills?: Array<{ name: string }>;
       model?: string;
     };
+    const joinLifecycle = requirePiJoinLifecycleOutcome(args, lifecycle);
     const capacity = [
       ...input.tools,
       ...(input.skills ?? []).map(({ name }) => `skill:${name}`),
@@ -306,8 +394,11 @@ function conciseLifecycleResult(command: string, args: string, raw: string): str
     const id = publicMetadataText(input.name, 48) ?? "joined-player";
     const role = publicMetadataText(input.description, 240) ?? "Personal Agent Harbor teammate";
     const model = publicMetadataText(input.model ?? "", 200);
+    const alreadyCurrent = joinLifecycle.status === "already-current";
     return [
-      `✓ ${id} joined · personal · ready in this project`,
+      alreadyCurrent
+        ? `○ ${id} is already joined and current · no roster files changed.`
+        : `✓ ${id} joined · personal · ready in this project`,
       `Role: ${role}`,
       `Capacity: ${capacity.join(", ") || "advisory"}`,
       `Model: ${model ? `configured ${model}` : "inherits the Pi host when run"}`,
@@ -316,13 +407,102 @@ function conciseLifecycleResult(command: string, args: string, raw: string): str
   }
   if (command === "retire") {
     const id = args.trim();
+    const retireLifecycle = requirePiRetireLifecycleOutcome(args, lifecycle);
+    const alreadyRetired = retireLifecycle.status === "already-current";
     return [
-      `✓ ${id} unregistered and deactivated here.`,
+      alreadyRetired
+        ? `○ ${id} was already retired here · no roster files changed.`
+        : `✓ ${id} unregistered and deactivated here.`,
       "Other project copies, if any, remain intentionally untouched.",
       "Pi cannot unregister this session's alias in-place; run /reload to remove it from completion.",
     ].join("\n");
   }
   return raw;
+}
+
+type BenchLifecycleOutcome = Extract<HarborLifecycleOutcome, { readonly command: "bench" }>;
+
+type JoinLifecycleOutcome = Extract<HarborLifecycleOutcome, { readonly command: "join" }>;
+type RetireLifecycleOutcome = Extract<HarborLifecycleOutcome, { readonly command: "retire" }>;
+
+function isLifecycleMutationStatus(value: unknown): value is "changed" | "already-current" {
+  return value === "changed" || value === "already-current";
+}
+
+/** Fails closed before Pi refreshes or presents an unverified join result. */
+export function requirePiJoinLifecycleOutcome(
+  args: string,
+  lifecycle: HarborLifecycleOutcome | undefined,
+): JoinLifecycleOutcome {
+  const input = JSON.parse(args) as { name?: unknown };
+  if (
+    lifecycle?.command !== "join" ||
+    typeof input?.name !== "string" ||
+    lifecycle.player !== input.name ||
+    !isLifecycleMutationStatus(lifecycle.status)
+  ) {
+    throw new Error("Agent Harbor join returned an incomplete or mismatched lifecycle outcome; roster state is unverified");
+  }
+  return lifecycle;
+}
+
+/** Fails closed before Pi refreshes or presents an unverified retire result. */
+export function requirePiRetireLifecycleOutcome(
+  args: string,
+  lifecycle: HarborLifecycleOutcome | undefined,
+): RetireLifecycleOutcome {
+  const player = args.trim();
+  if (
+    lifecycle?.command !== "retire" ||
+    lifecycle.player !== player ||
+    !isLifecycleMutationStatus(lifecycle.status)
+  ) {
+    throw new Error("Agent Harbor retire returned an incomplete or mismatched lifecycle outcome; roster state is unverified");
+  }
+  return lifecycle;
+}
+
+function expectedPiBenchMutation(args: string): { readonly action: "on" | "off"; readonly ids: readonly string[] } {
+  const match = /^(on|off)\s+(.+)$/u.exec(args.trim());
+  if (!match) throw new Error("Agent Harbor bench mutation could not be verified");
+  const requested = match[2]!.split(/[\s,]+/u).filter(Boolean);
+  const ids = requested.length === 1 && requested[0] === "all"
+    ? [...bundledPlayers.keys()]
+    : [...new Set(requested)];
+  if (!ids.length) throw new Error("Agent Harbor bench mutation could not be verified");
+  return { action: match[1] as "on" | "off", ids };
+}
+
+/** Fails closed before Pi refreshes or presents an unverified bench mutation. */
+export function requirePiBenchLifecycleOutcome(
+  args: string,
+  lifecycle: HarborLifecycleOutcome | undefined,
+): BenchLifecycleOutcome {
+  const expected = expectedPiBenchMutation(args);
+  if (
+    lifecycle?.command !== "bench" ||
+    !isLifecycleMutationStatus(lifecycle.status) ||
+    !Array.isArray(lifecycle.rows) ||
+    lifecycle.rows.length !== expected.ids.length ||
+    lifecycle.rows.some((row, index) =>
+      row?.id !== expected.ids[index] ||
+      row.action !== expected.action ||
+      !isLifecycleMutationStatus(row.status)) ||
+    lifecycle.status !== (lifecycle.rows.some(({ status }) => status === "changed") ? "changed" : "already-current")
+  ) {
+    throw new Error("Agent Harbor bench returned an incomplete or mismatched lifecycle outcome; roster state is unverified");
+  }
+  return lifecycle;
+}
+
+function conciseBenchLifecycleResult(lifecycle: BenchLifecycleOutcome): string {
+  const rows = lifecycle.rows.map(({ id, action, status }) => status === "changed"
+    ? action === "on"
+      ? `✓ ${id} enabled in this project.`
+      : `✓ ${id} moved to the bench in this project.`
+    : `○ ${id} is already ${action === "on" ? "enabled" : "benched"} · this member was unchanged.`);
+  if (lifecycle.status === "already-current") rows.push("No roster files changed.");
+  return rows.join("\n");
 }
 
 function benchListFilter(args: string): string | undefined {
@@ -338,10 +518,8 @@ function compactPublicText(value: string, limit: number): string {
 }
 
 function sameProject(left: string, right: string): boolean {
-  const normalize = (value: string): string => process.platform === "win32"
-    ? resolve(value).replace(/\\/gu, "/").replace(/\/$/u, "").toLowerCase()
-    : resolve(value).replace(/\/$/u, "");
-  return normalize(left) === normalize(right);
+  try { return sameCanonicalProject(left, right); }
+  catch { return false; }
 }
 
 function childToolProject(context: ExtensionContext | undefined, expected: string): string {
@@ -349,7 +527,7 @@ function childToolProject(context: ExtensionContext | undefined, expected: strin
   if (!sameProject(project, expected)) {
     throw new Error("Agent Harbor child custom tool cannot cross its invocation project boundary");
   }
-  return project;
+  return canonicalProjectIdentity(project);
 }
 
 function leadRosterPreviewRow(definition: PlayerDefinition, busy = false): string {
@@ -380,16 +558,38 @@ function boundedLeadRoster(rows: readonly string[], maximumCharacters = 1_500): 
 
 /**
  * Registers Agent Harbor's command and tool surface in the active Pi host.
- * Every run is one isolated SDK child; team inspection is process-local and
- * deterministic, and never sends a prompt to a model.
+ * Every run is one isolated SDK child. Persistent-player admission/activity
+ * is project-shared; anonymous contractor telemetry remains process-local.
  */
 export default function agentHarbor(pi: ExtensionAPI): void {
   const registered = new Set<string>();
   const runtime = new PiTeamRuntime();
+  const sharedActivityClaims = new Map<string, OpenCodeAgentActivityClaim>();
+  const sharedActivityOwnershipUnsubscribers = new Map<string, () => void>();
+  const sharedActivityAuthorityFailures = new Map<string, Error>();
+  const rootRosterReservations = new Map<string, ReadonlySet<string>>();
+  let rosterLifecycleTail = Promise.resolve();
+  const withRosterLifecycleGate = async <T>(action: () => T | Promise<T>): Promise<T> => {
+    const previous = rosterLifecycleTail;
+    let release!: () => void;
+    rosterLifecycleTail = new Promise<void>((resolveGate) => { release = resolveGate; });
+    await previous;
+    try { return await action(); }
+    finally { release(); }
+  };
   const rootAbortControllers = new Map<string, AbortController>();
   const rootPromises = new Map<string, Promise<unknown>>();
   const rootSettlements = new Map<string, Promise<unknown>>();
   const rootSettlementProjects = new Map<string, string>();
+  const lateSettlementNotifications = new Set<string>();
+  const liveUiKey = "agent-harbor:team";
+  interface LiveUiSurface {
+    project: string;
+    ctx: ExtensionCommandContext | ExtensionContext;
+    timer?: ReturnType<typeof setInterval>;
+    unsubscribe?: () => void;
+  }
+  let liveUiSurface: LiveUiSurface | undefined;
   const loadHostSdk = async () => hostPiSdk;
   let completionProject = process.cwd();
   let discoveryWarning: string | undefined;
@@ -403,6 +603,154 @@ export default function agentHarbor(pi: ExtensionAPI): void {
     readonly promise: Promise<Awaited<ReturnType<typeof collectPiTeamMembers>>>;
   } | undefined;
   const metadataRefreshWarning = "Pi command metadata refresh failed after the roster change was committed; run /reload. No rollback was attempted.";
+
+  const failSharedActivityOwnership = (runId: string, detail: string): Error => {
+    const run = runtime.get(runId);
+    const prior = sharedActivityAuthorityFailures.get(runId);
+    const owner = run ? `${run.agent}'s` : "the player's";
+    const failure = prior ?? new Error(
+      `Agent Harbor lost ${owner} exact project-shared activity ownership ${detail}; model work was aborted`,
+    );
+    sharedActivityAuthorityFailures.set(runId, failure);
+    if (run && run.state !== "cleanup-error") runtime.setState(runId, "cleanup-error");
+    const controller = run && rootAbortControllers.get(run.rootRunId);
+    if (controller && !controller.signal.aborted) controller.abort(failure);
+    return failure;
+  };
+
+  runtime.subscribe((runId) => {
+    const claim = sharedActivityClaims.get(runId);
+    const run = runtime.get(runId);
+    if (!claim || !run) return;
+    const phase = run.state === "working" ? "working"
+      : run.state === "cleaning" ? "cleaning" : undefined;
+    if (!phase || claim.setPhase(phase)) return;
+    failSharedActivityOwnership(runId, `before ${phase}`);
+  });
+
+  const sharedRunIdentity = (harness: "pi", agent: string): string =>
+    `${harness}:${process.pid}:${agent}:${randomBytes(12).toString("base64url")}`;
+
+  const releaseSharedActivity = (runId: string): boolean => {
+    const claim = sharedActivityClaims.get(runId);
+    if (!claim) return true;
+    sharedActivityOwnershipUnsubscribers.get(runId)?.();
+    sharedActivityOwnershipUnsubscribers.delete(runId);
+    const released = claim.release();
+    if (released) sharedActivityClaims.delete(runId);
+    return released;
+  };
+
+  const releaseSharedActivityAfter = <T>(runId: string, promise: Promise<T>): Promise<T> => promise.then(
+    (value) => {
+      const authorityFailure = sharedActivityAuthorityFailures.get(runId);
+      if (!releaseSharedActivity(runId)) {
+        runtime.setState(runId, "cleanup-error");
+        throw new Error(`Agent Harbor work finished, but ${runtime.get(runId)?.agent ?? "the player"}'s shared activity claim could not be released`);
+      }
+      sharedActivityAuthorityFailures.delete(runId);
+      if (authorityFailure) throw authorityFailure;
+      return value;
+    },
+    (error) => {
+      const authorityFailure = sharedActivityAuthorityFailures.get(runId);
+      if (!releaseSharedActivity(runId)) {
+        runtime.setState(runId, "cleanup-error");
+        throw new AggregateError([error], `Agent Harbor work failed and ${runtime.get(runId)?.agent ?? "the player"}'s shared activity claim could not be released`);
+      }
+      sharedActivityAuthorityFailures.delete(runId);
+      if (authorityFailure && authorityFailure !== error) {
+        throw new AggregateError([error, authorityFailure], "Agent Harbor model work failed after shared activity ownership was lost");
+      }
+      throw authorityFailure ?? error;
+    },
+  );
+
+  const currentPersistentPlayer = (project: string, id: string): PlayerDefinition => {
+    if (id === scoutPlayer.name) return scoutPlayer;
+    const fixed = rolePlayers.get(id);
+    return fixed ?? loadPiActivePlayer(project, id);
+  };
+
+  const validatePersistentAdmission = (
+    project: string,
+    expected: PlayerDefinition,
+    expectedRoster?: ReadonlyMap<string, PlayerDefinition>,
+  ): void => {
+    const current = currentPersistentPlayer(project, expected.name);
+    // Delegated ContractDefinition values add an invocation-only task. Roster
+    // identity is the canonical player profile; task text must never make the
+    // same persistent player look stale during its final shared admission.
+    const { task: _invocationTask, ...expectedProfile } = expected as PlayerDefinition & { readonly task?: string };
+    if (playerDefinitionDigest(current) !== playerDefinitionDigest(expectedProfile as PlayerDefinition)) {
+      throw new Error(`active managed player changed during admission: ${expected.name}; inspect /team and retry`);
+    }
+    if (expectedRoster !== undefined) {
+      const currentRoster = preparePlayerRoster(current, project);
+      if (rosterSnapshotDigest(currentRoster) !== rosterSnapshotDigest(expectedRoster)) {
+        throw new Error(`active roster changed during ${expected.name} admission; inspect /team and retry`);
+      }
+    }
+  };
+
+  const persistentBusyAgents = (project: string): ReadonlySet<string> => new Set([
+    ...runtime.activeProjectRuns(project)
+      .filter(({ kind }) => kind !== "contractor")
+      .map(({ agent }) => agent),
+    ...readSharedAgentActivities(project).map(({ agent }) => agent),
+  ]);
+
+  const formattedPlayerRosterSnapshot = (
+    project: string,
+    rosterSnapshot: ReadonlyMap<string, PlayerDefinition>,
+    query = "",
+  ) => {
+    const busyAgents = persistentBusyAgents(project);
+    return formatHarborTeamRosterSnapshot(
+      [...rosterSnapshot.values()].map((definition) => ({
+        id: definition.name,
+        role: publicMetadataText(definition.description, 240) ?? "Role not disclosed",
+        tools: definition.tools,
+        skills: (definition.skills ?? []).map(({ name }) => name),
+        ...(definition.model
+          ? { configuredModel: publicMetadataText(definition.model, 200) ?? "redacted" }
+          : {}),
+        availability: busyAgents.has(definition.name) ? "busy" as const : "ready" as const,
+      })),
+      query,
+    );
+  };
+
+  const beginClaimedPersistentRun = (
+    project: string,
+    definition: PlayerDefinition,
+    kind: PiTeamMemberKind,
+    input: Parameters<PiTeamRuntime["begin"]>[0],
+    claimKind: "direct" | "delegated",
+    expectedRoster?: ReadonlyMap<string, PlayerDefinition>,
+  ): string => {
+    const claim = claimValidatedSharedAgentActivity(
+      project,
+      definition.name,
+      claimKind,
+      sharedRunIdentity("pi", definition.name),
+      "pi",
+      () => validatePersistentAdmission(project, definition, expectedRoster),
+    );
+    try {
+      const runId = runtime.begin(input);
+      sharedActivityClaims.set(runId, claim);
+      sharedActivityOwnershipUnsubscribers.set(runId, claim.onOwnershipLost(() => {
+        failSharedActivityOwnership(runId, "while its heartbeat was active");
+      }));
+      return runId;
+    } catch (error) {
+      if (!claim.release()) {
+        throw new AggregateError([error], `Pi admission failed and ${definition.name}'s shared activity claim could not be released`);
+      }
+      throw error;
+    }
+  };
 
   const invalidateCompletionRoster = (project?: string): void => {
     if (!project || (completionRosterCache && sameProject(completionRosterCache.project, project))) {
@@ -460,6 +808,8 @@ export default function agentHarbor(pi: ExtensionAPI): void {
   ): Promise<string> => {
     const controller = rootAbortControllers.get(runId) ?? new AbortController();
     rootAbortControllers.set(runId, controller);
+    const authorityFailure = sharedActivityAuthorityFailures.get(runId);
+    if (authorityFailure && !controller.signal.aborted) controller.abort(authorityFailure);
     const relayCallerAbort = (): void => {
       const state = runtime.get(runId)?.state;
       if (state === "starting" || state === "working") runtime.setState(runId, "cleaning");
@@ -486,12 +836,13 @@ export default function agentHarbor(pi: ExtensionAPI): void {
       effectiveSignal.throwIfAborted();
       return execute(effectiveSignal);
     });
-    const settlement = execution.catch((error) => {
+    const settlement = releaseSharedActivityAfter(runId, execution.catch((error) => {
       runtime.finishIfOpen(runId, cancellation(error, effectiveSignal) ? "cancelled" : "failed");
       throw error;
-    }).finally(() => {
+    })).finally(() => {
       callerSignal?.removeEventListener("abort", relayCallerAbort);
       if (rootAbortControllers.get(runId) === controller) rootAbortControllers.delete(runId);
+      rootRosterReservations.delete(runId);
       rootSettlements.delete(runId);
       rootSettlementProjects.delete(runId);
     });
@@ -515,7 +866,12 @@ export default function agentHarbor(pi: ExtensionAPI): void {
     const selected = rootIds.flatMap((rootId) => active.find((run) => run.id === rootId) ?? []);
     const stopped: string[] = [];
     const alreadyStopping: string[] = [];
-    const unavailable: string[] = [];
+    const unavailableLocal: string[] = [];
+    const externalOwners: Array<{
+      id: string;
+      ownerRuntime?: "pi" | "copilot";
+      processID: number;
+    }> = [];
     for (const run of selected) {
       const controller = rootAbortControllers.get(run.id);
       if (run.state === "cleaning" || controller?.signal.aborted) {
@@ -523,30 +879,99 @@ export default function agentHarbor(pi: ExtensionAPI): void {
         continue;
       }
       if (!controller) {
-        unavailable.push(run.id);
+        unavailableLocal.push(run.id);
         continue;
       }
       runtime.setState(run.id, "cleaning");
       controller.abort(new DOMException("Stopped by user", "AbortError"));
       stopped.push(run.id);
     }
-    return { stopped, alreadyStopping, unavailable };
+    let activityAuthorityUnavailable = false;
+    try {
+      const localPersistent = new Set(active.filter(({ kind }) => kind !== "contractor").map(({ agent }) => agent));
+      const external = readSharedAgentActivities(project)
+        .filter(({ agent }) => !localPersistent.has(agent))
+        .map(({ agent, ownerRuntime, processID }) => ({
+          id: `shared-${agent}`,
+          ...(ownerRuntime === "pi" || ownerRuntime === "copilot" ? { ownerRuntime } : {}),
+          processID,
+        }))
+        .filter(({ id }) => selector === "all" || selector === id);
+      externalOwners.push(...external);
+    } catch {
+      activityAuthorityUnavailable = true;
+    }
+    return { stopped, alreadyStopping, unavailableLocal, externalOwners, activityAuthorityUnavailable };
   };
 
   const stopProjectRootsMessage = (
     result: ReturnType<typeof stopProjectRoots>,
-    empty = "No Agent Harbor work is active in this project.",
+    empty = "No project-shared persistent-player work is visible; disposable contractor work is process-local.",
   ): string => {
-    const lines = [
+    const localLines = [
       ...(result.stopped.length
         ? [`Stopping ${result.stopped.length} Agent Harbor root run(s): ${result.stopped.join(", ")}.`]
         : []),
       ...(result.alreadyStopping.length
         ? [`Already stopping ${result.alreadyStopping.length} root run(s): ${result.alreadyStopping.join(", ")}; waiting for provider cleanup.`]
         : []),
-      ...(result.unavailable.length
-        ? [`Stop authority unavailable for ${result.unavailable.length} root run(s): ${result.unavailable.join(", ")}; inspect /team until they settle.`]
+      ...(result.unavailableLocal.length
+        ? [`Local stop handle is unavailable for ${result.unavailableLocal.length} root run(s): ${result.unavailableLocal.join(", ")}; inspect /team in this Pi process before retrying.`]
         : []),
+    ];
+    const authorityLines = [
+      ...(result.activityAuthorityUnavailable
+        ? ["Persistent-player activity authority is unavailable; Agent Harbor cannot verify or stop work owned by another process."]
+        : []),
+    ];
+    const ownerGroups = new Map<string, {
+      ownerRuntime?: "pi" | "copilot";
+      processID?: number;
+      ids: string[];
+    }>();
+    for (const { id, ownerRuntime, processID } of result.externalOwners) {
+      const validProcessID = Number.isSafeInteger(processID) && processID > 0 ? processID : undefined;
+      const key = `${ownerRuntime ?? "unverified"}:${validProcessID ?? "unverified"}`;
+      const group = ownerGroups.get(key) ?? {
+        ...(ownerRuntime ? { ownerRuntime } : {}),
+        ...(validProcessID === undefined ? {} : { processID: validProcessID }),
+        ids: [],
+      };
+      group.ids.push(id);
+      ownerGroups.set(key, group);
+    }
+    const ownerRouteFragments = [...ownerGroups.values()].map(({ ownerRuntime, processID, ids }) => {
+      const owner = ownerRuntime && processID !== undefined
+        ? `owner ${ownerRuntime} PID ${processID}`
+        : processID !== undefined
+          ? `owner runtime unverified (legacy claim) · PID ${processID}`
+          : "owner runtime/PID unverified";
+      const route = `${owner} ×${ids.length}`;
+      if (ownerGroups.size > 4 || ids.length !== 1) return route;
+      const identified = `${ids[0]} · ${route}`;
+      return visibleTextWidth(`• ${identified}`) <= 96 ? identified : route;
+    });
+    const packedOwnerRoutes: string[] = [];
+    for (const fragment of ownerRouteFragments) {
+      const current = packedOwnerRoutes.at(-1);
+      const candidate = current === undefined ? `• ${fragment}` : `${current} · ${fragment}`;
+      if (current !== undefined && visibleTextWidth(candidate) <= 96) {
+        packedOwnerRoutes[packedOwnerRoutes.length - 1] = candidate;
+      } else {
+        packedOwnerRoutes.push(`• ${fragment}`);
+      }
+    }
+    const lines = [
+      ...localLines,
+      ...(result.externalOwners.length
+        ? [
+          `Stop authority is in another process for ${result.externalOwners.length} project-shared persistent run(s) across ${ownerGroups.size} owner process route(s):`,
+          ...packedOwnerRoutes,
+          "Filter external work with /team owner:<runtime> or /team pid:<pid>.",
+          "Action: in each listed owning process run /team stop all.",
+        ]
+        : []),
+      ...authorityLines,
     ];
     return lines.length ? lines.join("\n") : empty;
   };
@@ -585,6 +1010,87 @@ export default function agentHarbor(pi: ExtensionAPI): void {
       thinkingLevel,
       ...(providerProjections.length ? { providerProjections } : {}),
     };
+  };
+
+  const rosterSnapshotDigest = (snapshot: ReadonlyMap<string, PlayerDefinition>): string =>
+    [...snapshot.entries()]
+      .map(([id, definition]) => `${id}:${playerDefinitionDigest(definition)}`)
+      .sort()
+      .join("\n");
+
+  const destructiveRosterTargets = (command: string, args: string): string[] => {
+    const value = args.trim();
+    if (command === "retire") return value ? [value] : [];
+    if (command === "join") {
+      try {
+        const input = JSON.parse(value) as { name?: unknown; replace?: unknown };
+        return input.replace === true && typeof input.name === "string" ? [input.name] : [];
+      } catch { return []; }
+    }
+    if (command !== "bench") return [];
+    const match = /^off\s+(.+)$/u.exec(value);
+    if (!match) return [];
+    const requested = [...new Set(match[1].split(/[\s,]+/u).filter(Boolean))];
+    return requested.length === 1 && requested[0] === "all"
+      ? [...bundledPlayers.keys()]
+      : requested;
+  };
+
+  const assertRosterMutationAllowed = (
+    project: string,
+    command: string,
+    args: string,
+    ignoredRunId?: string,
+  ): void => {
+    for (const target of destructiveRosterTargets(command, args)) {
+      const action = command === "retire"
+        ? `retire ${target}`
+        : command === "join" ? `replace ${target}` : `bench off ${target}`;
+      const busy = runtime.activeProjectRuns(project).find((run) =>
+        run.kind !== "contractor" && run.agent === target && run.id !== ignoredRunId);
+      if (busy) {
+        throw new Error(
+          `cannot ${action} while it is ${busy.state} in ${busy.rootRunId}; ` +
+          `use /team stop ${busy.rootRunId}, then wait for cleanup to settle`,
+        );
+      }
+      const owner = runtime.activeProjectRuns(project).find((run) =>
+        run.parentRunId === undefined && run.id !== ignoredRunId && rootRosterReservations.get(run.rootRunId)?.has(target));
+      if (owner) {
+        throw new Error(
+          `cannot ${action} while ${owner.agent} owns its active roster snapshot in ${owner.rootRunId}; ` +
+          `use /team stop ${owner.rootRunId}, then wait for cleanup to settle`,
+        );
+      }
+    }
+  };
+
+  const withProjectRosterMutationGate = <T>(
+    project: string,
+    command: string,
+    args: string,
+    action: () => Promise<T>,
+    ignoredRunId?: string,
+  ): Promise<T> => {
+    const targets = destructiveRosterTargets(command, args);
+    // Preserve the exact process-local run/root guidance when this Pi owns the
+    // conflict. The shared gate immediately below is still the final
+    // cross-process validation and is acquired synchronously before `action`
+    // can yield, so another runtime cannot win the admission gap.
+    assertRosterMutationAllowed(project, command, args, ignoredRunId);
+    if (!targets.length) return action();
+    const label = command === "retire"
+      ? `retire ${targets.join(", ")}`
+      : command === "join"
+        ? `replace ${targets.join(", ")}`
+        : `turn off ${targets.join(", ")}`;
+    return withSharedRosterMutationGate(
+      project,
+      targets,
+      label,
+      action,
+      ignoredRunId === undefined ? undefined : sharedActivityClaims.get(ignoredRunId)?.snapshot.claimToken,
+    );
   };
 
   const teamViewRuntimeOptions = (ctx: ExtensionContext) => {
@@ -690,7 +1196,7 @@ export default function agentHarbor(pi: ExtensionAPI): void {
     completionProject = cwd;
     requireBoundedArguments(definition.task, maximumPiTaskBytes, "contract task");
     if (parentRunId === undefined) assertRootStartAllowed(cwd, definition.name, kind);
-    const runId = runtime.begin({
+    const runInput = {
       project: cwd,
       agent: definition.name,
       kind,
@@ -701,12 +1207,18 @@ export default function agentHarbor(pi: ExtensionAPI): void {
         modelSource: definition.model === undefined ? "inherited" as const : "configured" as const,
       }),
       ...(sessionOptions.thinkingLevel === undefined ? {} : { thinking: sessionOptions.thinkingLevel }),
-    });
+    } satisfies Parameters<PiTeamRuntime["begin"]>[0];
+    const runId = kind === "contractor"
+      ? runtime.begin(runInput)
+      : beginClaimedPersistentRun(cwd, definition, kind, runInput, parentRunId === undefined ? "direct" : "delegated");
     const execute = (effectiveSignal: AbortSignal | undefined) =>
       executeRun(definition, runId, cwd, sessionOptions, effectiveSignal, additionalTools, customTools);
     const result = parentRunId === undefined
       ? trackRootExecution(runId, cwd, signal, execute)
-      : execute(combineSignals(signal, rootAbortControllers.get(runtime.get(runId)!.rootRunId)?.signal));
+      : releaseSharedActivityAfter(
+        runId,
+        execute(combineSignals(signal, rootAbortControllers.get(runtime.get(runId)!.rootRunId)?.signal)),
+      );
     return {
       runId,
       result,
@@ -722,9 +1234,9 @@ export default function agentHarbor(pi: ExtensionAPI): void {
     // A fresh tool per team-lead child makes the six-call/sequential policy invocation-local.
     let calls = 0;
     const delegatedAgents = new Set<string>();
+    const busyAtAdmission = persistentBusyAgents(cwd);
     const compactRoster = boundedLeadRoster([...delegationRoster].map(([id, definition]) =>
-      leadRosterPreviewRow(definition,
-        runtime.activeProjectRuns(cwd).some((run) => run.kind !== "contractor" && run.agent === id))));
+      leadRosterPreviewRow(definition, busyAtAdmission.has(id))));
     const spec = harborStaticCustomToolSpecs[harborCustomToolNames.delegate];
     const policy = harborCustomToolPolicy(spec.name)!;
     const staticParameters = spec.parameters as {
@@ -804,20 +1316,7 @@ export default function agentHarbor(pi: ExtensionAPI): void {
       if (call.kind !== "team-roster") throw new Error("invalid Agent Harbor team-roster dispatch");
       if (calls >= policy.maximumCalls) throw new Error(`team roster limit reached (${policy.maximumCalls})`);
       calls += 1;
-      const snapshot = formatHarborTeamRosterSnapshot(
-        [...rosterSnapshot.values()].map((definition) => ({
-          id: definition.name,
-          role: publicMetadataText(definition.description, 240) ?? "Role not disclosed",
-          tools: definition.tools,
-          skills: (definition.skills ?? []).map(({ name }) => name),
-          ...(definition.model ? { configuredModel: publicMetadataText(definition.model, 200) ?? "redacted" } : {}),
-          availability: runtime.activeProjectRuns(project)
-            .some((run) => run.kind !== "contractor" && run.agent === definition.name)
-            ? "busy" as const
-            : "ready" as const,
-        })),
-        call.query,
-      );
+      const snapshot = formattedPlayerRosterSnapshot(project, rosterSnapshot, call.query);
       return { content: [{ type: "text", text: snapshot.text }], details: {
         harness: "pi", deterministic: true, childCreated: false, rosterComplete: snapshot.complete,
       } };
@@ -852,20 +1351,7 @@ export default function agentHarbor(pi: ExtensionAPI): void {
       assertHarborCustomToolAccess(rosterSpec.name, { agent: scoutPlayer.name });
       const call = validateHarborCustomToolArguments(rosterSpec.name, params);
       if (call.kind !== "team-roster") throw new Error("invalid Agent Harbor team-roster dispatch");
-      const snapshot = formatHarborTeamRosterSnapshot(
-        [...rosterSnapshot.values()].map((definition) => ({
-          id: definition.name,
-          role: publicMetadataText(definition.description, 240) ?? "Role not disclosed",
-          tools: definition.tools,
-          skills: (definition.skills ?? []).map(({ name }) => name),
-          ...(definition.model ? { configuredModel: publicMetadataText(definition.model, 200) ?? "redacted" } : {}),
-          availability: runtime.activeProjectRuns(project)
-            .some((run) => run.kind !== "contractor" && run.agent === definition.name)
-            ? "busy" as const
-            : "ready" as const,
-        })),
-        call.query,
-      );
+      const snapshot = formattedPlayerRosterSnapshot(project, rosterSnapshot, call.query);
       guard.succeed(ticket, { rosterComplete: snapshot.complete });
       return { content: [{ type: "text", text: snapshot.text }], details: {
         harness: "pi", deterministic: true, childCreated: false, rosterComplete: snapshot.complete,
@@ -911,13 +1397,33 @@ export default function agentHarbor(pi: ExtensionAPI): void {
       assertHarborCustomToolAccess(joinSpec.name, { agent: scoutPlayer.name });
       const call = validateHarborCustomToolArguments(joinSpec.name, params);
       if (call.kind !== "join-player") throw new Error("invalid Agent Harbor join-player dispatch");
-      const text = await runDeterministicCommand("pi", "join", call.definition, project, effectiveSignal);
-      const joined = JSON.parse(call.definition) as { name: string };
-      onJoinCommitted(joined.name);
+      const committed = await withRosterLifecycleGate(() => withProjectRosterMutationGate(
+        project,
+        "join",
+        call.definition,
+        async () => {
+        const result = await runDeterministicCommandResult("pi", "join", call.definition, project, effectiveSignal);
+        const joined = JSON.parse(call.definition) as { name: string };
+        const lifecycle = requirePiJoinLifecycleOutcome(call.definition, result.lifecycle);
+        if (lifecycle.status === "changed") onJoinCommitted(joined.name);
+        return { ...result, lifecycle };
+        },
+        parentRunId,
+      ));
       guard.succeed(ticket);
       return {
-        content: [{ type: "text", text: conciseLifecycleResult("join", call.definition, text) }],
-        details: { harness: "pi", action: "join", modelTokens: 0 },
+        content: [{ type: "text", text: conciseLifecycleResult(
+          "join",
+          call.definition,
+          committed.text,
+          committed.lifecycle,
+        ) }],
+        details: {
+          harness: "pi",
+          action: "join",
+          lifecycleStatus: committed.lifecycle?.status,
+          modelTokens: 0,
+        },
       };
       } catch (error) {
         guard.fail(ticket, effectiveSignal);
@@ -937,10 +1443,31 @@ export default function agentHarbor(pi: ExtensionAPI): void {
           (player.name !== scoutPlayer.name || id !== "team-lead"))
         .map(({ id, definition }) => [id, definition] as const))
       : new Map<string, PlayerDefinition>();
-    if (player.name === "team-lead" && rosterSnapshot.size > 32) {
-      throw new Error(`team lead supports at most 32 enabled specialists; found ${rosterSnapshot.size}. Use /team, then /bench off <id...> to reduce the enabled roster`);
+    if (player.name === "team-lead" && rosterSnapshot.size > maximumHarborTeamRosterMembers) {
+      throw new Error(`team lead supports at most ${maximumHarborTeamRosterMembers} enabled specialists; found ${rosterSnapshot.size}. Use /team, then /bench off <id...> to reduce the enabled roster`);
     }
     return rosterSnapshot;
+  };
+
+  const assertPlayerRosterStartPreflight = (
+    player: PlayerDefinition,
+    cwd: string,
+    rosterSnapshot: ReadonlyMap<string, PlayerDefinition>,
+  ): void => {
+    if (rosterSnapshot.size) {
+      const formatted = formattedPlayerRosterSnapshot(cwd, rosterSnapshot);
+      if (!formatted.complete) throw new Error(formatted.text);
+    }
+    if (player.name === "team-lead") {
+      const sharedClaims = readSharedAgentActivities(cwd).length;
+      const maximumExistingClaims = maximumConcurrentPiRoots - 2;
+      if (sharedClaims > maximumExistingClaims) {
+        throw new Error(
+          `team-lead needs two project-shared slots for its root and first specialist; ` +
+          `${sharedClaims}/${maximumConcurrentPiRoots} are already occupied. Wait or use /team stop all`,
+        );
+      }
+    }
   };
 
   const startPlayer = (
@@ -958,7 +1485,7 @@ export default function agentHarbor(pi: ExtensionAPI): void {
     const model = sessionOptions.model;
     const thinkingLevel = sessionOptions.thinkingLevel;
     completionProject = cwd;
-    const runId = runtime.begin({
+    const runInput = {
       project: cwd,
       agent: player.name,
       kind: playerKind(player),
@@ -968,7 +1495,18 @@ export default function agentHarbor(pi: ExtensionAPI): void {
         modelSource: player.model === undefined ? "inherited" as const : "configured" as const,
       }),
       ...(thinkingLevel === undefined ? {} : { thinking: thinkingLevel }),
-    });
+    } satisfies Parameters<PiTeamRuntime["begin"]>[0];
+    const runId = beginClaimedPersistentRun(
+      cwd,
+      player,
+      playerKind(player),
+      runInput,
+      "direct",
+      rosterSnapshot.size ? rosterSnapshot : undefined,
+    );
+    if (rosterSnapshot.size) {
+      rootRosterReservations.set(runId, new Set(rosterSnapshot.keys()));
+    }
     try {
       const customTools = player.name === "team-lead"
         ? [createDelegateTool(cwd, sessionOptions, runId, rosterSnapshot), createTeamRosterTool(cwd, rosterSnapshot, runId)]
@@ -980,29 +1518,120 @@ export default function agentHarbor(pi: ExtensionAPI): void {
           executeRun({ ...player, task }, runId, cwd, sessionOptions, effectiveSignal, additionalTools, customTools)),
       };
     } catch (error) {
+      rootRosterReservations.delete(runId);
       runtime.finishIfOpen(runId, "failed");
+      if (!releaseSharedActivity(runId)) {
+        runtime.setState(runId, "cleanup-error");
+        throw new AggregateError([error], `Pi startup failed and ${player.name}'s shared activity claim could not be released`);
+      }
       throw error;
     }
   };
 
+  const startPlayerAfterPreflight = async (
+    player: PlayerDefinition,
+    managed: boolean,
+    task: string,
+    cwd: string,
+    sessionOptions: PiSessionOptions,
+    rosterSnapshot: ReadonlyMap<string, PlayerDefinition>,
+    signal?: AbortSignal,
+    onScoutJoinCommitted: (id: string) => void = () => {},
+  ): Promise<StartedPiRun> => withRosterLifecycleGate(() => {
+    signal?.throwIfAborted();
+    let current = player;
+    if (managed) {
+      try { current = loadPiActivePlayer(cwd, player.name); }
+      catch {
+        throw new Error(`active managed player changed during preflight: ${player.name}; inspect /team and retry`);
+      }
+    }
+    if (playerDefinitionDigest(current) !== playerDefinitionDigest(player)) {
+      throw new Error(`active managed player changed during preflight: ${player.name}; inspect /team and retry`);
+    }
+    const currentRoster = preparePlayerRoster(current, cwd);
+    if (rosterSnapshotDigest(currentRoster) !== rosterSnapshotDigest(rosterSnapshot)) {
+      throw new Error(`active roster changed during ${player.name} preflight; inspect /team and retry`);
+    }
+    return startPlayer(current, task, cwd, sessionOptions, currentRoster, signal, onScoutJoinCommitted);
+  });
+
+  const disposeLiveUi = (surface: LiveUiSurface): void => {
+    if (surface.timer) clearInterval(surface.timer);
+    surface.unsubscribe?.();
+    safeUi(() => surface.ctx.ui.setStatus?.(liveUiKey, undefined));
+    safeUi(() => surface.ctx.ui.setWidget?.(liveUiKey, undefined));
+    if (liveUiSurface === surface) liveUiSurface = undefined;
+  };
+
+  const renderLiveUi = (surface: LiveUiSurface): void => {
+    if (liveUiSurface !== surface) return;
+    if (!runtime.activeProjectRuns(surface.project).length) {
+      disposeLiveUi(surface);
+      return;
+    }
+    safeUi(() => surface.ctx.ui.setStatus?.(
+      liveUiKey,
+      formatPiProjectLiveStatus(runtime, surface.project),
+    ));
+    safeUi(() => surface.ctx.ui.setWidget?.(
+      liveUiKey,
+      formatPiProjectLiveWidget(runtime, surface.project),
+      { placement: "aboveEditor" },
+    ));
+  };
+
+  const focusLiveUi = (ctx: ExtensionCommandContext | ExtensionContext): LiveUiSurface => {
+    if (liveUiSurface && sameProject(liveUiSurface.project, ctx.cwd)) {
+      liveUiSurface.ctx = ctx;
+      renderLiveUi(liveUiSurface);
+      return liveUiSurface;
+    }
+    if (liveUiSurface) disposeLiveUi(liveUiSurface);
+    const surface: LiveUiSurface = { project: ctx.cwd, ctx };
+    liveUiSurface = surface;
+    surface.unsubscribe = runtime.subscribe(() => renderLiveUi(surface));
+    surface.timer = setInterval(() => renderLiveUi(surface), 1000);
+    surface.timer.unref?.();
+    renderLiveUi(surface);
+    return surface;
+  };
+
+  const notifyLateSettlement = (
+    ctx: ExtensionCommandContext | ExtensionContext,
+    run: StartedPiRun,
+  ): void => {
+    if (lateSettlementNotifications.has(run.runId)) return;
+    const settlement = rootSettlements.get(run.runId);
+    if (!settlement) return;
+    lateSettlementNotifications.add(run.runId);
+    void settlement.then(() => undefined, () => undefined).then(() => {
+      // Let the slash handler publish its immediate "cleanup pending" result
+      // before this detached terminal update, even for a very fast provider.
+      setTimeout(() => {
+        lateSettlementNotifications.delete(run.runId);
+        const state = runtime.get(run.runId)?.state;
+        if (!state || state === "starting" || state === "working" || state === "cleaning") return;
+        const level: NoticeLevel = state === "completed" ? "info"
+          : state === "cancelled" ? "warning" : "error";
+        const outcome = state === "cancelled"
+          ? `Provider cleanup settled · ${run.runId} is cancelled.`
+          : state === "completed"
+            ? `Provider cleanup settled · ${run.runId} completed.`
+            : `Provider cleanup settled · ${run.runId} ended ${state}.`;
+        safeUi(() => notify(ctx, wrapPlainText(`${outcome}${formatPiMissionReport(runtime, run.runId)}`), level));
+      }, 0);
+    }).catch(() => { lateSettlementNotifications.delete(run.runId); });
+  };
+
   const trackUi = async (ctx: ExtensionCommandContext | ExtensionContext, run: StartedPiRun): Promise<string> => {
-    const key = `agent-harbor:${run.runId}`;
-    const render = (): void => {
-      safeUi(() => ctx.ui.setStatus?.(key, formatPiLiveStatus(runtime, run.runId)));
-      safeUi(() => ctx.ui.setWidget?.(key, formatPiLiveWidget(runtime, run.runId), { placement: "aboveEditor" }));
-    };
-    const unsubscribe = runtime.subscribe((changedId) => {
-      if (runtime.get(changedId)?.rootRunId === run.runId) render();
-    });
-    render();
-    const timer = setInterval(render, 1000);
-    timer.unref?.();
+    const surface = focusLiveUi(ctx);
     try { return await run.result; }
     finally {
-      clearInterval(timer);
-      unsubscribe();
-      safeUi(() => ctx.ui.setStatus?.(key, undefined));
-      safeUi(() => ctx.ui.setWidget?.(key, undefined));
+      // A different root may still own the shared project surface. A provider
+      // that ignored abort also remains truthfully visible as cleaning until
+      // its real settlement emits a terminal state.
+      if (liveUiSurface === surface) renderLiveUi(surface);
     }
   };
 
@@ -1028,6 +1657,7 @@ export default function agentHarbor(pi: ExtensionAPI): void {
           catch { throw new Error(`active managed player preflight failed: ${id}`); }
           if (!args.trim()) throw new Error(`/${player.name} requires a non-empty task`);
           const rosterSnapshot = preparePlayerRoster(player, ctx.cwd);
+          assertPlayerRosterStartPreflight(player, ctx.cwd, rosterSnapshot);
           const model = resolveConfiguredPiModel(player.model, ctx);
           const additionalProviderIds = player.name === "team-lead"
             ? [...rosterSnapshot.values()].flatMap(({ model: route }) =>
@@ -1039,12 +1669,21 @@ export default function agentHarbor(pi: ExtensionAPI): void {
             pi.getThinkingLevel(),
             additionalProviderIds,
           );
-          run = startPlayer(player, args, ctx.cwd, sessionOptions, rosterSnapshot, ctx.signal);
+          run = await startPlayerAfterPreflight(
+            player,
+            fixed === undefined,
+            args,
+            ctx.cwd,
+            sessionOptions,
+            rosterSnapshot,
+            ctx.signal,
+          );
           const text = await trackUi(ctx, run);
           notify(ctx, `${text}${formatPiMissionReport(runtime, run.runId)}`, "info");
         } catch (error) {
           const state = run ? runtime.get(run.runId)?.state : undefined;
           if (run && (state === "cancelled" || state === "cleaning")) {
+            if (state === "cleaning") notifyLateSettlement(ctx, run);
             notify(ctx, `${state === "cleaning" ? "Cancellation requested; provider cleanup is still settling." : "Cancelled."}${formatPiMissionReport(runtime, run.runId)}`, "warning");
           } else {
             failCommand(ctx, run
@@ -1087,13 +1726,41 @@ export default function agentHarbor(pi: ExtensionAPI): void {
         label: `stop ${run.id} · ${run.agent}`,
         description: `Stop ${run.agent}: ${run.task}`,
       }))].filter((item) => !normalized || item.value.includes(normalized) || item.description.toLowerCase().includes(normalized));
+      const observedOwnerItems: Array<{ value: string; label: string; description: string }> = [];
+      try {
+        const values = new Set<string>();
+        for (const { ownerRuntime, processID } of readSharedAgentActivities(completionProject)) {
+          if (ownerRuntime === "pi" || ownerRuntime === "copilot") values.add(`owner:${ownerRuntime}`);
+          if (Number.isSafeInteger(processID) && processID > 0) values.add(`pid:${processID}`);
+        }
+        for (const value of values) {
+          observedOwnerItems.push({
+            value,
+            label: `${value} · observed owner route`,
+            description: value.startsWith("pid:")
+              ? "Filter project-shared work owned by this observed process"
+              : "Filter project-shared work owned by this observed runtime",
+          });
+        }
+      } catch { /* Completion remains useful when shared activity authority is unavailable. */ }
       const filterItems = [
+        { value: "help", label: "help · page 1/3", description: "Show status and index routes" },
+        { value: "help page:2", label: "help page:2 · filters", description: "Show filters and zero-model controls" },
+        { value: "help page:3", label: "help page:3 · model work", description: "Show schemas, costs, and capacity" },
+        { value: "roster-page:1", label: "roster-page:1 · complete index", description: "Enumerate every teammate with exact detail routes" },
+        { value: "activity-page:1", label: "activity-page:1 · complete index", description: "Enumerate every active run with exact IDs" },
+        { value: "history-page:1", label: "history-page:1 · retained missions", description: "Enumerate retained terminal mission IDs" },
         { value: "status:bench", label: "status:bench · roster", description: "Show benched teammates" },
+        { value: "status:idle", label: "status:idle · roster", description: "Show ready teammates with no active work" },
         { value: "status:ready", label: "status:ready · roster", description: "Show teammates available now" },
         { value: "status:working", label: "status:working · live", description: "Show teammates working now" },
+        { value: "heartbeat:overdue", label: "heartbeat:overdue · recovery", description: "Show external claims whose heartbeat is overdue" },
         { value: "kind:personal", label: "kind:personal · roster", description: "Show personal teammates" },
         { value: "model:", label: "model:<name> · roster/activity", description: "Filter configured or observed model" },
         { value: "task:", label: "task:<label> · activity", description: "Filter safe active or historical task labels" },
+        { value: "owner:", label: "owner:<pi|copilot> · external activity", description: "Filter project-shared work by owner runtime" },
+        { value: "pid:", label: "pid:<number> · external activity", description: "Filter project-shared work by owner process ID" },
+        ...observedOwnerItems,
       ].filter((item) => !normalized || item.value.startsWith(normalized) || item.description.toLowerCase().includes(normalized));
       const items = normalized.startsWith("stop")
         ? [...stopItems, ...memberItems, ...filterItems]
@@ -1129,26 +1796,38 @@ export default function agentHarbor(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       completionProject = ctx.cwd;
       try {
-        requireBoundedArguments(args, maximumPiFilterBytes, "/team arguments");
-        const value = args.trim();
-        if (value === "stop" || value.startsWith("stop ")) {
-          const selector = value.slice("stop".length).trim();
+        const stopValue = args.trimStart();
+        if (stopValue === "stop" || stopValue.startsWith("stop ")) {
+          const selector = stopValue.slice("stop".length).trim();
           if (!selector) throw new Error("usage: /team stop <run-id|all>");
+          requireBoundedArguments(selector, maximumPiStopSelectorBytes, "/team stop selector");
           const result = stopProjectRoots(ctx.cwd, selector);
-          const matched = result.stopped.length + result.alreadyStopping.length + result.unavailable.length;
-          if (!matched && selector === "all") {
-            notify(ctx, stopResult("No Agent Harbor work is active in this project."), "info");
+          const matched = result.stopped.length + result.alreadyStopping.length
+            + result.unavailableLocal.length + result.externalOwners.length;
+          if (!matched && selector === "all" && !result.activityAuthorityUnavailable) {
+            notify(ctx, stopResult("No project-shared persistent-player work is visible; disposable contractor work is process-local."), "info");
             return;
           }
-          if (!matched) throw new Error(`no active Harbor root matches ${selector}`);
+          if (!matched && !result.activityAuthorityUnavailable) throw new Error(`no active Harbor root matches ${selector}`);
           notify(ctx, stopResult(stopProjectRootsMessage(result)), "warning");
           return;
         }
-        const result = value === "--help" || value === "help"
-          ? wrapPlainText(`${commandHelp("team")}\nChoose one exact teammate: /<id> <task> (or /player <id> <task> in hosts that expose it).\nSet a personal model with /join JSON model:"provider/model"; add replace:true to change it.\nDisposable work: /contract <json> (exactly 1 model child). Recruit: /scout <need> (1 recruiter model child).\nTokens, AI credits, and max-output are observations only when the host reports them; Agent Harbor does not simulate a hard per-run token cap.\nAgent Harbor limits 32 concurrent roots per project and 6 sequential team-lead delegations per prompt.\nField filters: member:/id: · kind:/role: · description: · capability:/tool:/skill: · status:/state: · model: · thinking: · task: · run:.\nExamples: /team status:working · /team member:reviewer · /team model:gpt.\nTUI: Alt+H stops all active Harbor work. RPC: /team stop <run-id|all>.`)
-          : await formatPiTeamView(ctx.cwd, runtime, { filter: value, title: "team", ...teamViewRuntimeOptions(ctx) });
-        notify(ctx, `${result}${discoveryWarning ? `\n\nWarning: ${discoveryWarning}` : ""}`, "info");
-      } catch (error) { failCommand(ctx, humanError("team", error, true)); }
+        requireBoundedArguments(args, maximumPiFilterBytes, "/team arguments");
+        const value = args.trim();
+        const help = /^(?:help|--help)(?:\s+page:.*)?$/u.test(value);
+        const result = help
+          ? piTeamHelp(value)
+          : await formatPiTeamView(ctx.cwd, runtime, {
+            filter: value,
+            title: "team",
+            ...teamViewRuntimeOptions(ctx),
+            ...(discoveryWarning ? { discoveryWarning } : {}),
+          });
+        notify(ctx, boundedPiTeamOutput(
+          result,
+          help && discoveryWarning ? ["", `Warning: ${discoveryWarning}`] : [],
+        ), "info");
+      } catch (error) { failCommand(ctx, boundedPiTeamOutput(humanError("team", error, true))); }
     },
   });
   registered.add("team");
@@ -1171,10 +1850,25 @@ export default function agentHarbor(pi: ExtensionAPI): void {
               notify(ctx, await formatPiTeamView(ctx.cwd, runtime, { filter, title: "bench", ...teamViewRuntimeOptions(ctx) }), "info");
               return;
             }
-            const result = await runDeterministicCommand("pi", name, args, ctx.cwd, ctx.signal);
-            let refresh = "";
-            try { syncActivePlayers(ctx.cwd); }
-            catch { discoveryWarning = metadataRefreshWarning; refresh = `\nWarning: ${metadataRefreshWarning}`; }
+            let { lifecycle, refresh } = await withRosterLifecycleGate(() => withProjectRosterMutationGate(
+              ctx.cwd,
+              name,
+              args,
+              async () => {
+              const committed = await runDeterministicCommandResult("pi", name, args, ctx.cwd, ctx.signal);
+              const lifecycle = requirePiBenchLifecycleOutcome(args, committed.lifecycle);
+              let refreshWarning = "";
+              // A filesystem no-op can still be new to this Pi process when a
+              // CLI or another session committed it after startup. Reconcile
+              // discovery on every verified lifecycle outcome.
+              try { syncActivePlayers(ctx.cwd); }
+              catch {
+                discoveryWarning = metadataRefreshWarning;
+                refreshWarning = `\nWarning: ${metadataRefreshWarning}`;
+              }
+              return { lifecycle, refresh: refreshWarning };
+              },
+            ));
             let view: string;
             try { view = await formatPiTeamView(ctx.cwd, runtime, { title: "bench", ...teamViewRuntimeOptions(ctx) }); }
             catch {
@@ -1182,11 +1876,15 @@ export default function agentHarbor(pi: ExtensionAPI): void {
               if (!refresh) refresh = `\nWarning: ${metadataRefreshWarning}`;
               view = "Team view unavailable until roster repair and /reload.";
             }
-            const reload = /^off(?:\s|$)/u.test(args.trim())
+            const changedOff = lifecycle.rows.some(({ action, status }) => action === "off" && status === "changed");
+            const unchangedOff = lifecycle.rows.some(({ action, status }) => action === "off" && status === "already-current");
+            const reload = changedOff
               ? "\nPi cannot unregister deactivated aliases in-place; run /reload to remove them from completion."
-              : "";
+              : unchangedOff
+                ? "\nIf this session still lists a benched alias, run /reload to remove it from completion."
+                : "";
             const all = /^(?:on|off)\s+all$/u.test(args.trim()) ? `\n${benchAllNote}` : "";
-            notify(ctx, `${zeroModelResult(name, result)}${all}${reload}${refresh}\n\n${withoutViewHeader(view)}`, "info");
+            notify(ctx, `${zeroModelResult(name, conciseBenchLifecycleResult(lifecycle))}${all}${reload}${refresh}\n\n${withoutViewHeader(view)}`, "info");
           } catch (error) { failCommand(ctx, humanError(name, error, true)); }
         },
       });
@@ -1211,6 +1909,7 @@ export default function agentHarbor(pi: ExtensionAPI): void {
           } catch (error) {
             const state = run ? runtime.get(run.runId)?.state : undefined;
             if (run && (state === "cancelled" || state === "cleaning")) {
+              if (state === "cleaning") notifyLateSettlement(ctx, run);
               notify(ctx, `${state === "cleaning" ? "Cancellation requested; provider cleanup is still settling." : "Cancelled."}${formatPiMissionReport(runtime, run.runId)}`, "warning");
             } else {
               failCommand(ctx, run
@@ -1240,31 +1939,36 @@ export default function agentHarbor(pi: ExtensionAPI): void {
             `/${name} arguments`,
           );
           if (name === "retire" && !args.trim()) throw new Error("usage: /retire <personal-id>");
-          if (name === "retire") {
-            const id = args.trim();
-            const busy = runtime.activeProjectRuns(ctx.cwd).find((run) =>
-              run.kind !== "contractor" && run.agent === id);
-            if (busy) {
-              throw new Error(
-                `cannot retire ${id} while it is ${busy.state} in ${busy.rootRunId}; ` +
-                `use /team stop ${busy.rootRunId}, then wait for cleanup to settle`,
-              );
+          const execute = async () => {
+            const result = await runDeterministicCommandResult(
+              "pi",
+              name,
+              args,
+              ctx.cwd,
+              ctx.signal,
+              name === "list-skills" ? "ansi" : "plain",
+            );
+            let refresh = "";
+            const joinLifecycle = name === "join"
+              ? requirePiJoinLifecycleOutcome(args, result.lifecycle)
+              : undefined;
+            const retireLifecycle = name === "retire"
+              ? requirePiRetireLifecycleOutcome(args, result.lifecycle)
+              : undefined;
+            const lifecycle = joinLifecycle ?? retireLifecycle;
+            const verifiedResult = lifecycle ? { ...result, lifecycle } : result;
+            if (lifecycle) {
+              // Reconcile even after a verified no-op: another process may
+              // have changed discovery state since this extension started.
+              try { syncActivePlayers(ctx.cwd); }
+              catch { discoveryWarning = metadataRefreshWarning; refresh = `\nWarning: ${metadataRefreshWarning}`; }
             }
-          }
-          const result = await runDeterministicCommand(
-            "pi",
-            name,
-            args,
-            ctx.cwd,
-            ctx.signal,
-            name === "list-skills" ? "ansi" : "plain",
-          );
-          let refresh = "";
-          if (name === "join" || name === "retire") {
-            try { syncActivePlayers(ctx.cwd); }
-            catch { discoveryWarning = metadataRefreshWarning; refresh = `\nWarning: ${metadataRefreshWarning}`; }
-          }
-          notify(ctx, `${zeroModelResult(name, conciseLifecycleResult(name, args, result))}${refresh}`, "info");
+            return { result: verifiedResult, refresh };
+          };
+          const { result, refresh } = name === "join" || name === "retire"
+            ? await withRosterLifecycleGate(() => withProjectRosterMutationGate(ctx.cwd, name, args, execute))
+            : await execute();
+          notify(ctx, `${zeroModelResult(name, conciseLifecycleResult(name, args, result.text, result.lifecycle))}${refresh}`, "info");
         } catch (error) { failCommand(ctx, humanError(name, error, true)); }
       },
     });
@@ -1306,10 +2010,17 @@ export default function agentHarbor(pi: ExtensionAPI): void {
         requireBoundedArguments(args, maximumPiTaskBytes, "/scout task");
         if (!args.trim()) throw new Error(`/${scoutPlayer.name} requires a non-empty task`);
         const rosterSnapshot = preparePlayerRoster(scoutPlayer, ctx.cwd);
+        assertPlayerRosterStartPreflight(scoutPlayer, ctx.cwd, rosterSnapshot);
         const model = resolveConfiguredPiModel(undefined, ctx);
         const sessionOptions = await captureSessionOptions(ctx, model, pi.getThinkingLevel());
-        run = startPlayer(
-          scoutPlayer, args, ctx.cwd, sessionOptions, rosterSnapshot, ctx.signal,
+        run = await startPlayerAfterPreflight(
+          scoutPlayer,
+          false,
+          args,
+          ctx.cwd,
+          sessionOptions,
+          rosterSnapshot,
+          ctx.signal,
           reconcileCommittedJoin,
         );
         text = await trackUi(ctx, run);
@@ -1321,6 +2032,7 @@ export default function agentHarbor(pi: ExtensionAPI): void {
         if (failed) {
           const state = run ? runtime.get(run.runId)?.state : undefined;
           if (run && (state === "cancelled" || state === "cleaning")) {
+            if (state === "cleaning") notifyLateSettlement(ctx, run);
             const status = state === "cleaning" ? "Cancellation requested; provider cleanup is still settling." : "Cancelled.";
             notify(ctx, wrapPlainText(`${status}${committed}${formatPiMissionReport(runtime, run.runId)}${refresh}`), "warning");
           } else {
@@ -1341,7 +2053,8 @@ export default function agentHarbor(pi: ExtensionAPI): void {
     description: "Stop active Agent Harbor work",
     handler: (ctx) => {
       const result = stopProjectRoots(ctx.cwd);
-      const matched = result.stopped.length + result.alreadyStopping.length + result.unavailable.length;
+      const matched = result.stopped.length + result.alreadyStopping.length
+        + result.unavailableLocal.length + result.externalOwners.length;
       notify(ctx, stopResult(stopProjectRootsMessage(result)), matched ? "warning" : "info");
     },
   });
@@ -1349,7 +2062,8 @@ export default function agentHarbor(pi: ExtensionAPI): void {
     for (const controller of rootAbortControllers.values()) {
       if (!controller.signal.aborted) controller.abort(new DOMException("Pi session shutdown", "AbortError"));
     }
-    await settlePiRootPromises([...rootSettlements.values()]);
+    try { await settlePiRootPromises([...rootSettlements.values()]); }
+    finally { if (liveUiSurface) disposeLiveUi(liveUiSurface); }
   });
   try { syncActivePlayers(process.cwd()); }
   catch { discoveryWarning = "Active alias discovery failed; fixed controls remain available. Inspect /team, then run /reload after repairing the roster."; }

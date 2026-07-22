@@ -113,7 +113,7 @@ ruta cero modelo.
   | Harness | Superficie directa preferida | Fallback |
   | --- | --- | --- |
   | Copilot CLI | comandos de extensión `client` para `/team`, `/bench`, `/join`, `/retire` y `/list-skills` | CLI directo para los cuatro controles de lifecycle; no existe fallback skill mediado por modelo |
-  | OpenCode | ocho entradas TUI directas: `/team`, banca on/off/list, join, retire y skills list/filter | CLI directo; los cinco comandos canónicos del servidor pueden ser mediados por modelo |
+  | OpenCode | nueve entradas TUI directas: `/team`, banca on/off/list, join, retire, `/contract` y skills list/filter; las ocho deterministas son cero modelo y `/contract` crea un child | CLI directo para lifecycle/catálogo; no existe fallback de servidor mediado por modelo ni tool ambiental genérica `harbor` |
   | Pi | handlers `registerCommand` para los cuatro nombres canónicos y `/team` | CLI directo |
 
 - `/contract` válido **NO ES** cero modelo: su preflight **DEBE** ser
@@ -212,12 +212,91 @@ ruta cero modelo.
   `toggle`.
 - `all` significa, en orden: `portfolio-management`, `design`, `build`,
   `manage`, `consume`, `dispose`.
-- `on` escribe sólo la copia activa; `off` elimina sólo una copia activa con
-  ownership probado y conserva el registro personal recuperable.
+- `on` escribe la copia activa; para un personal también **PUEDE** reemplazar
+  atómicamente un registro owned recuperable por su representación global
+  portable. `off` elimina sólo una copia activa con ownership probado y
+  conserva el registro personal recuperable.
+- En OpenCode, `bench on <id>` desde otro proyecto **DEBE** renderizar la copia
+  activa con el `external_directory` del proyecto actual y **DEBE** dejar el
+  registro global sin ninguna allowlist de proyecto. Un registro revision 5
+  legado ligado a otro proyecto sólo **PUEDE** migrarse si el renderer legado
+  reproduce exactamente todos sus bytes; ownership o definition embebida por
+  sí solos no autorizan la migración.
 - Los lotes son atómicos. El listado no muta ni usa red y distingue `on`,
   `bench`, `stale` y `conflict`.
 - Ver la banca **DEBE** completar con cero tokens de modelo en Copilot, OpenCode
   y Pi mediante su superficie directa documentada.
+
+### Actividad persistente compartida (Pi y Copilot)
+
+- Todo root o child de un player persistente nombrado en Pi o Copilot **DEBE**
+  tomar antes del trabajo de modelo un claim privado ligado a la identidad
+  canónica del proyecto físico. Esos claims **DEBEN** ser visibles y excluir
+  double-booking entre procesos Pi y Copilot del mismo usuario, aunque sus homes
+  de harness o spelling symlink difieran. El wrapper y el child anónimo de
+  `/contract` **NO DEBEN** entrar en ese registro: su actividad, stop e historial
+  permanecen process-local.
+- El claim compartido v2 **DEBE** contener sólo player, clase direct/delegated,
+  fase `starting|working|cleaning`, inicio, runtime owner `pi|copilot` y PID
+  públicos, identidad privada del owner y generación exacta. La versión legacy
+  1 conserva un PID owner conocido pero no contiene `ownerRuntime`; sigue siendo
+  legible y **DEBE** presentarse como `owner runtime unverified (legacy claim) ·
+  PID <pid>`, nunca como si el runtime se hubiera probado. Una vista de otro
+  proceso sólo **PUEDE** proyectarlo como `shared-<player>` con fase, elapsed y
+  el routing disponible —runtime/PID en v2, PID con runtime no verificado en
+  v1—; **NO DEBE** divulgar tarea, modelo, thinking/reasoning, usage, coste,
+  jerarquía, ID nativo, token ni path. La telemetría rica, los IDs
+  `pi-run-*`/`copilot-run-*` y el historial terminal **DEBEN** seguir en memoria
+  del proceso owner.
+- El namespace compartido **DEBE** vivir bajo el root runtime estable por
+  usuario (`~/.agent-harbor` o `AGENT_HARBOR_ACTIVITY_HOME`), separado del
+  namespace de claims nativos OpenCode y de los config homes Pi/Copilot. Sus
+  directorios, publicación, lectura, cambio de fase, release y reclaim **DEBEN**
+  verificar binding, device/inode, token y mtime; esta coordinación same-user
+  **NO DEBE** presentarse como frontera frente a un proceso hostil del mismo
+  usuario ni requerir MCP, daemon o red. Un claim v2 con owner runtime distinto
+  de `pi|copilot` en este namespace **DEBE** considerarse malformado y degradar
+  la autoridad; `opencode` sólo es válido en su namespace nativo separado.
+- El límite compartido **DEBE** ser 32 claims persistentes activos por proyecto,
+  contando roots y children de ambos harnesses, y serializar count-and-publish
+  con un capacity lock acotado. Es independiente de los caps process-local de
+  roots, que también cuentan contractors.
+- La última validación live de definición **DEBE** ejecutarse dentro del gate de
+  admisión antes de publicar el claim. Cuando un runner capturó un snapshot de
+  roster para manager/recruiter, también **DEBE** volver a comparar ese snapshot
+  allí. Así una desactivación, retire o reemplazo que gane la carrera produce
+  cero model work. La admisión **DEBE** fallar cerrada si el store o esa
+  validación no son autoritativos.
+- `bench off`, `retire` y el reemplazo same-ID **DEBEN** compartir ese gate con
+  nuevas admisiones. Un claim de especialista protege su ID; `team-lead` o
+  `talent-scout` protege conservadoramente el roster que puede estar usando. El
+  recruiter **PUEDE** excluir sólo su propia generación exacta al ejecutar su
+  mutación scoped. Un fallo de gate o release **NO DEBE** presentarse como
+  mutación segura.
+- Un heartbeat vencido **NO DEBE** volver ready al player ni autorizar reclaim.
+  Mientras el PID owner no esté definitivamente ausente, el claim **DEBE**
+  seguir visible, busy y contado contra capacidad, con reparación que pida
+  recuperar o reiniciar el owner. Reclaim exige PID ausente y una segunda
+  lectura exacta de identidad/token/mtime. Estado malformado, ambiguo o ilegible
+  **DEBE** degradar la autoridad completa.
+- Con autoridad degradada, `/team` en ambos harnesses **DEBE** mostrar la
+  actividad process-visible como cota `≥`, marcar disponibilidad persistente
+  como no verificada, conservar warning y reparación en un filtro sin match y
+  bloquear selección/delegación. Cero filas **NO DEBE** convertirse en “nadie
+  trabaja”.
+- Cada actualización local de un run persistente **DEBE** revalidar/publicar la
+  fase contra la generación exacta. Si esa autoridad se pierde después de
+  admisión, el adapter **DEBE** marcar `cleanup-error`, solicitar abort del root
+  que controla y fallar cerrado; un release no verificado mantiene el hazard de
+  esa claim/generación y **DEBE** conservarse junto al fallo original cuando
+  corresponda. En Pi, esa generación continúa ocupando a su player y un slot
+  compartido hasta una liberación o recuperación exacta; no se presenta como el
+  gate durable project-wide específico de Copilot definido más abajo. Una
+  ambigüedad del inventario completo sí **DEBE** degradar toda su autoridad.
+- Sólo el proceso que conserva el claim exacto y su handle nativo **PUEDE**
+  detener el run. Una fila `shared-*` **NO DEBE** fingir autoridad remota y debe
+  dirigir al runtime y PID Pi/Copilot owner exactos; un claim legacy **DEBE**
+  conservar su PID conocido y marcar sólo el runtime owner como no verificado.
 
 ### `/team` (Pi)
 
@@ -226,21 +305,31 @@ ruta cero modelo.
   sesión SDK o un child ni enviar un prompt; cada resultado **DEBE** declarar
   `0 model tokens`.
 - La vista sin filtro **DEBE** caber en un overview dinámico de hasta 30 líneas
-  envueltas a 96 celdas. **DEBE** conservar los nueve IDs factory al menos con
-  clase y estado efectivo, el resumen global, acceso del lead y cobertura SDLC;
-  el espacio restante **PUEDE** mostrar personales, roots/children activos y la
-  última misión terminal. Todo miembro personal o run omitido **DEBE** tener un
-  conteo exacto y un filtro accionable para recuperarlo. Los contractors sólo
-  aparecen como actividad de su misión, no como miembros persistentes.
+  envueltas a 96 celdas. En carga normal **DEBE** conservar los nueve IDs
+  factory al menos con clase y estado efectivo, el resumen global, acceso del
+  lead y cobertura SDLC. Si hay más de cuatro runs vivos, **DEBE** priorizar
+  cuatro filas de actividad actual y **PUEDE** reducir el roster a una muestra
+  contada y filtrable. Todo miembro o run omitido **DEBE** tener un conteo exacto
+  y un filtro accionable para recuperarlo. Los contractors sólo aparecen como
+  actividad de su misión, no como miembros persistentes.
 - El filtro **DEBE** buscar sobre IDs, estado, rol y metadata pública, modelo y
-  etiqueta segura. La vista filtrada **PUEDE** conservar más detalle que el
-  overview y no necesita repetir los nueve factory ajenos al filtro, pero cada
-  línea sigue acotada a 96 celdas. El historial filtrado sólo muestra miembros
-  coincidentes y **NO DEBE** presentar su suma parcial como total de misión; la
+  etiqueta segura; en una fila externa, el texto libre también **DEBE** buscar
+  el runtime owner y el PID que la fila divulga. Toda vista filtrada **DEBE**
+  conservar el mismo máximo de 30 líneas/96 celdas; una consulta estrecha
+  **PUEDE** dedicar ese presupuesto a
+  más detalle y no necesita repetir los nueve factory ajenos al filtro. El
+  historial filtrado sólo muestra las
+  coincidencias de miembros o actividad propias del campo solicitado y
+  **NO DEBE** presentar su suma parcial como total de misión; la
   fuente en memoria conserva el árbol y la contabilidad completos aunque el
   overview omita filas con conteo. Cada run detallado **DEBE** exponer ID, parent
   cuando exista, agente, clase, estado, duración, etiqueta segura, modelo,
   thinking setting, turnos de modelo y usage nativo.
+- Una fila compartida externa **NO DEBE** coincidir con `task:`, `model:`,
+  `thinking:` ni texto libre por medio de placeholders como “not disclosed”. Si
+  el filtro pide uno de esos campos, la vista **DEBE** avisar cuántas filas
+  activas no pudieron evaluarse y describir el resultado como coincidencia sólo
+  sobre campos divulgados.
 - Pi **DEBE** aceptar como máximo 32 roots concurrentes por proyecto. Un intento
   adicional **DEBE** fallar antes de crear actividad, sesión o child, indicar
   cómo esperar o detener y declarar el preflight cero modelo. Los roots ya
@@ -255,25 +344,50 @@ ruta cero modelo.
   modelo, y `/team` **DEBE** mostrar el exceso y una reparación accionable.
 - Antes de iniciar un root o una delegación, Pi **DEBE** bloquear double-booking
   de un miembro persistente enabled que ya tenga un run activo en el mismo
-  proyecto. Un contractor efímero
+  proyecto, incluido un claim creado por otro proceso Pi o Copilot. Un contractor efímero
   con el mismo nombre no ocupa al miembro, aunque sigue sujeto al cap de roots;
   el rechazo nunca crea otro run o child y no altera la telemetría ya observada.
 - Cada root **DEBE** tener un `AbortController` propio combinado con la señal del
   caller. `/team stop <run-id>` solicita cancelar un root activo del proyecto y
   `all` los solicita todos; `Alt+H` **DEBE** ofrecer el mismo stop-all en TUI
   incluso si Pi no entregó señal al slash original.
-- La espera del handler **DEBE** competir contra esa señal de abort. Si el
-  provider no la respeta, el run **DEBE** asentarse localmente como `cancelled`,
-  dejar de ocupar capacidad y limpiar status/widget sin esperar indefinidamente.
-  La UI **NO DEBE** afirmar por ello que el cómputo remoto se detuvo; el cleanup
-  subyacente permanece best-effort cuando el provider retorne.
-- `/team stop all` sin roots activos **DEBE** ser un éxito informativo e
-  idempotente. Un run ID desconocido **DEBE** seguir siendo error.
+- La espera del handler **DEBE** competir contra esa señal de abort, por lo que
+  un provider que la ignore no puede dejar colgado el slash. Mientras ese
+  provider no se asiente realmente, el run **DEBE** permanecer `cleaning`,
+  ocupar capacidad y seguir visible: liberar el miembro o decir `cancelled`
+  permitiría double-booking y afirmaría más de lo observado. Al asentarse,
+  **DEBE** pasar una sola vez al terminal real y producir una notificación
+  tardía acotada; ningún mensaje puede afirmar que el cómputo remoto se detuvo
+  antes de esa evidencia.
+- `/team stop all` sin roots locales ni claims compartidos, tras una lectura
+  autoritativa, **DEBE** ser un éxito informativo e idempotente. Pi **DEBE**
+  detener sólo roots cuyo `AbortController` posee, informar que `shared-*`
+  pertenece a otro proceso y, si falla el inventario compartido, conservar el
+  resultado de stops locales pero advertir que no verificó ni detuvo owners
+  externos. Un run ID desconocido **DEBE** seguir siendo error.
+- Un stop que encuentre filas externas **DEBE** conservar por fila el runtime y
+  PID owner publicados y decir que se ejecute allí; no puede reducir todas las
+  filas remotas a un aviso genérico. Claims legacy **DEBEN** conservar el PID y
+  quedar marcados como runtime owner no verificado. El resultado masivo **DEBE**
+  respetar también 30 líneas/96 celdas; si no caben todos los resultados, debe
+  indicar cuántos omitió y dirigir a `/team` para inspeccionarlos.
 - En `session_shutdown`, la extensión **DEBE** abortar todos los roots que aún
   controla y esperar su cleanup de forma best-effort durante como máximo cinco
-  segundos; un provider que no termina no puede prolongar esa espera. Status y
-  widget **DEBEN** limpiarse en `finally` cuando el handler se asienta, incluso
-  ante fallo, cancelación o error de cleanup.
+  segundos; un provider que no termina no puede prolongar esa espera. La
+  superficie compartida de status/widget **DEBE** limpiarse cuando no quede un
+  run activo y, sin excepción, al terminar `session_shutdown`.
+- Pi **DEBE** usar una sola key de status y una sola key de widget para el
+  proyecto visible, no una por root. El snapshot prioriza actividad newest-first,
+  conserva modelo, thinking, tokens, coste y tarea segura completos para el foco
+  más reciente, enumera hasta dos runs secundarios, no supera nueve líneas de
+  78 celdas y mantiene `Alt+H` visible dentro del límite de diez líneas de Pi.
+  La línea de status **DEBE** etiquetar el coste y conservar siempre la duración
+  legible y el conteo activo en lenguaje claro dentro de esas 78 celdas, incluso
+  cuando otros campos se recorten; el desglose roots/runs permanece en el widget.
+- Un filtro explícito `run:` **DEBE** ser una vista de actividad/historial; no
+  **DEBE** insertar una sección `ROSTER` vacía ni afirmar que ningún miembro del
+  roster coincide cuando el run solicitado sí coincide, y su encabezado de
+  historial **DEBE** hablar de runs coincidentes, no de miembros coincidentes.
 - La telemetría **DEBE** leer el modelo y thinking setting efectivos de la sesión
   Pi. Antes de una respuesta nativa, el modelo es `configured` si la definición
   declara `model`, o `inherited` si usa la selección del host; después usa
@@ -310,9 +424,15 @@ ruta cero modelo.
   distinguir respuestas distintas aun si carecen de `responseId` y comparten
   timestamp, forma, longitud y usage; cualquier huella de contenido **DEBE** ser
   opaca, efímera y no reversible, y el contenido nunca se retiene.
-- El registro de observabilidad **DEBE** vivir sólo en memoria del proceso Pi y
-  separar proyectos. **NO DEBE** retener prompts, respuestas ni contenido de
-  thinking. Sólo **PUEDE** conservar una etiqueta heurística de hasta 72
+- El coste nativo Pi **DEBE** acumular una sola vez `input`, `output`, cache
+  read/write y `total` en USD, con la misma distinción entre cero explícito,
+  ausente, contradictorio y cota `≥` que usage. La UI **NO DEBE** inferir precios
+  ni fabricar coste cuando el provider no lo reporta.
+- El registro rico de observabilidad **DEBE** vivir sólo en memoria del proceso
+  Pi y separar proyectos; se une para la vista con los claims mínimos definidos
+  arriba. Ninguna capa **DEBE** retener prompts, respuestas ni contenido de
+  thinking, y el claim tampoco task label, modelo, usage, coste o historial. El
+  runtime local sólo **PUEDE** conservar una etiqueta heurística de hasta 72
   caracteres que normaliza controles y oculta patrones comunes de paths, URLs,
   bearer/JWT, credenciales y prefijos de secretos. Esta heurística **NO DEBE**
   presentarse como detector universal de secretos.
@@ -335,8 +455,11 @@ ruta cero modelo.
 ### `/team` (OpenCode)
 
 - OpenCode **DEBE** registrar `/team` en la TUI como control directo cero
-  modelo. Su diálogo acepta vacío, filtro, `help`, `stop <run-id>` o `stop all`;
-  ninguna ruta válida **DEBE** enviar un prompt ni crear una sesión o child.
+  modelo. Su diálogo acepta vacío, filtro, `help`,
+  `diagnostics|warnings [page]`, `stop <run-id>` o `stop all`; ninguna ruta
+  válida **DEBE** enviar un prompt ni crear una sesión o child. Como el callback
+  no recibe argumentos slash, `stop ...` **DEBE** escribirse en ese diálogo; no
+  se documenta ni ofrece `/team stop ...` como una segunda forma TUI.
 - La vista **DEBE** combinar el roster ownership-checked con actividad nativa
   del proyecto y distinguir trabajo directo, delegado y contractor. Sólo
   **PUEDE** atribuir parent observado o, marcado como inferido, el único lead
@@ -349,16 +472,73 @@ ruta cero modelo.
   Filtros amplios y múltiples runs **DEBEN** permanecer compactos dentro de ese
   mismo límite; filtros estrechos conservan detalle rico. La vista filtrada se
   identifica como tal y no presenta sus coincidencias como roster completo.
-- Un child desechable **DEBE** probar ownership mediante un claim HMAC ligado a
-  proyecto, ID nativo, agente e invocation. Una sesión directa **DEBE** probar
-  el agente raw exacto contra un miembro no conflictivo. Mensajes históricos
-  nunca **DEBEN** otorgar ownership y no se leen antes de esa prueba.
-- Los IDs de sesión nativos **NO DEBEN** aparecer en snapshot, vista ni resultado
-  de stop. Cada run usa un alias `run-<digest>` estable sin prefijo nativo; la
-  frontera del turno directo también se conserva sólo como digest.
+- Si `activeAuthoritative` es falso, la vista **NO DEBE** afirmar totales
+  exactos ready/idle/active, ausencia de trabajo ni delegabilidad. **DEBE**
+  presentar actividad visible como límite inferior `≥`, marcar disponibilidad
+  como no verificada y bloquear al lead. Un filtro sin coincidencias **DEBE**
+  conservar autoridad, motivo y reparación. El overview **DEBE** apuntar a
+  la entrada `diagnostics` del diálogo de `/team`; esa ruta y el alias
+  `warnings`, paginados bajo el límite de 30 líneas/96 columnas, **DEBEN** hacer
+  recuperables todos los motivos actuales sanitizados y un paso de reparación
+  por motivo.
+- El lead OpenCode **DEBE** recibir el roster enabled completo sólo cuando cabe
+  en el límite cerrado de 32 especialistas. Un roster mayor **NO DEBE**
+  truncarse ni permitir delegación: `/team` debe mostrar el exceso e indicar
+  `/bench-off <id...>` como reparación antes de volver a intentar.
+- Un child desechable **DEBE** probar ownership mediante un title claim HMAC
+  ligado a proyecto, ID nativo, agente e invocation. Una sesión directa con
+  claim de actividad **DEBE** ligar agente, sesión y generación exactos; sólo el
+  fallback descubierto sin claim **DEBE** exigir el agente raw exacto contra un
+  miembro no conflictivo. Mensajes históricos nunca **DEBEN** otorgar ownership
+  y no se leen antes de esa prueba.
+- Los claims de actividad **DEBEN** compartirse por filesystem entre isolates y
+  procesos OpenCode del mismo usuario, bajo un root runtime estable por usuario
+  (`~/.agent-harbor` o `AGENT_HARBOR_ACTIVITY_HOME`) independiente de
+  `OPENCODE_CONFIG_DIR`. El scope **DEBE** derivarse de la identidad canónica
+  del proyecto físico para converger entre config homes y spellings symlink.
+  Sus directorios privados por proyecto usan publicación atómica de archivo
+  completo. Lectura, cambio de fase, release
+  y reclaim **DEBEN** comparar binding de directorio, device/inode bigint,
+  token y generación/mtime exactos; symlinks, hardlinks extra, swaps, residuos
+  de publicación o inventario malformado **DEBEN** fallar cerrado. TTL por sí
+  solo **NO DEBE** autorizar reclaim: el PID owner debe estar definitivamente
+  ausente y la segunda lectura debe seguir siendo exacta. Un heartbeat vencido
+  cuyo PID no está definitivamente ausente **DEBE** seguir contando como busy y
+  contra capacidad, mostrarse como degradado y deshabilitar claim-stop; nunca
+  puede convertir al miembro en ready por omisión.
+- El límite de 32 claims por proyecto **DEBE** serializar su count-and-publish
+  mediante un capacity lock privado, atómico y de espera acotada. Su reclaim
+  exige PID ausente y token/inode/mtime exactos. Release de claim o lock sólo
+  **PUEDE** informar éxito cuando desapareció la generación canónica exacta; un
+  fallo **DEBE** exigir recuperación filesystem y no ocultar el fallo original.
+  El inventario privado usado para confirmar stop/recovery **DEBE** conservar
+  todas las generaciones dentro del límite de 64 entradas de directorio, sin
+  recortarlas al cap activo de 32; más de 32 claims todavía vivos **DEBE**
+  degradar/fallar cerrado, no ocultar una generación exacta.
+  Lectura y admisión **DEBEN** barrer bajo ese mismo capacity lock los claims con
+  heartbeat vencido cuyo PID esté definitivamente ausente, sólo después de
+  validar el inventario acotado y repetir PID/token/inode/mtime sin cambios. El
+  archivo transitorio del capacity lock exacto no cuenta como uno de los 64
+  claims/entradas foráneas: 64 claims muertos **DEBEN** poder recuperarse, pero
+  una entrada no-lock número 65 **DEBE** seguir fallando cerrado. Locks vencidos
+  de PID definitivamente ausente usan el mismo cleanup exacto; PID vivo,
+  ambiguo o posiblemente reutilizado **NUNCA DEBE** reclamarse automáticamente.
+- Esta coordinación filesystem **NO DEBE** presentarse como frontera de
+  privilegios frente a procesos hostiles del mismo usuario. Depende de las
+  operaciones de path/identidad de Node y de las garantías del filesystem. No
+  **DEBE** requerir ni registrar MCP, daemon, helper transport o servicio de red.
+- Los IDs de sesión nativos, PIDs owner, tokens y paths de claims **NO DEBEN**
+  aparecer en snapshot público, vista ni resultado de stop. Cada run usa un
+  alias `run-<digest>` estable sin prefijo nativo; la frontera del turno directo
+  también se conserva sólo como digest. La vista **PUEDE** indicar que otro
+  proceso posee un claim, pero no revelar su PID.
 - La proyección de mensajes **NO DEBE** retener ni mostrar respuestas,
   reasoning, tool input/output, snapshots o errores nativos. Sólo conserva
   metadata mínima, números nativos y una etiqueta de tarea acotada/redactada.
+  En la forma legacy `{info,parts}`, cada text part usado para esa etiqueta
+  **DEBE** volver a probar `id`, `sessionID` y `messageID` contra el mensaje
+  autorizado; orden, IDs o binding ambiguos fallan cerrado antes de conservar
+  texto.
 - Las tools de lead, scout y skills **DEBEN** proyectar fallos SDK/Gh/loader a
   un error público acotado/redactado, sin `cause` ni nombre host crudo, y
   preservar `AbortError` para cancelación. La evidencia exitosa no se altera.
@@ -367,16 +547,44 @@ ruta cero modelo.
   ausencia sigue siendo desconocida y truncamiento/overflow se muestra como
   límite inferior, nunca total exacto.
 - Stop **DEBE** refrescar estado activo y volver a probar inmediatamente antes
-  de cada interrupt la sesión, ownership y generación/turno exactos. Si la
+  de cada solicitud de stop la sesión, ownership y generación/turno exactos. Si
+  la
   discovery global es incompleta, `all` falla cerrado; un run visible exacto
   sólo puede continuar si su recheck individual es autoritativo. La UI **DEBE**
-  declarar que OpenCode no ofrece compare-and-interrupt atómico.
-- Un interrupt confirmado **NO DEBE** convertirse en “stop failed” porque el
-  refresh best-effort posterior falle. Se conserva el resultado committed y se
-  informa por separado que la vista no pudo refrescarse. El resultado de stop
-  **NO DEBE** concatenar otro roster; dirige a `/team`.
-- Una lectura **DEBE** acotarse a 64 sesiones, 32 activas, 24 fanouts de
-  mensajes, 16 mensajes por sesión, concurrencia cuatro y deadlines. Inputs se
+  declarar que OpenCode no ofrece compare-and-abort atómico.
+- Stop **DEBE** conservar la autoridad del registry que observó el runner. Los
+  direct/custom commands y children creados por Agent Harbor, revalidados en
+  OpenCode 1.18.4 con el SDK fijado en 1.18.3,
+  usan `SessionRunState`: se revalidan con `session.status|get|messages`
+  project-scoped y se detienen una sola vez con
+  `session.abort({sessionID,directory})`. Un retorno distinto de `true`
+  **NO DEBE** contarse como aceptación. Una sesión vista sólo en v2 usa
+  `v2.session.active|get|messages|interrupt`; ausencia v2 nunca confirma stop de
+  un runner legacy. Cualquier aparición del mismo ID en el engine no-owner
+  —simultánea o como cambio de autoridad— **DEBE** bloquear stop incluso con una
+  generación Agent Harbor exacta, sin elegir ni llamar ambos.
+- Aun tras ACK, stop **DEBE** confirmar dentro del deadline la ausencia en el
+  ID exacto en ambos registries y el boundary terminal de claims: desaparición
+  de la generación exacta si existía claim, o ausencia de todo claim relevante
+  si el target era unclaimed. Sólo ese resultado terminal es committed. Antes
+  de dispatch se **DEBE** publicar un ledger con proyecto, alias público, ID
+  nativo y autoridad owner. Timeout, disposal, rechazo transport o envelope
+  inválido **DEBEN** conservarse como `pending`, impedir un segundo request
+  mientras cualquier stop del proyecto siga activo y pedir al usuario que no
+  reintente; sólo una lectura posterior con ambos engines y claims terminales
+  puede reconciliarlo. Un refresh best-effort
+  posterior no puede convertir un stop confirmado en fallo y se informa por
+  separado. El resultado de stop **NO DEBE** concatenar otro roster; dirige a
+  `/team`.
+- Una lectura TUI **DEBE** pedir 65 sesiones, conservar como máximo 64 y marcar
+  truncamiento sólo si existe el elemento 65. La mera presencia de cursores v2
+  **NO DEBE** producir una advertencia porque OpenCode 1.18.4 puede emitir
+  cursores que continúan a páginas vacías. Mensajes v2 **DEBEN** pedir 17,
+  conservar 16 e ignorar cursores para truncamiento; los 17 elementos
+  permitidos **DEBEN** tener tipo conocido, ID/created válidos e IDs únicos
+  antes de proyectar sólo metadata segura. La vista se acota además a 32 activas,
+  24 fanouts de mensajes, 16 mensajes por sesión, concurrencia cuatro y
+  deadlines. Inputs se
   rechazan antes del backend por encima de 4 KiB, excepto join (30 KiB) y
   selector/retire (256 bytes).
 - Como máximo 32 lifecycles disposable pueden estar activos o pendientes de
@@ -385,9 +593,42 @@ ruta cero modelo.
   usuario **DEBE** inspeccionar y eliminar la sesión nativa pending o firmada y
   luego recargar. Reload sólo libera el guard process-local; no elimina el
   orphan.
-- El roster/delegate/direct preflight **DEBE** consultar actividad v2
-  autoritativa acotada y unir reservations process-local `starting|working|cleaning`;
-  no puede anunciar ready ni double-bookear actividad nativa externa.
+- El roster/delegate/direct preflight del plugin de servidor **DEBE** usar el
+  cliente v1 inyectado: `session.status` seguido de `session.messages` sólo para
+  sesiones `busy|retry`, excluyendo la sesión caller, con máximo 32 sesiones,
+  ocho mensajes por sesión, concurrencia cuatro, deadline RPC de 750 ms y total
+  de 1.8 s. El TUI **DEBE** consultar conjuntamente el inventario v2 y el
+  `session.status` legacy project-scoped, derivar por ID la autoridad legacy/v2,
+  usar el GET y la proyección de mensajes correspondientes y unir los claims
+  filesystem antes de filtrar candidatos. Un claim local fresco `working`
+  **DEBE** corregir el `SessionV2Info.agent` base que puede seguir en `build`;
+  claims de otro proceso, heartbeat vencido, fase no-working o identidad
+  ambigua **NO DEBEN** autorizar lectura de mensajes. Fallo de claims, roster,
+  provenance, GET de una activa, cualquier registry, overflow o telemetría
+  desconocida **DEBE** deshabilitar `stop all` aun cuando no se haya reconocido
+  ningún target.
+- La frontera de claims de **TODOS** los candidatos **DEBE** revalidarse con una
+  sola lectura final después del fanout concurrente. Para candidatos cuya
+  ownership depende de agent/título, un GET posterior a mensajes **DEBE**
+  revalidar proyecto e identidad antes de conservar telemetry o autoridad de
+  stop. Cualquier drift se muestra como bloqueado y descarta task/telemetry.
+- Un claim directo **DEBE** publicar `starting|working`. Sólo **PUEDE** publicar
+  `cleaning` cuando un terminal session-scoped no puede ligarse a la generación
+  vigente; esa reserva sigue bloqueando admisión y **PUEDE** volver a `working`
+  únicamente si un evento native busy posterior prueba que el turno sigue vivo. Un
+  delegado `starting` **NO DEBE** exponer run ID ni autorizar stop del owner;
+  `working` sólo aparece tras publicar y verificar el child exacto, y
+  `cleaning` se reserva para su cleanup. Sólo la fase exacta `working` **PUEDE**
+  autorizar stop; `starting` y `cleaning` permanecen visibles pero no disparan
+  una mutación. Claims de otro PID **DEBEN** ser
+  visibles como busy pero **NO DEBEN** ser stoppable desde este proceso. Las
+  fases delegadas sólo **PUEDEN** avanzar monotónicamente; la identidad del child queda
+  inmutable al salir de `starting`. Si la publicación/readback de `working`
+  directo falla, el hook **DEBE** rechazar el run y verificar release del claim
+  en vez de continuar con actividad falsamente etiquetada. Si la generación
+  exacta se pierde después de admisión, el adapter **DEBE** restablecer un fence
+  de recuperación o abortar el trabajo native; nunca puede continuar sin
+  ownership durable mientras otro proceso admite el mismo miembro.
 - `/harbor-retire` **DEBE** rechazar un personal con cualquier run directo,
   delegado o reservation activo y repetir el snapshot autoritativo justo antes
   de mutar. Colisiones detectadas por el config hook **DEBEN** aparecer
@@ -395,6 +636,17 @@ ruta cero modelo.
 - `ContractDefinition.model` **DEBE** validarse como `provider/model` acotado y
   pasarse a `session.prompt.body.model`; provider/model/variant del host se
   acotan antes de trim, ledger, reservation o create.
+- El alias directo cargado **DEBE** capturar el digest de su definición y
+  revalidarlo contra el perfil activo ownership-checked antes de inferencia.
+  Un digest distinto exige reload. `/team` **DEBE** distinguir esta verdad del
+  host cargado (`ready`) de la verdad live del roster (`enabled · reload
+  required`), que el lead sí puede usar mediante preflight vigente.
+- Todo rechazo de preflight de un alias directo cargado **DEBE** publicar antes
+  de devolver el error un toast TUI best-effort, redactado y acotado, porque
+  OpenCode 1.18.4 no renderiza confiablemente el rechazo de su command hook.
+  Esa notificación **NO DEBE** contener task, ID de sesión, modelo o provider,
+  contactar inferencia ni retrasar el rechazo más de 500 ms si el canal TUI no
+  responde. Un alias desactivado **DEBE** explicar que está stale y pedir reload.
 
 ### `/team` y `/player` (Copilot)
 
@@ -402,26 +654,63 @@ ruta cero modelo.
   `/player <id> <task>` como comandos `client`. `/team` y el preflight inválido
   de `/player` **DEBEN** conservar idénticos los contadores nativos de uso antes
   y después de la invocación.
-- La vista general **DEBE** caber en un overview dinámico de hasta 30 líneas
-  envueltas a 96 celdas y conservar los nueve IDs factory con clase y estado
-  efectivo. El espacio restante **PUEDE** mostrar personales y actividad; toda
+- Copilot CLI 1.0.73 bloquea todos los comandos SDK de extensión durante un
+  turno activo y la extensión no puede sobrescribir ese gate. Help, footers y
+  documentación **DEBEN** presentar `Esc` como control TUI vivo, progreso
+  automático durante el turno y `/team` como disponible de nuevo después del
+  settlement. `/team stop` **PUEDE** conservarse para uso idle/RPC, pero **NO
+  DEBE** anunciarse como control TUI invocable durante ejecución activa.
+- Mientras un root está activo, la extensión **DEBE** publicar progreso
+  `session.log` ephemeral sin prompt ni llamada de modelo. Debe estar acotado a
+  doce registros por root: cada inicio de root/child **DEBE** ser inmediato y
+  la aceptación del prompt y su `root.started` nativo correspondiente **DEBEN**
+  coalescerse en un único aviso de arranque; las ráfagas posteriores **DEBEN**
+  agruparse por intervalo. Sólo puede incluir IDs públicos process-local,
+  agente, state, elapsed y
+  modelo/reasoning/tokens/nano AIU observados. **NO DEBE** incluir prompt, task
+  label, respuesta, reasoning, tool input/output, error body, IDs nativos,
+  paths, URLs ni credenciales.
+- La guía extensa de progreso automático, `Esc` y `/team` post-settlement
+  **DEBE** aparecer una sola vez por root, en su primer registro. Heartbeats y
+  cambios posteriores **DEBEN** usar sólo un recordatorio compacto de una línea.
+- Help **DEBE** separar consistentemente con `—` las formas `/team`, `/team
+  <filter>` y `/team stop <run-id|all>` de sus explicaciones. Los footers
+  **DEBEN** agrupar comandos por función antes de envolverlos y ninguna línea
+  puede comenzar con un separador `·` huérfano.
+- Toda salida visible de `/team` **DEBE** caber en un presupuesto total de hasta
+  30 líneas envueltas a 96 celdas. El overview sin filtro conserva los nueve IDs
+  factory con clase y estado efectivo. El espacio restante **PUEDE** mostrar
+  personales y actividad; toda
   omisión **DEBE** indicar el conteo exacto y filtros `kind:personal`,
   `member:<id>` o `run:<id>`. El resumen conserva disponibilidad, acceso del
   lead, cobertura SDLC y reparación. Una vista filtrada **PUEDE** retener más
-  detalle y no necesita repetir miembros ajenos al filtro, pero cada línea sigue
-  acotada a 96 celdas.
-- Cada run **DEBE** mostrar ID process-local, parent, miembro, clase, estado,
+  detalle dentro del mismo presupuesto y no necesita repetir miembros ajenos al
+  filtro.
+- Cuando la extensión añada diagnóstico SDK, host o autoridad alrededor del
+  snapshot, esos bloques **DEBEN** consumir el mismo presupuesto total de 30
+  líneas; no pueden convertir un cuerpo de 30 líneas en una salida mayor.
+- Cada run local **DEBE** mostrar ID process-local, parent, miembro, clase, estado,
   duración, etiqueta segura, modelo y reasoning
   configurado/heredado/observado, llamadas nativas y usage. Campos nativos
   ausentes son desconocidos y agregados
   parciales son límites inferiores, nunca ceros o totales inventados.
+  Una fila compartida externa **DEBE** usar `shared-<player>`, conservar elapsed
+  y el routing owner disponible, y omitir task, parent, modelo/reasoning,
+  usage/billing y stop authority. En v2 publica runtime/PID; en v1 conserva PID
+  y marca el runtime como no verificado. El texto libre **DEBE** poder buscar
+  esos campos de routing divulgados. Filtros de task/model/reasoning no pueden
+  coincidir con sus placeholders; **DEBEN** advertir que esa telemetría no fue
+  evaluada.
 - Si `model.getCurrent()` no informa modelo o devuelve vacío, `unknown`,
   `unknown/default` o `default`, la vista **DEBE** decir `no model reported
   (unobserved)`; **NO DEBE** convertir el sentinel en un modelo efectivo.
-- El registro **DEBE** vivir sólo en memoria, separar proyectos y no persistir
-  prompts, respuestas, resultados, errores ni reasoning. Sólo conserva la
-  misma etiqueta heurística acotada y redactada descrita para Pi; identificadores
-  nativos usados para deduplicar se transforman con una clave efímera privada.
+- El registro rico y su historial **DEBEN** vivir sólo en memoria, separar
+  proyectos y no persistir prompts, respuestas, resultados, errores ni
+  reasoning. Se unen con los claims mínimos compartidos definidos arriba; éstos
+  tampoco contienen la etiqueta de tarea ni telemetría. El runtime local sólo
+  conserva la misma etiqueta heurística acotada y redactada descrita para Pi;
+  identificadores nativos usados para deduplicar se transforman con una clave
+  efímera privada.
 - El runner directo **DEBE** validar actividad y ownership, bloquear roots por
   encima de 32 y double-booking de miembros persistentes, conservar el orden de
   selección con un lock, suscribirse a eventos antes de enviar, seleccionar el
@@ -433,12 +722,24 @@ ruta cero modelo.
   forma acotada. Si no llega terminal, **NO DEBE** restaurar ni permitir otra
   selección; conserva la selección hasta que el evento tardío termine el run.
 - `/team stop <run-id|all>` **DEBE** limitarse a roots activos controlados en el
-  proyecto actual. `all` sin trabajo es éxito informativo; un ID desconocido es
-  error. Detener no implica que el run sea terminal hasta observar settlement.
+  proyecto actual. Un `shared-*` **DEBE** informar owner externo; si el
+  inventario compartido no es autoritativo, Copilot **DEBE** fallar el stop antes
+  de afirmar que inspeccionó todo el proyecto. `all` sin trabajo es éxito sólo
+  tras esa lectura; un ID desconocido es error. Detener no implica que el run
+  sea terminal hasta observar settlement. El resultado, incluso para `all`,
+  **DEBE** permanecer dentro del presupuesto visible de 30 líneas/96 celdas y
+  contar cualquier detalle omitido con una ruta accionable de inspección.
+- Un fallo de release/ownership compartido en Copilot **DEBE** crear un hazard
+  durable por proyecto que bloquee aliases, selección nativa, coordinator,
+  roots y children observados tardíamente antes de otra lectura de modelo o
+  `session.send`. No se borra al asentar el run ni al soltar su control local:
+  sólo la liberación verificada de esa misma generación o un reload limpio puede
+  retirarlo. `/team` **DEBE** mostrar el gate y su reparación.
 - El lifecycle de `team-lead` **DEBE** correlacionar root/child con IDs nativos
   sin contenido. Antes de permitir el `task`, un admission hook síncrono **DEBE**
-  comprobar parent, proyecto, capacidad y double-booking; un rechazo no consume
-  el contador ni deja la sesión marcada in-flight.
+  comprobar parent, proyecto, capacidad y double-booking contra el registro
+  persistente project-shared; un rechazo no consume el contador ni deja la
+  sesión marcada in-flight.
 - Los aliases `/<id>` cubren fixed, bundled y personales enabled al arrancar.
   `/player` **DEBE** resolver el roster actual, de modo que un `/join` exitoso
   **PUEDE** ser invocable en la misma sesión sin esperar a que el host registre
@@ -454,7 +755,12 @@ ruta cero modelo.
 - Toda metadata pública persistida o renderizada, incluidas `description` y
   `model`, **DEBE** rechazar controles C0/C1/Cf y ANSI. `prompt` **PUEDE** ser
   multilínea porque no se muestra en el roster ni en la telemetría.
-- Escribe registro y copia activa byte-idénticos y los verifica.
+- Escribe y verifica un registro global canónico y una copia activa canónica
+  para el proyecto actual. En Copilot y Pi son byte-idénticos. En OpenCode el
+  registro **DEBE** usar `permission.external_directory: deny`, mientras la
+  copia activa **DEBE** contener únicamente la allowlist del proyecto actual;
+  ambos conservan la misma definición validada y se publican en una sola
+  transacción.
 - Las superficies nativas Pi y Copilot **DEBEN** resumir ID, rol, capacidad
   efectiva (tools y nombres de skills) y modelo configurado o herencia del host
   sin revelar paths administrados. El contrato común devuelve además el alias
@@ -489,6 +795,11 @@ ruta cero modelo.
 - Recibe un único ID personal.
 - Elimina registro y copia activa del proyecto actual en una transacción.
 - No toca otros proyectos y rechaza miembros incluidos o colisiones.
+- Repetir un retire ya ausente **DEBE** ser un no-op idempotente marcado con
+  `○`: no refresca discovery, no afirma una nueva mutación y declara que ningún
+  archivo de roster cambió. Tanto el retire efectivo como el no-op **DEBEN**
+  aclarar que un alias de startup bloqueado sólo puede seguir visible en
+  `slash-command completion/autocomplete` hasta `/reload`.
 
 ### `/contract`
 
@@ -541,7 +852,7 @@ ruta cero modelo.
 - OpenCode **DEBE** registrar `<id>` con `template: "$ARGUMENTS"`, el
   `agent` exacto y `subtask: false`; así evita tanto el router como el resumen
   adicional del padre. Un hook **DEBE** revalidar tarea, actividad y ownership
-  al ejecutar incluso si el alias quedó cargado después de `bench off`.
+  al ejecutar incluso si el alias quedó cargado después de `/bench-off`.
   `team-lead` **DEBE** recibir sólo `harbor_team_roster` y
   `harbor_delegate`. La consulta devuelve el roster enabled completo, modelo
   configurado y disponibilidad `ready|busy`; el target de delegación se
@@ -861,7 +1172,10 @@ capacidades ordinarias que el usuario le declaró.
 
 ## 6. Portabilidad e instalación
 
-- Node.js `>=22.19.0` es el único runtime de implementación y pruebas requerido.
+- Node.js `>=22.19.0` es el único runtime del producto. La suite principal
+  usa además Python `>=3.10` exclusivamente para probar, sin abrir un PTY, los
+  capturadores de demostración publicados; `AGENT_HARBOR_PYTHON` permite fijar
+  el intérprete de desarrollo y no se propaga a ningún adapter.
 - Un host empaquetado cuyo `process.execPath` no sea Node **DEBE** seleccionar
   un ejecutable Node absoluto `>=22.19.0` mediante candidatos acotados,
   canonicalizados y probados fuera del proyecto/home; no puede pedir al shell
@@ -877,11 +1191,18 @@ capacidades ordinarias que el usuario le declaró.
   custom tools. **NO DEBE** contener configuración de transporte ni iniciar un
   proceso o servidor auxiliar. Desactivar lo experimental sólo **PUEDE**
   degradar esos controles a su fallback, no romper el lifecycle compartido.
-- Los SDKs se fijan a versiones exactas: `@github/copilot-sdk@1.0.6`,
-  `@opencode-ai/plugin@1.18.3` (que fija su SDK y coincide con el host mínimo
-  OpenCode 1.18.3) y el peer provisto por Pi
-  `@earendil-works/pi-coding-agent@0.80.10`. Pi permanece como peer opcional
-  para no duplicar el runtime del host.
+- El export servidor OpenCode **NO DEBE** registrar los cinco controles
+  lifecycle/catálogo como comandos mediados por modelo ni exponer una tool
+  ambiental genérica `harbor`. **DEBE** conservar sólo agents, aliases directos
+  de especialistas y tools acotadas por rol. Al migrar configuración sólo
+  **PUEDE** eliminar aliases fallback legacy que coincidan exactamente; todo
+  comando extranjero se preserva.
+- Las dependencias directas se fijan a versiones exactas:
+  `@github/copilot-sdk@1.0.6` y `@opencode-ai/plugin@1.18.3` (que fija su SDK y
+  coincide con el host mínimo OpenCode 1.18.3). Pi permanece como peer opcional
+  para no duplicar el runtime del host y acepta sólo las releases verificadas
+  `@earendil-works/pi-coding-agent@0.80.10` y `0.81.1`; agregar otra release
+  **REQUIERE** repetir el smoke nativo antes de ampliar esa unión.
 
 ## 7. Límites deliberados para mantener simplicidad
 
@@ -902,9 +1223,10 @@ capacidades ordinarias que el usuario le declaró.
   metadatos de sesión para respetar cambios de carpeta; ningún path elegido por
   el modelo se acepta como argumento de una custom tool.
 - La API TUI de OpenCode 1.18.3 no entrega argumentos al callback slash. Por eso
-  usa ocho nombres directos inequívocos y diálogos, incluido `/team`; los cinco
-  comandos canónicos del servidor se conservan como fallback, y el CLI directo
-  conserva la sintaxis exacta sin inferencia.
+  usa nueve nombres directos inequívocos y diálogos: ocho controles
+  deterministas cero modelo, incluido `/team`, y `/contract` con exactamente un
+  child. Lifecycle/catálogo usan la TUI o el CLI directo; no existe fallback de
+  servidor que consuma modelo.
 - Una cadena SDLC completa es opt-in; `team-lead` elige la secuencia mínima de
   uno a seis children y `/contract` continúa eligiendo exactamente uno.
 
@@ -927,9 +1249,10 @@ capacidades ordinarias que el usuario le declaró.
 | LIV-01 | Selección semántica y comunicación eficiente con inferencia real en Copilot, OpenCode y Pi | smoke Copilot opt-in `live Copilot team-lead selects and orchestrates the Harbor SDLC cycle efficiently` y smokes `live opencode|pi team-lead selects and orchestrates the Harbor SDLC cycle with Codex`: candidatos desordenados, nonce oculto acotado, seis children nativos correlacionados, secuencia exacta, concurrencia máxima uno, identidad/terminación nativas, ausencia de marcadores stale/duplicados, presupuestos raíz/child/total, fixture verificada, tokens positivos, cleanup y reportes sanitizados. La evidencia autenticada anterior al cambio de roster **NO** satisface esta secuencia canónica y **DEBE** regenerarse con los seis compañeros vigentes antes de afirmar LIV-01 cumplido. |
 | COP-01 | Custom tools nativas, preflight compartido y runtime generado | `Copilot native control performs deterministic shared contract preflight`, `Copilot contract skill exposes only its native preflight tool and cannot be model-invoked`, `compiled Copilot profiles bind custom skill tools without transport servers`, `Copilot runtime is generated byte-for-byte from shared core`, `generated native runtime retains gh timeout and closed custom-tool contracts` y smoke ACP `agent-harbor (connected, plugin)` |
 | COP-TEAM-01 | Roster y actividad Copilot cero modelo, lifecycle privado, accounting nativo y restore seguro | `Copilot runtime redacts tasks, privately deduplicates native usage, and preserves lower bounds`, `Copilot runtime preserves hierarchy, terminal facts, project isolation, cap32, and double-booking`, `Copilot team view shows deterministic roster, live hierarchy, filters, and last mission within 96 columns`, `Copilot coordinator emits correlated content-minimized root and child lifecycle events`, `Copilot child admission denies before native work without poisoning the next delegation`, pruebas de contrato de extensión, runtime byte-idéntico y smoke real `--plugin-dir` con usage inalterado |
-| OPC-TEAM-01 | Roster/actividad OpenCode cero modelo, provenance privada, stop fail-closed y cleanup visible | todos los casos de `test-ts/opencode-team.test.ts`, incluidos HMAC ligado a sesión/proyecto, IDs opacos, redacción, telemetría de turno, límites, colisiones, recheck por target, lifecycle de diálogos, retry/hazard de cleanup y cap32; más `test-ts/opencode-server-hardening.test.ts` para el bridge de configuración |
+| SHR-TEAM-01 | Claims persistentes project-shared Pi/Copilot, mutación excluida, owner-only stop y degradación honesta | `Pi and Copilot share physical-project activity, mutation safety, views, and degraded authority` en `test-ts/shared-runtime-activity.test.ts`, más las carreras de admisión/retire, comprobaciones de claim antes del model child y cleanup terminal de `test-ts/adapters.test.ts` y `test-ts/copilot-extension-runner.test.ts` |
+| OPC-TEAM-01 | Roster/actividad OpenCode cero modelo, autoridad degradada honesta, diagnósticos paginados, provenance privada, stop fail-closed y cleanup visible | todos los casos de `test-ts/opencode-team.test.ts`, incluidos lower bounds, no-match degradado, motivos/repair sanitizados, HMAC ligado a sesión/proyecto, IDs opacos, telemetría de turno, límites, colisiones, recheck por target, lifecycle de diálogos, retry/hazard de cleanup y cap32; más `test-ts/opencode-server-hardening.test.ts` para el bridge de configuración sin fallbacks lifecycle |
 | GH-01 | Referencias canónicas, snapshot read-only y body invocation-local | `GitHub references are bounded...`, `GitHub resolver pins one branch and one exact blob with two read-only cancellable gh calls`, `default gh runner enforces its process timeout`, `GitHub skill bodies are snapshot-loaded...` y `contract skills are validated and materialized before any SDK child...`; POC manual autenticado con `gh` |
-| PI-01 | API real de Pi, skills aisladas, delegación nominal, `/team` y cancelación acotada | smoke de `createAgentSession`, RPC `get_commands`, `Pi gives a child exactly its invocation-scoped skill allowlist`, `Pi extension invokes every fixed and activated agent and equips the team lead for named delegation`, `Pi /team and enriched /bench are searchable zero-model controls with completions and human errors`, `Pi exposes a live safe team run, native usage, propagated signal, and always-cleared status/widget`, `Pi Alt+H cancels an idle slash child without a caller signal and clears live UI`, casos de root cap, double-booking y `/team stop` en `test-ts/adapters.test.ts`, y todas las pruebas de `test-ts/pi-team.test.ts` |
+| PI-01 | API real de Pi, skills aisladas, delegación nominal, `/team` y cancelación acotada | smoke de `createAgentSession`, RPC `get_commands`, `Pi gives a child exactly its invocation-scoped skill allowlist`, `Pi extension invokes every fixed and activated agent and equips the team lead for named delegation`, `Pi /team and enriched /bench are searchable zero-model controls with completions and human errors`, `Pi exposes a live safe team run, native usage/cost, propagated signal, and one shared status/widget`, `Pi Alt+H cancels an idle slash child without a caller signal and clears live UI`, casos de root cap, double-booking y `/team stop` en `test-ts/adapters.test.ts`, y todas las pruebas de `test-ts/pi-team.test.ts` |
 | PKG-01 | Paquete publicable | `npm pack --dry-run --json` |
 | DEP-01 | Dependencias seguras | `npm audit --audit-level=high` sin hallazgos |
 

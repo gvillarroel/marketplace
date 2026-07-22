@@ -67,8 +67,35 @@ test("Copilot extension scopes native lifecycle and child admission to the event
   const source = await readFile(extensionPath, "utf8");
   assert.match(source, /project: event\.project/u);
   assert.match(source, /createCopilotCoordinatorGuard\([\s\S]*lifecycleHook, \(input\) =>/u);
-  assert.match(source, /runtime\.begin\(\{[\s\S]*project: input\.project[\s\S]*parentRunId[\s\S]*correlationRuns\.set\(input\.runId, runId\)/u);
+  assert.match(source, /const beginInput = \{[\s\S]*project,[\s\S]*parentRunId[\s\S]*beginSharedPersistentRun\(beginInput, "delegated"[\s\S]*correlationRuns\.set\(input\.runId, runId\)/u);
   assert.match(source, /event\.reasoningEffort === null \? "none"/u);
   assert.match(source, /event\.outcome === "cancelled"\) runtime\.finishIfOpen\(runId, "cancelled"\)/u);
   assert.match(source, /wrapPlainText\(message\)/u);
+});
+
+test("Copilot extension closes every late lifecycle and repeated-prompt path on a shared authority hazard", async () => {
+  const source = await readFile(extensionPath, "utf8");
+  const lifecycleStart = source.indexOf("function lifecycleHook");
+  const lifecycleEnd = source.indexOf("\nconst maximumGuardEvidenceQueue", lifecycleStart);
+  assert.ok(lifecycleStart >= 0 && lifecycleEnd > lifecycleStart);
+  const lifecycle = source.slice(lifecycleStart, lifecycleEnd);
+
+  assert.match(lifecycle,
+    /event\.type === "root\.started"[\s\S]*assertNoSharedActivityProjectHazard\(event\.project\)[\s\S]*Copilot abort hazardous native root/u);
+  assert.match(lifecycle,
+    /event\.type === "child\.started"[\s\S]*assertNoSharedActivityProjectHazard\(event\.project\)[\s\S]*Copilot abort hazardous native child/u);
+  assert.match(lifecycle,
+    /runId = kind === "contractor"[\s\S]*runtime\.begin\(beginInput\)[\s\S]*beginSharedPersistentRun\(beginInput, "delegated"/u);
+  assert.doesNotMatch(lifecycle,
+    /if \(!runId\) \{\s*runId = runtime\.begin\(\{[\s\S]*event\.taskLabel/u);
+
+  const admissionStart = source.indexOf("}, lifecycleHook, (input) =>");
+  const admissionEnd = source.indexOf("\n});", admissionStart);
+  assert.ok(admissionStart >= 0 && admissionEnd > admissionStart);
+  const admission = source.slice(admissionStart, admissionEnd);
+  assert.ok(admission.indexOf("assertNoSharedActivityProjectHazard(project)") < admission.indexOf('if (input.type === "root")'));
+
+  assert.match(source,
+    /const projectAuthorityCoordinatorHooks = \{[\s\S]*onUserPromptSubmitted\(input, invocation\)[\s\S]*assertNoSharedActivityProjectHazard\(project\)[\s\S]*coordinator\.hooks\.onUserPromptSubmitted/u);
+  assert.match(source, /joinSession\(\{\s*tools: copilotNativeTools,\s*hooks: projectAuthorityCoordinatorHooks,/u);
 });

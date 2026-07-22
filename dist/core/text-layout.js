@@ -113,6 +113,13 @@ function terminalTokens(value) {
         pushText(value.slice(textStart));
     return tokens;
 }
+/** Removes ANSI/ECMA-48 and other zero-width terminal controls while retaining visible evidence. */
+export function stripTerminalControls(value) {
+    return terminalTokens(value)
+        .filter(({ width }) => width > 0)
+        .map(({ value: token }) => token)
+        .join("");
+}
 /** Counts terminal columns after treating ANSI controls as zero-width units. */
 export function visibleTextWidth(value) {
     return terminalTokens(value).reduce((sum, token) => sum + token.width, 0);

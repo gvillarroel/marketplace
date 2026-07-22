@@ -1,7 +1,7 @@
 {
   "name": "agent-foundry",
   "description": "Manage a declarative user bench, current-folder profiles, disposable subagents, and trusted skill references.",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "author": { "name": "Gerardo Villarroel" },
   "repository": "https://github.com/gvillarroel/marketplace",
   "license": "MIT",

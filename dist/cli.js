@@ -8,13 +8,16 @@
  */
 import { executeCommand } from "./core/commands.js";
 import { deterministicCommandNames } from "./core/types.js";
-import { runDeterministicCommand } from "./adapters/direct.js";
+import { runDeterministicCommandResult } from "./adapters/direct.js";
 import { harborContext } from "./adapters/shared.js";
 const [, , harnessRaw, commandRaw, ...rest] = process.argv;
 const harnesses = ["copilot", "opencode", "pi"];
 const commands = ["bench", "join", "retire", "contract", "list-skills"];
 if (!harnesses.includes(harnessRaw) || !commands.includes(commandRaw)) {
-    console.error("usage: agent-harbor <copilot|opencode|pi> <bench|join|retire|contract|list-skills> [arguments]");
+    console.error([
+        "usage: agent-harbor <copilot|opencode|pi> <bench|join|retire|list-skills> [arguments]",
+        "       agent-harbor copilot contract <json>",
+    ].join("\n"));
     process.exitCode = 2;
 }
 else {
@@ -23,7 +26,18 @@ else {
     const args = rest.join(" ");
     try {
         if (deterministicCommandNames.includes(command)) {
-            console.log(await runDeterministicCommand(harness, command, args, process.cwd(), undefined, process.stdout.isTTY ? "ansi" : "plain"));
+            const deterministic = command;
+            const invoke = () => runDeterministicCommandResult(harness, deterministic, args, process.cwd(), undefined, process.stdout.isTTY ? "ansi" : "plain");
+            if (harness === "opencode") {
+                const { runOpenCodeRosterMutationGate } = await import("./adapters/opencode-agent-activity.js");
+                const { assertOpenCodeLifecycleMutationTruth } = await import("./adapters/opencode-lifecycle-result.js");
+                const result = await runOpenCodeRosterMutationGate(command, args, process.cwd(), invoke);
+                assertOpenCodeLifecycleMutationTruth(command, args, result);
+                console.log(result.text);
+            }
+            else {
+                console.log((await invoke()).text);
+            }
         }
         else if (harness === "copilot") {
             const { CopilotOrchestrator } = await import("./orchestrators/copilot.js");

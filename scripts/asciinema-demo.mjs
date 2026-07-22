@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 
-import { CopilotClient, RuntimeConnection, approveAll } from "@github/copilot-sdk";
+import { CopilotClient, RuntimeConnection } from "@github/copilot-sdk";
 import { execFileSync } from "node:child_process";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { runCopilotControl } from "../dist/adapters/copilot.js";
+import { createAgentHarborExtensionPermissionGate } from "./copilot-extension-permission-gate.mjs";
+
+export { createAgentHarborExtensionPermissionGate };
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const plugin = join(root, "plugins", "agent-foundry");
@@ -179,14 +182,16 @@ async function main() {
   let session;
   const events = [];
   const modelEvents = [];
+  const permissionGate = createAgentHarborExtensionPermissionGate("model-free demo");
   let primaryError;
+  let commandCount = 0;
   try {
     await client.start();
     session = await client.createSession({
       workingDirectory: project,
       enableConfigDiscovery: true,
       requestExtensions: true,
-      onPermissionRequest: approveAll,
+      onPermissionRequest: permissionGate.handler,
       enableSessionTelemetry: false,
       infiniteSessions: { enabled: false },
       skipCustomInstructions: true,
@@ -214,6 +219,7 @@ async function main() {
     events.length = 0;
     const usageBefore = await session.rpc.usage.getMetrics();
     const invoke = async (name, input, seconds, display = `/${name}${input ? ` ${input}` : ""}`) => {
+      commandCount += 1;
       await typeCommand(display);
       const eventOffset = events.length;
       let failure;
@@ -261,8 +267,10 @@ async function main() {
     section("Skills confiables", "La búsqueda usa el mismo resolver de snapshots que la extensión de Copilot.");
     await invoke("list-skills", "zx-example-author", 6, "/list-skills zx-example-author");
     await invoke("team", "stop all", 4, "/team stop all");
+    await invoke("team", "help", 7, "/team help");
 
     section("Preflight sin inferencia", "Cada frontera inteligente rechaza una tarea vacía antes de crear un root o child.");
+    commandCount += 1;
     await typeCommand("/contract {}");
     try { await runCopilotControl("contract", "{}", project); }
     catch (error) {
@@ -276,14 +284,15 @@ async function main() {
 
     section("Cleanup", "Copilot retira el compañero personal y devuelve los seis especialistas al bench.");
     await invoke("retire", "demo-reviewer", 5, "/retire demo-reviewer");
+    process.stdout.write(`${paint("Repetimos el mismo comando: debe ser un no-op explícito.", "dim")}\n`);
+    await invoke("retire", "demo-reviewer", 5, "/retire demo-reviewer");
     await invoke("bench", "off all", 7, "/bench off all");
     await invoke("team", "", 7);
 
     const usageAfter = await session.rpc.usage.getMetrics();
     if (stableJson(usageBefore) !== stableJson(usageAfter)) throw new Error("demo changed Copilot usage metrics");
     if (modelEvents.length) throw new Error(`demo emitted model events: ${modelEvents.join(", ")}`);
-    process.stdout.write(`\n${paint("✓ Demo de Copilot completa", "green")} · 16 comandos · métricas sin cambios · 0 eventos de modelo.\n`);
-    await readingPause(6);
+    permissionGate.assertSatisfied();
   } catch (error) {
     primaryError = error;
     throw error;
@@ -298,12 +307,21 @@ async function main() {
       cleanupErrors.push(error);
       try { await client.forceStop(); } catch (forceError) { cleanupErrors.push(forceError); }
     }
+    if (!primaryError) {
+      try { permissionGate.assertSatisfied(); }
+      catch (error) { cleanupErrors.push(error); }
+    }
     await rm(temporaryRoot, { recursive: true, force: true });
     if (!primaryError && cleanupErrors.length) throw new AggregateError(cleanupErrors, "Copilot demo cleanup failed");
   }
+  process.stdout.write(`\n${paint("✓ Demo de Copilot completa", "green")} · ${commandCount} comandos · métricas sin cambios · 0 eventos de modelo.\n`);
+  await readingPause(6);
 }
 
-main().catch((error) => {
-  console.error(paint(errorMessage(error), "red"));
-  process.exitCode = 1;
-});
+const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : undefined;
+if (invokedPath === import.meta.url) {
+  main().catch((error) => {
+    console.error(paint(errorMessage(error), "red"));
+    process.exitCode = 1;
+  });
+}

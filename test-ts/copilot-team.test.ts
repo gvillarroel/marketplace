@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -24,6 +24,7 @@ import { bundledPlayers, rolePlayers, scoutPlayer } from "../src/core/defaults.j
 import { Roster } from "../src/core/lifecycle.js";
 import { harnessSpec } from "../src/core/profiles.js";
 import { visibleTextWidth } from "../src/core/text-layout.js";
+import { claimSharedAgentActivity } from "../src/adapters/opencode-agent-activity.js";
 
 test("Copilot runtime redacts tasks, privately deduplicates native usage, and preserves lower bounds", () => {
   let now = 1_000;
@@ -222,6 +223,120 @@ test("Copilot degraded team view preserves active telemetry and filter-safe last
   assert.doesNotMatch(formatCopilotDegradedTeamView(project, runtime, { filter: "does-not-exist" }), /LAST MISSION/u);
 });
 
+test("Copilot shared rows route stops to the owning runtime without disclosing private claim data", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-copilot-shared-owner-"));
+  const project = join(root, "project");
+  const home = join(root, "copilot-home");
+  const activityHome = join(root, "activity-home");
+  const previousHome = process.env.COPILOT_HOME;
+  const previousActivityHome = process.env.AGENT_HARBOR_ACTIVITY_HOME;
+  process.env.COPILOT_HOME = home;
+  process.env.AGENT_HARBOR_ACTIVITY_HOME = activityHome;
+  const privateRunID = "pi-private-session-never-render";
+  let claim: ReturnType<typeof claimSharedAgentActivity> | undefined;
+  let claimReleased = false;
+  let claimPath: string | undefined;
+  try {
+    await mkdir(project, { recursive: true });
+    claim = claimSharedAgentActivity(project, "crafter", "direct", privateRunID, "pi");
+    new Roster(harnessSpec("copilot", home, project));
+    assert.equal(claim.setPhase("working"), true);
+    const projectStores = await readdir(join(activityHome, "agent-foundry", "team-activity-v1"));
+    assert.equal(projectStores.length, 1);
+    claimPath = join(activityHome, "agent-foundry", "team-activity-v1", projectStores[0], "crafter.json");
+
+    const standard = await formatCopilotTeamView(project, new CopilotTeamRuntime());
+    const flattenedStandard = standard.replace(/\s+/gu, " ");
+    assert.match(flattenedStandard, /crafter\/shared-crafter .*project-shared persistent/u);
+    assert.match(flattenedStandard, new RegExp(`owner pi PID ${process.pid}; stop there`, "u"));
+    assert.match(flattenedStandard, /crafter\/shared-crafter · working .*\/team run:shared-crafter/u);
+    assert.doesNotMatch(standard, new RegExp(privateRunID, "u"));
+    assert.doesNotMatch(standard, new RegExp(claim.snapshot.claimToken, "u"));
+    assert.ok(standard.split("\n").every((line) => visibleTextWidth(line) <= 96));
+
+    for (const ownerFilter of ["owner:pi", `pid:${process.pid}`, "owner pi", String(process.pid)]) {
+      const ownerMatch = await formatCopilotTeamView(project, new CopilotTeamRuntime(), { filter: ownerFilter });
+      assert.match(ownerMatch, /crafter(?:\/shared-crafter| · run shared-crafter)/u,
+        `the public shared-owner route could not be found with ${ownerFilter}`);
+      assert.doesNotMatch(ownerMatch, new RegExp(privateRunID, "u"));
+      if (ownerFilter.includes(":")) {
+        assert.doesNotMatch(ownerMatch, /not evaluated for .*owning process does not disclose/u,
+          "an owner/PID field filter was mislabeled as undisclosed telemetry");
+      }
+    }
+
+    for (const telemetryFilter of ["task:not disclosed", "task:task", "model:gpt", "reasoning:high", "not disclosed"]) {
+      const filtered = await formatCopilotTeamView(project, new CopilotTeamRuntime(), { filter: telemetryFilter });
+      assert.doesNotMatch(filtered, /shared-crafter/u,
+        `external undisclosed telemetry falsely matched ${telemetryFilter}`);
+      assert.match(filtered.replace(/\s+/gu, " "),
+        /1 active project-shared run was not evaluated for (?:task|model|reasoning|task\/model\/reasoning): the owning process does not\s+disclose\s+that telemetry/u);
+      assert.match(filtered, /matches .* in disclosed fields/u);
+    }
+
+    const currentClaim = JSON.parse(await readFile(claimPath, "utf8")) as Record<string, unknown>;
+    const overdue = new Date(Date.now() - 60_000);
+    await utimes(claimPath, overdue, overdue);
+    const degraded = formatCopilotDegradedTeamView(project, new CopilotTeamRuntime());
+    const flattenedDegraded = degraded.replace(/\s+/gu, " ");
+    assert.match(flattenedDegraded, /Project-shared persistent player \(direct\)/u);
+    assert.match(flattenedDegraded, new RegExp(`owner pi PID ${process.pid}; stop there`, "u"));
+    assert.match(flattenedDegraded, /Owner heartbeat is overdue; admission remains blocked/u);
+    assert.match(flattenedDegraded, /Task: “Task not disclosed by the owning process”/u);
+    assert.doesNotMatch(flattenedDegraded, /model unknown|native child|native usage/u);
+    assert.doesNotMatch(degraded, new RegExp(privateRunID, "u"));
+    assert.doesNotMatch(degraded, new RegExp(claim.snapshot.claimToken, "u"));
+    assert.ok(degraded.split("\n").every((line) => visibleTextWidth(line) <= 96));
+
+    assert.equal(claim.release(), true);
+    claimReleased = true;
+    const legacyClaim = {
+      version: 1,
+      owner: currentClaim.owner,
+      project: currentClaim.project,
+      agent: currentClaim.agent,
+      kind: currentClaim.kind,
+      phase: currentClaim.phase,
+      slot: currentClaim.slot,
+      sessionA: currentClaim.sessionA,
+      sessionB: currentClaim.sessionB,
+      startedAt: currentClaim.startedAt,
+      processID: currentClaim.processID,
+      claimToken: currentClaim.claimToken,
+    };
+    await writeFile(claimPath, JSON.stringify(legacyClaim), { encoding: "utf8", mode: 0o600 });
+    const legacy = formatCopilotDegradedTeamView(project, new CopilotTeamRuntime()).replace(/\s+/gu, " ");
+    assert.match(legacy, new RegExp(
+      `owner runtime unverified \\(legacy claim\\) · PID ${process.pid}; stop in that owning Pi/Copilot process`, "u",
+    ));
+    assert.doesNotMatch(legacy, /owner (?:opencode|pi|copilot) PID/u);
+
+    const storeSecret = "STORE_SECRET_72f4d1c6_never_render";
+    const privateStorePath = "C:\\Users\\alice\\private-customer\\activity.json";
+    await writeFile(claimPath, JSON.stringify({ storeSecret, privateStorePath }), { encoding: "utf8", mode: 0o600 });
+    const corruptViews = [
+      await formatCopilotTeamView(project, new CopilotTeamRuntime()),
+      formatCopilotDegradedTeamView(project, new CopilotTeamRuntime()),
+    ];
+    for (const corruptView of corruptViews) {
+      const flattened = corruptView.replace(/\s+/gu, " ");
+      assert.match(flattened, /Activity store diagnostic: invalid Agent Harbor shared activity claim/u);
+      assert.match(flattened,
+        /Repair \(0 model tokens\): inspect AGENT_HARBOR_ACTIVITY_HOME—or the default Agent Harbor activity store—for permissions\/content; restart owning processes; retry \/team\./u);
+      assert.doesNotMatch(corruptView, new RegExp(storeSecret, "u"));
+      assert.doesNotMatch(corruptView, /alice|private-customer|activity\.json/u);
+      assert.ok(corruptView.split("\n").every((line) => visibleTextWidth(line) <= 96));
+    }
+  } finally {
+    if (!claimReleased) claim?.release();
+    if (claimReleased && claimPath) await unlink(claimPath).catch(() => undefined);
+    if (previousHome === undefined) delete process.env.COPILOT_HOME;
+    else process.env.COPILOT_HOME = previousHome;
+    if (previousActivityHome === undefined) delete process.env.AGENT_HARBOR_ACTIVITY_HOME;
+    else process.env.AGENT_HARBOR_ACTIVITY_HOME = previousActivityHome;
+  }
+});
+
 test("Copilot usage identity capacity stays bounded and reports omitted telemetry as lower bounds", () => {
   const runtime = new CopilotTeamRuntime();
   const project = process.cwd();
@@ -289,9 +404,28 @@ test("Copilot degraded team view discloses active-run truncation", () => {
       project, agent: `child-${index}`, kind: "contractor", task: "Perform bounded work", parentRunId: root,
     });
   }
-  const output = formatCopilotDegradedTeamView(project, runtime);
-  assert.match(output, /\+32 matching active runs omitted by this bounded snapshot; filter or retry \/team/u);
-  assert.ok(output.indexOf("● root-0") < output.indexOf("↳ child-0"));
+  const fullOutput = formatCopilotDegradedTeamView(project, runtime, { totalLineBudget: 256 });
+  assert.match(fullOutput, /\+32 matching active runs omitted by this bounded snapshot; filter or retry \/team/u);
+  assert.ok(fullOutput.indexOf("● root-0") < fullOutput.indexOf("↳ child-0"));
+
+  const defaultOverview = formatCopilotDegradedTeamView(project, runtime);
+  assert.ok(defaultOverview.split("\n").length <= maximumCopilotTeamOverviewLines);
+  assert.match(defaultOverview, /ACTIVITY · page 1\/\d+ · showing \d+\/64 · \+\d+ runs not on this page/u);
+  const reservedOverview = formatCopilotDegradedTeamView(project, runtime, { totalLineBudget: 9 });
+  assert.ok(reservedOverview.split("\n").length <= 9);
+  assert.match(reservedOverview, /wrapped view lines omitted by the 9-line total budget/u);
+
+  const filteredDetail = formatCopilotDegradedTeamView(project, runtime, { filter: "starting" });
+  assert.ok(filteredDetail.split("\n").length <= maximumCopilotTeamOverviewLines,
+    "a filtered degraded detail exceeded the default 30-line total budget");
+  assert.match(filteredDetail, /\+\d+ matching active runs omitted by this bounded snapshot/u);
+  assert.match(filteredDetail, /Next: \/team starting page:2/u);
+  const reservedDetail = formatCopilotDegradedTeamView(project, runtime, {
+    filter: "starting",
+    totalLineBudget: 9,
+  });
+  assert.ok(reservedDetail.split("\n").length <= 9);
+  assert.match(reservedDetail, /wrapped view lines omitted by the 9-line total budget/u);
 });
 
 test("Copilot usage without a stable native identity is truthfully rendered as a lower bound", () => {
@@ -523,9 +657,16 @@ test("Copilot terminal totals win incompatible per-call breakdowns", () => {
   assert.doesNotMatch(report, /in 14|out 6/u);
 });
 
-test("Copilot billing telemetry is native, deduplicated, lower-bounded, and mission-scoped", () => {
+test("Copilot billing telemetry is native, deduplicated, lower-bounded, and mission-scoped", async (t) => {
+  const priorHome = process.env.COPILOT_HOME;
+  process.env.COPILOT_HOME = await mkdtemp(join(tmpdir(), "harbor-copilot-billing-home-"));
+  t.after(() => {
+    if (priorHome === undefined) delete process.env.COPILOT_HOME;
+    else process.env.COPILOT_HOME = priorHome;
+  });
   const runtime = new CopilotTeamRuntime();
-  const root = runtime.begin({ project: process.cwd(), agent: "lead", kind: "manager", task: "Coordinate" });
+  const project = process.cwd();
+  const root = runtime.begin({ project, agent: "lead", kind: "manager", task: "Coordinate" });
   const first = {
     type: "assistant.usage" as const,
     id: "billing-first",
@@ -549,7 +690,7 @@ test("Copilot billing telemetry is native, deduplicated, lower-bounded, and miss
     data: { inputTokens: 3, outputTokens: 1 },
   }, root), true);
   const child = runtime.begin({
-    project: process.cwd(), agent: "worker", kind: "contractor", task: "Work", parentRunId: root,
+    project, agent: "worker", kind: "contractor", task: "Work", parentRunId: root,
   });
   runtime.observeUsageEvent({
     type: "assistant.usage",
@@ -563,10 +704,17 @@ test("Copilot billing telemetry is native, deduplicated, lower-bounded, and miss
   assert.deepEqual(runtime.missionBilling(root), { modelMultiplier: 1.75, totalNanoAiu: 125 });
   assert.deepEqual(new Set(runtime.missionBillingLowerBounds(root)), new Set(["modelMultiplier", "totalNanoAiu"]));
   const report = formatCopilotMissionReport(runtime, root).replace(/\s+/gu, " ");
-  assert.match(report, /model-multiplier cost ≥1\.25 · nano AIU ≥100/u);
-  assert.match(report, /model-multiplier cost 0\.5 · nano AIU 25/u);
-  assert.match(report, /Mission total .*model-multiplier cost ≥1\.75 · nano AIU ≥125/u);
-  assert.doesNotMatch(report, /USD|dollars?|currency/iu);
+  assert.match(report, /billing units \(not USD\): model multiplier ≥1\.25 · nano AIU ≥100/u);
+  assert.match(report, /billing units \(not USD\): model multiplier 0\.5 · nano AIU 25/u);
+  assert.match(report, /Mission total .*billing units \(not USD\): model multiplier ≥1\.75 · nano AIU ≥125/u);
+  assert.doesNotMatch(report, /dollars?|currency/iu);
+  const compactActive = (await formatCopilotTeamView(project, runtime)).replace(/\s+/gu, " ");
+  assert.match(compactActive, /billing units \(not USD\): model multiplier ≥1\.25 · nano AIU ≥100/u);
+  assert.match(compactActive, /billing units \(not USD\): model multiplier 0\.5 · nano AIU 25/u);
+  runtime.finishIfOpen(child, "completed");
+  runtime.finishIfOpen(root, "completed");
+  const compactMission = (await formatCopilotTeamView(project, runtime)).replace(/\s+/gu, " ");
+  assert.match(compactMission, /Mission: .*billing units \(not USD\): model multiplier ≥1\.75 · nano AIU ≥125/u);
 });
 
 test("Copilot counters saturate safely and mark hostile or overflowing native values as uncertain", () => {
@@ -610,7 +758,7 @@ test("Copilot counters saturate safely and mark hostile or overflowing native va
   assert.ok(snapshot.billingLowerBounds.includes("totalNanoAiu"));
   const report = formatCopilotMissionReport(runtime, run);
   assert.doesNotMatch(`${JSON.stringify(snapshot)}\n${report}`, /Infinity|NaN|∞/u);
-  assert.match(report, /model-multiplier cost\s+≥1\.797693e\+308/u);
+  assert.match(report, /billing units \(not USD\): model multiplier\s+≥1\.797693e\+308/u);
   assert.match(report, /nano AIU ≥/u);
 });
 
@@ -649,7 +797,9 @@ test("Copilot team view shows deterministic roster, live hierarchy, filters, and
     assert.match(baseOverview, /^Host default: gpt-host \(inherited\) · reasoning medium$/mu);
     assert.match(baseOverview, /^LEAD ACCESS$/mu);
     assert.match(baseOverview, /^ACTIVITY$/mu);
-    assert.match(baseOverview, /^Commands:/mu);
+    assert.match(baseOverview, /^Inspect\/run:/mu);
+    assert.match(baseOverview, /^Roster\/catalog:/mu);
+    assert.doesNotMatch(baseOverview, /^\s*·/mu, "base overview has an orphan separator line");
     assert.doesNotMatch(baseOverview, /Capacity:|Repair:/u);
     assert.ok(baseOverview.split("\n").length <= 30, baseOverview);
     assert.ok(baseOverview.split("\n").every((line) => visibleTextWidth(line) <= 96));
@@ -713,17 +863,22 @@ test("Copilot team view shows deterministic roster, live hierarchy, filters, and
       nextMaxOutputTokens: 32_000,
     });
     assert.match(view, /Agent Harbor Copilot team .*0 model tokens/u);
-    assert.match(view, /Enabled specialists: 3 · 6 sequential delegations · Can delegate now: none/u);
+    assert.match(view, /Specialists 3 · lead cap 6 · Can delegate now: none/u);
     assert.match(view, /Selection gate: child run copilot-run-2 is active/u);
-    assert.match(view, /Busy \(double-booking blocked\): privacy-reviewer/u);
+    assert.match(view.replace(/\s+/gu, " "), /Busy \(double-booking blocked\): privacy-reviewer/u);
     assert.match(view, /SDLC coverage: 1\/6 enabled · 5 benched/u);
-    assert.match(view, /team-lead · copilot-run-1 · working/u);
-    assert.match(view, /privacy-reviewer · copilot-run-2 · working/u);
-    assert.match(view, /gpt-host \(inherited\) · calls 1 · tok 5/u);
-    assert.match(view, /gpt-child \(observed\) · tok — \(unverified\)/u);
+    assert.match(view, /team-lead\/copilot-run-1 · working/u);
+    assert.match(view, /privacy-reviewer\/copilot-run-2 · working/u);
+    const rootDetail = await formatCopilotTeamView(project, runtime, { filter: `run:${root}` });
+    assert.match(rootDetail.replace(/\s+/gu, " "),
+      /Model: gpt-host \((?:configured|inherited)\).*Reasoning: reasoning effort medium \((?:observed|inherited)\)/u);
+    const childDetail = await formatCopilotTeamView(project, runtime, { filter: `run:${child}` });
+    assert.match(childDetail.replace(/\s+/gu, " "),
+      /Model: gpt-child \(observed\).*Reasoning: reasoning effort unknown/u);
+    assert.match(childDetail, /Usage: in — · out — · reason — · cache r\/w —\/— · total —/u);
     assert.match(view, /2 active \(2 working\)/u);
     assert.doesNotMatch(view, /Task:|Capacity:|configured\s+gpt-crafter/u);
-    assert.match(view, /Details: \/team member:<id> · activity\/history: \/team run:<id>/u);
+    assert.match(view, /Actions: \/team member:<id>\|run:<id>\|page:N/u);
     assert.doesNotMatch(view, /secret\\input/u);
     assert.ok(view.split("\n").length <= 30, view);
     assert.ok(view.split("\n").every((line) => visibleTextWidth(line) <= 96));
@@ -732,11 +887,11 @@ test("Copilot team view shows deterministic roster, live hierarchy, filters, and
     assert.match(filtered, /Overall Team/u);
     assert.match(filtered, /privacy-reviewer/u);
     assert.doesNotMatch(filtered, /● crafter ·/u);
-    assert.match(filtered, /Enabled specialists: 3 · mission budget: up to 6 sequential delegations/u);
-    assert.match(filtered, /Eligible specialists: crafter, build, privacy-reviewer/u);
-    assert.match(filtered, /Can delegate now: none · child run copilot-run-2 is active/u);
+    assert.match(filtered, /Enabled specialists: 3 · 6 sequential delegations · Can delegate now: none/u);
+    assert.match(filtered, /Selection gate: child run copilot-run-2 is active; wait for its terminal event/u);
     assert.match(filtered, /Task: “Review \[path\]”/u);
     assert.match(filtered, /configured\s+gpt-crafter-with-a-very-long-but-valid-configured-model-alias/u);
+    assert.ok(filtered.split("\n").length <= maximumCopilotTeamOverviewLines);
 
     const textFilter = await formatCopilotTeamView(project, runtime, { filter: "read" });
     assert.match(textFilter, /^● crafter · fixed · ready$/mu);
@@ -770,7 +925,7 @@ test("Copilot team view shows deterministic roster, live hierarchy, filters, and
     assert.doesNotMatch(statusReady, /^● team-lead · manager/mu);
     assert.doesNotMatch(statusReady, /^● privacy-reviewer · personal/mu);
     const stateWorking = await formatCopilotTeamView(project, runtime, { filter: "state:working" });
-    assert.match(stateWorking, /^● team-lead · copilot-run-1 · working ·/mu);
+    assert.match(stateWorking, /^● team-lead\/copilot-run-1 · working ·/mu);
     assert.match(stateWorking, /^● team-lead · manager · working$/mu);
     assert.match(stateWorking, /^● privacy-reviewer · personal · working$/mu);
     assert.doesNotMatch(stateWorking, /^● crafter · fixed/mu);
@@ -800,12 +955,17 @@ test("Copilot team view shows deterministic roster, live hierarchy, filters, and
       "run filters must not search the agent field");
 
     const flattenedOverviewFooter = view.replace(/\s+/gu, " ");
-    assert.match(flattenedOverviewFooter, /Commands: \/<id> <task> · \/team help\|<filter>\|stop <run\|all>/u);
-    assert.match(flattenedOverviewFooter, /\/bench · \/join · \/retire · \/scout · \/contract · \/list-skills/u);
+    assert.match(flattenedOverviewFooter,
+      /Actions: \/team member:<id>\|run:<id>\|page:N · \/<id> <task> · \/team stop <run\|all> · help/u);
     const flattenedDetailFooter = filtered.replace(/\s+/gu, " ");
-    assert.match(flattenedDetailFooter, /Commands: \/team \[filter\] · \/team help\|--help/u);
-    assert.match(flattenedDetailFooter, /\/list-skills \[--descriptions\|-d\] \[filter\]/u);
-    assert.match(flattenedDetailFooter, /\/bench list \[filter\] · \/bench on\|off <id\.\.\.>/u);
+    assert.match(flattenedDetailFooter,
+      /Inspect\/control: \/team \[filter\] · \/team help\|--help · \/team stop <run-id\|all> \(idle\/RPC\)/u);
+    assert.match(flattenedDetailFooter, /Catalog: \/list-skills \[--descriptions\|-d\] \[filter\]/u);
+    assert.match(flattenedDetailFooter,
+      /Roster: \/bench list \[filter\] · \/bench on\|off <id\.\.\.> · \/join <json> · \/retire <id>/u);
+    for (const footer of [view, filtered]) {
+      assert.doesNotMatch(footer, /^\s*·/mu, "a wrapped footer line starts with an orphan separator");
+    }
     const noMatch = await formatCopilotTeamView(project, runtime, { filter: "does-not-exist" });
     assert.match(noMatch, /Agent Harbor Copilot team · project-with-a-deliberately-long-name/u);
     assert.match(noMatch, /No team member or tracked activity matches/u);
@@ -828,7 +988,7 @@ test("Copilot team view shows deterministic roster, live hierarchy, filters, and
     });
     assert.match(degraded, /Native agent discovery\/coordinator is not ready/u);
     assert.match(degraded, /Can delegate now: none/u);
-    assert.doesNotMatch(degraded, /Can delegate now:.*crafter/u);
+    assert.doesNotMatch(degraded, /delegable .*crafter/u);
     assert.equal((degraded.match(/Repair: reload the Copilot session/gu) ?? []).length, 0,
       "a global discovery failure repeated the same repair on every roster row");
 
@@ -853,7 +1013,8 @@ test("Copilot team view shows deterministic roster, live hierarchy, filters, and
     runtime.finish(root, "completed");
     const history = await formatCopilotTeamView(project, runtime);
     assert.match(history, /LAST MISSION/u);
-    assert.match(history.replace(/\s+/gu, " "), /Mission: 2 tracked runs · total ≥17 native tokens · attribution unverified · details: \/team run:copilot-run-1/u);
+    assert.match(history, /Mission: 2 tracked runs · total ≥17 native tokens · attribution unverified/u);
+    assert.match(history, /^  \/team run:copilot-run-1$/mu);
     assert.ok(history.split("\n").every((line) => visibleTextWidth(line) <= 96));
 
     for (let index = 0; index < maximumVisibleCopilotOverviewRosterMembers + 4; index += 1) {
@@ -870,15 +1031,80 @@ test("Copilot team view shows deterministic roster, live hierarchy, filters, and
     assert.ok(shownPersonal <= maximumVisibleCopilotOverviewRosterMembers - baseIds.length);
     const totalPersonal = maximumVisibleCopilotOverviewRosterMembers + 4 + 1;
     assert.match(crowded, new RegExp(`\\+${totalPersonal - shownPersonal} personal members omitted`, "u"));
-    assert.match(crowded, /use \/team kind:personal or \/team member:<id>/u);
+    assert.match(crowded, /use \/team kind:personal page:1 or \/team member:<id>/u);
     assert.ok(crowded.split("\n").length <= maximumCopilotTeamOverviewLines,
       `crowded Copilot overview exceeded ${maximumCopilotTeamOverviewLines} wrapped lines`);
+
+    const reservedOverview = await formatCopilotTeamView(project, runtime, { totalLineBudget: 14 });
+    assert.ok(reservedOverview.split("\n").length <= 14);
+    assert.match(reservedOverview, /wrapped view lines omitted by the 14-line total budget/u);
+    assert.match(reservedOverview, /^Agent Harbor Copilot team/mu);
+    assert.ok(reservedOverview.split("\n").every((line) => visibleTextWidth(line) <= 96));
+
+    const unbudgetedBenchDetail = await formatCopilotTeamView(project, runtime, { title: "bench" });
+    assert.ok(unbudgetedBenchDetail.split("\n").length <= maximumCopilotTeamOverviewLines,
+      "a bench detail exceeded the default 30-line total budget");
+    assert.match(unbudgetedBenchDetail, /INDEX · page 1\/\d+ · showing \d+\/\d+/u);
+    assert.match(unbudgetedBenchDetail, /next \/bench list page:2/u,
+      "the bounded bench view lost its deterministic next-page route");
+    assert.ok(unbudgetedBenchDetail.split("\n").every((line) => visibleTextWidth(line) <= 96));
+    const reservedBenchDetail = await formatCopilotTeamView(project, runtime, {
+      title: "bench",
+      totalLineBudget: 14,
+    });
+    assert.ok(reservedBenchDetail.split("\n").length <= 14);
+    assert.match(reservedBenchDetail, /INDEX · page 1\/\d+ · showing \d+\/\d+/u);
+
     const crowdedDetail = await formatCopilotTeamView(project, runtime, { filter: "member:member-15" });
     assert.match(crowdedDetail, /^● member-15 · personal · ready$/mu);
     assert.match(crowdedDetail, /Capacity: read · model: inherits the Copilot host when run/u);
+    assert.ok(crowdedDetail.split("\n").length <= maximumCopilotTeamOverviewLines);
   } finally {
     if (previousHome === undefined) delete process.env.COPILOT_HOME;
     else process.env.COPILOT_HOME = previousHome;
+  }
+});
+
+test("Copilot compact activity keeps generated run IDs complete and copyable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harbor-copilot-copyable-run-"));
+  const home = join(root, "home");
+  const activityHome = join(root, "activity");
+  const previousHome = process.env.COPILOT_HOME;
+  const previousActivityHome = process.env.AGENT_HARBOR_ACTIVITY_HOME;
+  process.env.COPILOT_HOME = home;
+  process.env.AGENT_HARBOR_ACTIVITY_HOME = activityHome;
+  try {
+    const project = root;
+    new Roster(harnessSpec("copilot", home, project));
+    const runtime = new CopilotTeamRuntime();
+    (runtime as unknown as { sequence: number }).sequence = 9_999;
+    const runId = runtime.begin({
+      project,
+      agent: "contractor",
+      kind: "contractor",
+      task: "Verify copyable run identity",
+      model: "openai/gpt-5.4-mini",
+      reasoningEffort: "high",
+    });
+    runtime.setState(runId, "working");
+    assert.equal(runId, "copilot-run-10000");
+
+    const overview = await formatCopilotTeamView(project, runtime);
+    assert.match(overview, /contractor\/copilot-run-10000 \u00b7 working/u);
+    assert.match(overview, /\/team run:copilot-run-10000/u);
+    assert.doesNotMatch(overview, /copilot-run-1000…/u);
+    assert.doesNotMatch(overview, /gpt-5\.4-mi…/u);
+    assert.ok(overview.split("\n").every((line) => visibleTextWidth(line) <= 96));
+
+    const detail = await formatCopilotTeamView(project, runtime, { filter: `run:${runId}` });
+    assert.match(detail, new RegExp(`run ${runId}\\b`, "u"));
+    assert.match(detail.replace(/\s+/gu, " "),
+      /Model: openai\/gpt-5\.4-mini \(inherited\).*Reasoning: reasoning effort high \(inherited\)/u);
+  } finally {
+    if (previousHome === undefined) delete process.env.COPILOT_HOME;
+    else process.env.COPILOT_HOME = previousHome;
+    if (previousActivityHome === undefined) delete process.env.AGENT_HARBOR_ACTIVITY_HOME;
+    else process.env.AGENT_HARBOR_ACTIVITY_HOME = previousActivityHome;
   }
 });
 

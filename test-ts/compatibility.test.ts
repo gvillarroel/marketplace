@@ -380,7 +380,10 @@ test("distribution declares native TypeScript entrypoints", async () => {
   assert.equal(manifest.engines.node, ">=22.19.0");
   assert.equal(manifest.dependencies["@github/copilot-sdk"], "1.0.6");
   assert.equal(manifest.dependencies["@opencode-ai/plugin"], "1.18.3");
-  assert.equal(manifest.peerDependencies["@earendil-works/pi-coding-agent"], "0.80.10");
+  assert.equal(
+    manifest.peerDependencies["@earendil-works/pi-coding-agent"],
+    "0.80.10 || 0.81.1",
+  );
   assert.match(manifest.scripts["test:live:lead"], /run-live-lead\.mjs/);
   assert.match(manifest.scripts.test, /run-tests\.mjs/);
   assert.doesNotMatch(manifest.scripts.test, /&&|npm run/);
@@ -466,7 +469,11 @@ test("Copilot plugins expose canonical commands and extension-owned custom tools
   const marketplace = JSON.parse(await readFile(join(root, ".github", "plugin", "marketplace.json"), "utf8"));
   const marketplaceVersions = new Map<string, string>(marketplace.plugins.map((plugin: any) => [plugin.name, plugin.version]));
   for (const manifest of manifests) assert.equal(marketplaceVersions.get(manifest.name), manifest.version);
-  assert.equal(marketplace.metadata.version, "0.12.0");
+  assert.equal(marketplace.metadata.version, "0.12.1");
+  assert.equal(
+    await readFile(join(plugins, "agent-foundry", "LICENSE"), "utf8"),
+    await readFile(join(root, "LICENSE"), "utf8"),
+  );
   await Promise.all([
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot.js")),
     access(join(plugins, "agent-foundry", "runtime", "dist", "adapters", "copilot-coordinator.js")),
@@ -491,7 +498,7 @@ test("Copilot plugins expose canonical commands and extension-owned custom tools
   assert.match(extension, /\? "copilot" : "plain"/);
   assert.match(extension, /Agent Harbor · skill catalog · 0 model tokens/);
   assert.match(extension, /createCopilotCoordinatorGuard/);
-  assert.match(extension, /hooks: coordinator\.hooks/);
+  assert.match(extension, /\.\.\.coordinator\.hooks/);
   assert.match(extension, /coordinator\.observeEvent/);
   assert.match(extension, /event\.phase !== "target\.resolved"/);
   assert.match(extension, /type: "agent-harbor-guard"/);
@@ -537,6 +544,7 @@ test("Copilot runtimes contain exact physical byte copies of their shared build 
       "copilot-team-view.js",
       "copilot.js",
       "direct.js",
+      "opencode-agent-activity.js",
       "shared.js",
     ],
   }] as const;
@@ -638,6 +646,21 @@ test("every distribution has a direct zero-model bench entrypoint", async (t) =>
     succeeded(bench);
     assert.match(bench.stdout, /portfolio-management \| bundled \| bench/, harness);
   }
+});
+
+test("portable CLI usage separates deterministic commands from Copilot-only contract", async () => {
+  const launch = { command: process.execPath, prefix: [join(dist, "cli.js")] };
+  const usage = await run(launch, [], { cwd: root, timeout: 30_000 });
+  assert.equal(usage.code, 2);
+  assert.match(usage.stderr,
+    /agent-harbor <copilot\|opencode\|pi> <bench\|join\|retire\|list-skills> \[arguments\]/u);
+  assert.match(usage.stderr, /agent-harbor copilot contract <json>/u);
+  assert.doesNotMatch(usage.stderr,
+    /<copilot\|opencode\|pi> <[^>]*contract/u);
+
+  const inherited = await run(launch, ["opencode", "contract", "{}"], { cwd: root, timeout: 30_000 });
+  assert.equal(inherited.code, 1);
+  assert.match(inherited.stderr, /\/contract must run inside opencode/u);
 });
 
 test("Copilot native control performs deterministic shared contract preflight", async () => {
@@ -751,12 +774,13 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
       const layers: any[] = [];
       await installedTui.default.tui({ keymap: { registerLayer: (layer: unknown) => { layers.push(layer); return () => {}; } } } as any, undefined, {} as any);
       assert.deepEqual(layers[0].commands.map((command: any) => command.slashName), [
-        "team", "bench-list", "bench-on", "bench-off", "harbor-join", "harbor-retire", "harbor-list-skills", "harbor-filter-skills",
+        "team", "bench-list", "bench-on", "bench-off", "harbor-join", "harbor-retire", "contract", "harbor-list-skills", "harbor-filter-skills",
       ]);
       const config = await run(opencode!, ["debug", "config"], { cwd: directory, timeout: 60_000 });
       succeeded(config);
       const initial = JSON.parse(config.stdout);
-      assert.ok([...commands].every((name) => name in initial.command));
+      assert.ok([...commands].every((name) => !(name in initial.command)),
+        "deterministic and contract controls belong to the native TUI layer, never a model-routed server command");
       assert.ok([...rolePlayers.keys()].every((name) => name in initial.agent));
       assert.ok([...rolePlayers.keys()].every((name) => initial.command[name]?.agent === name));
       assert.equal(initial.agent["team-lead"].tools["*"], false);
@@ -784,7 +808,18 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
     t.test("Pi", { skip: pi ? false : "Pi CLI is not installed" }, async (child) => {
       const directory = await mkdtemp(join(tmpdir(), "harbor-pi-native-"));
       child.after(() => rm(directory, { recursive: true, force: true }));
-      const env = { ...process.env, PI_CODING_AGENT_DIR: join(directory, "pi-home") };
+      const env = {
+        ...process.env,
+        PI_CODING_AGENT_DIR: join(directory, "pi-home"),
+        AGENT_HARBOR_ACTIVITY_HOME: join(directory, "activity"),
+        // This installed-runtime probe is deliberately model-free. Pi 0.81.1
+        // otherwise starts a background catalog refresh in RPC mode, then calls
+        // process.exit() on stdin EOF; Node on Windows can assert while the
+        // refresh's fetch handle is closing (nodejs/node#56645). Offline mode is
+        // Pi's supported switch for deterministic startup without that network
+        // work, while preserving the same extension/RPC shutdown path.
+        PI_OFFLINE: "1",
+      };
       if (pi!.prefix[0]?.endsWith(".js")) {
         const sdk = await import(pathToFileURL(join(dirname(pi!.prefix[0]), "index.js")).href);
         assert.equal(typeof sdk.createAgentSession, "function");
