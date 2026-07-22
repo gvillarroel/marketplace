@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 import unicodedata
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -100,14 +100,14 @@ CANONICAL_PUBLIC_CAPTURE_PATHS = {
     "copilot-home": Path(r"C:\team-demo-home"),
 }
 CANONICAL_VISIBLE_CAPTURE_PATHS = {
-    label: Path(f"R:\\{path.name}")
+    label: Path(f"R:\\{PureWindowsPath(path).name}")
     for label, path in CANONICAL_PUBLIC_CAPTURE_PATHS.items()
 }
 
 # Both names are intentionally public. R: is the visible capture alias and C:
 # is the exact expanded root shown by Copilot's extension-permission dialog.
 PUBLIC_WINDOWS_PATH_ROOTS = tuple(
-    f"{drive}:\\{path.name}"
+    f"{drive}:\\{PureWindowsPath(path).name}"
     for drive in ("R", "C")
     for path in CANONICAL_PUBLIC_CAPTURE_PATHS.values()
 )

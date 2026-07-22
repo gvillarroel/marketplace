@@ -288,7 +288,11 @@ def privacy_failures(
     private_markers = {
         variant
         for path in private_paths
-        for variant in (str(path.absolute()), str(path.resolve(strict=False)))
+        for variant in (
+            rendered_path(path),
+            str(path.absolute()),
+            str(path.resolve(strict=False)),
+        )
         if variant and not any(_path_is_within(variant, root) for root in public_roots)
     }
     home = str(Path.home().resolve())
