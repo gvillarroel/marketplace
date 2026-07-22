@@ -3420,7 +3420,6 @@ test("Pi stop keeps abort-ignoring work cleaning until real settlement and block
           promise,
           new Promise<never>((_resolve, reject) => {
             timer = setTimeout(() => reject(new Error("Pi command remained hung after stop")), 1_000);
-            timer.unref?.();
           }),
         ]);
       } finally {

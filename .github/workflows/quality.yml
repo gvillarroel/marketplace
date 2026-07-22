@@ -36,3 +36,7 @@ jobs:
 
       - name: Run tests
         run: npm test
+        # This workflow does not provision supported Copilot, OpenCode, or Pi
+        # versions; ignore ambient runner binaries and keep those probes local.
+        env:
+          AGENT_HARBOR_SKIP_NATIVE_CLI_TESTS: "1"

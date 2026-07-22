@@ -762,7 +762,6 @@ export async function settlePiRootPromises(
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<false>((resolve) => {
     timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
-    timer.unref?.();
   });
   try {
     return await Promise.race([

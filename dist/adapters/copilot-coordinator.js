@@ -331,7 +331,6 @@ async function boundedCoordinatorRpc(label, action, timeoutMs = coordinatorRpcTi
             Promise.resolve().then(action),
             new Promise((_, reject) => {
                 timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
-                timer.unref?.();
             }),
         ]);
     }

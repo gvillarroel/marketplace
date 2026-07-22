@@ -1218,7 +1218,7 @@ test("Pi team view separates local roots from shared claims and routes external 
     externalClaim = undefined;
     legacy.version = 1;
     delete legacy.ownerRuntime;
-    await writeFile(externalClaimPath, JSON.stringify(legacy), "utf8");
+    await writeFile(externalClaimPath, JSON.stringify(legacy), { encoding: "utf8", mode: 0o600 });
     const legacyView = await formatPiTeamView(project, runtime, { filter: `run:${externalRunID}` });
     assert.match(legacyView.replace(/\s+/gu, " "),
       new RegExp(`owner runtime unverified \\(legacy claim\\) · PID ${process.pid}; stop in that owning Pi/Copilot process`, "u"));
@@ -1229,7 +1229,7 @@ test("Pi team view separates local roots from shared claims and routes external 
 
     const storeSecret = "STORE_SECRET_7c5f118c_never_render";
     const privateStorePath = "C:\\Users\\alice\\private-customer\\activity.json";
-    await writeFile(externalClaimPath, JSON.stringify({ storeSecret, privateStorePath }), "utf8");
+    await writeFile(externalClaimPath, JSON.stringify({ storeSecret, privateStorePath }), { encoding: "utf8", mode: 0o600 });
     const corruptView = await formatPiTeamView(project, runtime);
     const flattenedCorrupt = corruptView.replace(/\s+/gu, " ");
     assert.match(flattenedCorrupt, /Activity store diagnostic: .*invalid .*activity claim/iu);

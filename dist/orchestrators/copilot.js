@@ -25,7 +25,6 @@ function withDeadline(label, operation, timeoutMs) {
         const timer = setTimeout(() => {
             reject(new CopilotOperationDeadlineError(label, timeoutMs));
         }, timeoutMs);
-        timer.unref?.();
         operation.then((value) => { clearTimeout(timer); resolvePromise(value); }, (error) => { clearTimeout(timer); reject(error); });
     });
 }

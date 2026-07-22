@@ -709,10 +709,16 @@ test("compiled Copilot profiles bind custom skill tools without transport server
 });
 
 test("installed CLIs discover the native packages", { concurrency: true }, async (t) => {
-  const [copilot, opencode, pi] = await Promise.all([executable("copilot"), executable("opencode"), executable("pi")]);
+  const skipNativeCliTests = process.env.AGENT_HARBOR_SKIP_NATIVE_CLI_TESTS === "1";
+  const [copilot, opencode, pi] = skipNativeCliTests
+    ? [undefined, undefined, undefined]
+    : await Promise.all([executable("copilot"), executable("opencode"), executable("pi")]);
+  const skipReason = (launch: Launch | undefined, name: string): false | string => skipNativeCliTests
+    ? "Native CLI probes were explicitly disabled because this environment does not provision them"
+    : launch ? false : `${name} CLI is not installed`;
 
   await Promise.all([
-    t.test("Copilot", { skip: copilot ? false : "Copilot CLI is not installed" }, async () => {
+    t.test("Copilot", { skip: skipReason(copilot, "Copilot") }, async () => {
       const result = await run(copilot!, [
         "--plugin-dir", join(plugins, "agent-foundry"),
         "plugin", "list",
@@ -757,7 +763,7 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
         await rm(sandbox, { recursive: true, force: true });
       }
     }),
-    t.test("OpenCode", { skip: opencode ? false : "OpenCode CLI is not installed" }, async (child) => {
+    t.test("OpenCode", { skip: skipReason(opencode, "OpenCode") }, async (child) => {
       const directory = await mkdtemp(join(tmpdir(), "harbor-opencode-native-"));
       child.after(() => rm(directory, { recursive: true, force: true }));
       succeeded(await run(opencode!, ["plugin", `file:${root}`], { cwd: directory, timeout: 60_000 }));
@@ -805,7 +811,7 @@ test("installed CLIs discover the native packages", { concurrency: true }, async
       assert.equal(discovered.agent["portfolio-management"].tools.harbor_delegate, false);
       assert.equal(discovered.agent["portfolio-management"].tools["*"], false);
     }),
-    t.test("Pi", { skip: pi ? false : "Pi CLI is not installed" }, async (child) => {
+    t.test("Pi", { skip: skipReason(pi, "Pi") }, async (child) => {
       const directory = await mkdtemp(join(tmpdir(), "harbor-pi-native-"));
       child.after(() => rm(directory, { recursive: true, force: true }));
       const env = {
