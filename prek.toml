@@ -1,0 +1,29 @@
+minimum_prek_version = "0.4.10"
+default_install_hook_types = ["pre-commit", "pre-push"]
+default_stages = ["pre-commit"]
+
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "check-added-large-files", args = ["--maxkb=1024", "--enforce-all"], exclude = '^docs/assets/agent-harbor-commands\.(gif|mp4)$' },
+  { id = "check-case-conflict" },
+  { id = "check-illegal-windows-names" },
+  { id = "check-merge-conflict", args = ["--assume-in-merge"] },
+  { id = "check-symlinks" },
+  { id = "destroyed-symlinks" },
+  # This test contains synthetic key delimiters to prove public output redaction.
+  { id = "detect-private-key", exclude = '^test-ts/public-metadata\.test\.ts$' },
+  { id = "check-json" },
+  { id = "check-toml" },
+  { id = "check-yaml" },
+  { id = "fix-byte-order-marker" },
+  { id = "mixed-line-ending", args = ["--fix=no"] },
+  { id = "trailing-whitespace", args = ["--markdown-linebreak-ext=md"] },
+  { id = "end-of-file-fixer" },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  { id = "typescript-typecheck", name = "TypeScript typecheck", entry = "npm run typecheck", language = "system", pass_filenames = false, stages = ["pre-push"] },
+]

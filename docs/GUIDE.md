@@ -454,6 +454,34 @@ CLI for deterministic controls. Its Copilot `/contract` entrypoint is the only
 CLI path that starts an SDK model session; OpenCode and Pi contracts must run in
 their hosts. Users still install through each harness's native mechanism.
 
+## Development quality checks
+
+Install dependencies and register the repository's Git hooks once per clone:
+
+```shell
+npm ci
+npm run quality:install
+```
+
+The repository pins `prek` in `package-lock.json`; no separate Python or Rust
+installation is required. Before opening a pull request, run the same whole-tree
+gate used by CI:
+
+```shell
+npm run quality
+npm run typecheck
+npm test
+```
+
+The pre-commit hooks validate JSON, YAML, and TOML; reject merge markers,
+case-conflicting or Windows-invalid paths, broken symlinks, private keys, mixed
+line endings, byte-order marks, trailing whitespace, and missing final
+newlines. They also reject tracked files larger than 1 MiB. The two published
+command-demo assets under `docs/assets/` are exact, explicit exceptions because
+they are already versioned release evidence; new or renamed oversized assets
+remain blocked. The pre-push hook adds the TypeScript typecheck, while CI runs
+all checks plus the complete offline test suite.
+
 ## Tests
 
 Run a clean TypeScript build, the contract/security suite, and native discovery tests:

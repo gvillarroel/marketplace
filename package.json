@@ -41,6 +41,8 @@
     "test:capture": "node scripts/run-capture-tests.mjs",
     "test:capture:package": "node scripts/verify-packaged-capture.mjs",
     "typecheck": "tsc --noEmit",
+    "quality": "prek run --all-files",
+    "quality:install": "prek install --prepare-hooks",
     "test:ts": "node scripts/run-test-suite.mjs",
     "test:live:lead": "node scripts/run-live-lead.mjs",
     "test:live:opencode": "node scripts/run-live-codex-leads.mjs opencode",
@@ -81,6 +83,7 @@
     }
   },
   "devDependencies": {
+    "@j178/prek": "0.4.10",
     "@types/node": "^26.1.1",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2"

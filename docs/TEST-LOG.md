@@ -348,3 +348,26 @@ Final ignored evidence is retained under
 `work/copilot-real-final-20260722-0813-active/`,
 `work/opencode-lifecycle-20260722-081729-80f3b1a3a506/`, and
 `work/opencode-real-final-20260722-0822/`.
+
+## Prek repository quality gate
+
+Recorded at `2026-07-22T15:46:16-04:00` after installing the pinned npm binary,
+registering both Git shims, and exercising the local and CI-equivalent paths.
+
+| Command or check | Result |
+| --- | --- |
+| `npm ci` | Passed: 41 packages installed from the lockfile; 0 vulnerabilities |
+| `prek validate-config prek.toml` | Passed |
+| `npm run quality` | Passed: all 14 whole-tree builtin hooks |
+| Explicit `prek.toml` and workflow check | Passed: TOML and YAML validation included the new untracked files |
+| `actionlint` 1.7.12 | Passed: `.github/workflows/quality.yml` |
+| Pre-push stage | Passed: repository checks and `typescript-typecheck` |
+| `npm test` clean-build canonical gate | Passed: 498 tests, 0 failed, 0 skipped, 0 cancelled; 73 capture-hardening tests passed; TypeScript TAP duration 123,123.834 ms |
+| Installed-CLI compatibility retry | Passed: 14/14 focused tests, including Copilot, OpenCode, and Pi |
+| `npm audit --audit-level=high` | Passed: 0 vulnerabilities |
+| `npm pack --dry-run --json --silent` | Passed: 165 entries, 6,899,252 bytes packed, 9,163,628 bytes unpacked |
+
+The first concurrent full-suite attempt reported the three installed-CLI
+discovery subtests as failures. The focused compatibility file then passed all
+14 tests, and a subsequent complete clean-build run passed all 498 tests. No
+product change was needed for that transient local integration result.
