@@ -1,0 +1,56 @@
+{
+  "holdoutReleased": false,
+  "ledger": {
+    "eventCount": 7,
+    "headSha256": "b9466c72c6433d2ad4176ef367d4a7fc9cc8b577e2190502667329e51054dc65"
+  },
+  "progress": {
+    "completedCount": 1,
+    "completionPercent": 100.0,
+    "stageCount": 1
+  },
+  "publicationPolicy": "indexes-and-result-tables-only-v1",
+  "resultIndex": [
+    {
+      "artifactType": "file",
+      "byteCount": 6585,
+      "evidenceId": "evaluation-inventory-v1",
+      "fileCount": 1,
+      "kind": "other",
+      "role": "publication",
+      "sha256": "08abd17c0ee71185642a17f1cc462a5e8d28c11fd244c4499444046f87960441",
+      "stageId": "published-current-evidence-inventory",
+      "visibility": "public"
+    },
+    {
+      "artifactType": "file",
+      "byteCount": 23267,
+      "evidenceId": "historical-test-log-v1",
+      "fileCount": 1,
+      "kind": "final-report",
+      "role": "report",
+      "sha256": "1f21a7924e842c6ff0e514e869f60dfc2c620bab11b791feb51d87d37f8c56cb",
+      "stageId": "published-current-evidence-inventory",
+      "visibility": "public"
+    },
+    {
+      "artifactType": "file",
+      "byteCount": 6091,
+      "evidenceId": "status-2026-07-22-v1",
+      "fileCount": 1,
+      "kind": "final-report",
+      "role": "report",
+      "sha256": "22d14d7a3f540bde163d9c6f1746319550be876f68dcfbda011500fb5eb0b754",
+      "stageId": "published-current-evidence-inventory",
+      "visibility": "public"
+    }
+  ],
+  "resultTables": [],
+  "schemaVersion": 1,
+  "study": {
+    "comparisonProfile": "historical-evidence-catalog-v1",
+    "createdAt": "2026-07-26T21:45:49Z",
+    "studyId": "agent-harbor-current-evidence-v1",
+    "title": "Agent Harbor current evaluation evidence catalog"
+  }
+}

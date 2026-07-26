@@ -18,5 +18,8 @@
 - [Simplification plan](SIMPLIFICATION-PLAN.md): scope and metrics for the core
   simplification.
 - [Test evidence](TEST-LOG.md): recorded validations and results.
+- [Evaluation inventory](EVALUATIONS.md): classified current evidence, known
+  limits, Git-safe study organization, and the protocol for future native
+  Harbor evaluations.
 - [Status report — 2026-07-22](STATUS-2026-07-22.md): dated application
   readiness, runtime evidence, risks, and release follow-up.

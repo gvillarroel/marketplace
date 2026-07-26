@@ -1,0 +1,12 @@
+# Harbor study publication allowlist.
+# Raw evaluations, datasets, locks, ledgers, status views, jobs, traces,
+# candidates, diagnostics, and all other study artifacts stay local.
+*
+!/.gitignore
+!/publication/
+!/publication/index.json
+!/publication/index.md
+!/publication/tables/
+!/publication/tables/*.table.csv
+!/publication/tables/*.table.tsv
+!/publication/tables/*.table.md

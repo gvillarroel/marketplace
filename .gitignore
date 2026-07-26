@@ -6,3 +6,4 @@ __pycache__/
 .tmp-pi-test/
 .tmp-accept-opencode/
 .tmp-accept-pi/
+/.pi/

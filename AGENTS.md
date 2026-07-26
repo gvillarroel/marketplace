@@ -55,3 +55,10 @@ ownership/drift, Ruler para adapters, Skillshare para distribución y `gh skill`
 para adquisición de skills privadas—, pero se debe conservar el core de Agent
 Harbor y volver a validar cualquier integración con un POC de colisiones,
 actualización, cleanup y descubrimiento real en los tres runtimes.
+
+## Update Access Scope
+
+- Writable project root: `C:\Users\villa\dev\marketplace`.
+- Agents may create, modify, move, or delete files only inside this root and its descendants when the task requires it.
+- Treat paths outside this root as read-only unless the user explicitly authorizes a broader scope.
+- A reference to another repository or shared tool does not grant write access to it.
