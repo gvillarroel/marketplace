@@ -2,8 +2,7 @@
 /work/
 __pycache__/
 *.pyc
-.tmp-opencode-test/
-.tmp-pi-test/
-.tmp-accept-opencode/
-.tmp-accept-pi/
-/.pi/
+
+# Dot-prefixed files and directories are local/runtime artifacts.
+.*
+!/.gitignore
