@@ -6,3 +6,8 @@ __pycache__/
 # Dot-prefixed files and directories are local/runtime artifacts.
 .*
 !/.gitignore
+!/.github/
+!/.github/plugin/
+!/.github/plugin/marketplace.json
+!/.github/workflows/
+!/.github/workflows/quality.yml
