@@ -1,5 +1,15 @@
 # Agent Harbor documentation
 
+## Start here
+
+- [Usage and setup](getting-started.md)
+- [Repository layout, maintenance, and validation](repository-guide.md)
+- [Agent instructions](../AGENTS.md)
+- [Architecture](ARCHITECTURE.md)
+- [Commands and advanced use](GUIDE.md)
+- [Copilot demo](ASCIINEMA-DEMO.md)
+
+
 - [Complete guide](GUIDE.md): runtimes, commands, roster, personal agents,
   disposable contracts, and trusted skills.
 - [Requirements](REQUIREMENTS.md): normative product, security, lifecycle, and
