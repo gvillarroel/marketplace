@@ -83,20 +83,33 @@ confunda con evidencia experimental nativa.
 
 ## Protocolo para la próxima evaluación nativa
 
-1. Crear un estudio nuevo, sin reutilizar el catálogo histórico.
-2. Declarar un `comparisonProfile` estable que fije tareas, agente, modelo,
+1. Usar la skill
+   [`harbor-author-evaluation-datasets`](../skills/harbor-author-evaluation-datasets/SKILL.md)
+   para definir familias semánticas, perfiles de respuesta y variantes
+   deterministas antes de registrar tareas.
+2. Crear un estudio nuevo, sin reutilizar el catálogo histórico.
+3. Declarar un `comparisonProfile` estable que fije tareas, agente, modelo,
    métrica, attempts, retries y gates.
-3. Registrar todos los datasets antes de ejecutar una etapa y comprobar que no
+4. Registrar todos los datasets antes de ejecutar una etapa y comprobar que no
    se solapan por ruta, task ID o digest.
-4. Reservar `discovery`, `development` y, si corresponde, `validation` para
-   trabajo visible al optimizador.
-5. Mantener el holdout sin inspeccionar y sin ejecutar hasta que una selección
-   de desarrollo completada quede ligada por digest.
-6. Delegar baseline, comparación y reportes a `harbor-run-results`; usar la
+5. Permitir que solamente `discovery` y `development` sean visibles al
+   optimizador. Mantener `validation` sellado hasta que un único candidato
+   seleccionado quede congelado y ligado por digest; su resultado es un gate
+   de una sola vía y no puede alimentar otra mutación en el mismo estudio.
+6. Mantener `holdout` como un gate final opcional, sin inspeccionar ni
+   ejecutar hasta que validation haya finalizado satisfactoriamente.
+7. Delegar baseline, validation, comparación y reportes a
+   `harbor-run-results`; usar la
    skill propietaria de cualquier evolución o recovery.
-7. Publicar únicamente índices sin rutas y tablas agregadas revisadas. Jobs,
+8. Publicar únicamente índices sin rutas y tablas agregadas revisadas. Jobs,
    trials, prompts, respuestas, trazas, diagnósticos y credenciales permanecen
    fuera de Git.
+9. Después de que el límite de liberación lo permita, ejecutar
+   `consolidate_harbor_reports.py` solamente sobre `final-report.json`
+   finalizados. Revisar juntos los SVG de calidad, recursos y frontera de
+   eficiencia: muestran errores, tokens, coste USD reportado, tiempo del
+   agente, tiempo de pared, throughput y deltas, sin convertir esas métricas en
+   una recompensa nueva ni revelar filas por tarea.
 
 Este orden hace que una futura afirmación de mejora pueda rastrearse hasta
 datasets congelados, una selección previa al holdout y reportes nativos, sin

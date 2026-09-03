@@ -31,5 +31,9 @@
 - [Evaluation inventory](EVALUATIONS.md): classified current evidence, known
   limits, Git-safe study organization, and the protocol for future native
   Harbor evaluations.
+- [Harbor evaluation dataset authoring and report skill](../skills/harbor-author-evaluation-datasets/SKILL.md):
+  construct group-disjoint development, sealed validation, and optional
+  holdout task roots, then create aggregate token/cost/time SVG comparisons
+  from finalized native reports after release.
 - [Status report — 2026-07-22](STATUS-2026-07-22.md): dated application
   readiness, runtime evidence, risks, and release follow-up.

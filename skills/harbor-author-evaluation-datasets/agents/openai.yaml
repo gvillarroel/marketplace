@@ -1,0 +1,4 @@
+interface:
+  display_name: "Harbor Author Evaluation Datasets"
+  short_description: "Build and compare leakage-resistant Harbor evaluations"
+  default_prompt: "Use $harbor-author-evaluation-datasets to design and audit reproducible Harbor datasets for skill evolution, or to consolidate finalized native reports into privacy-safe aggregate comparisons."
