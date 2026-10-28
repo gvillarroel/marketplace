@@ -5,6 +5,7 @@
 - [Usage and setup](getting-started.md)
 - [Repository layout, maintenance, and validation](repository-guide.md)
 - [Shared skills for Codex and Copilot](shared-skills-marketplace.md): install overlapping plugin selections from this GitHub marketplace; [native GitHub acceptance results](validation/shared-skills/report.md).
+- [Nexus ZIP distribution](nexus-zip-marketplace.md): download/extract workflow for both CLIs, native ZIP limitations, and [real Nexus acceptance](validation/nexus-zip/report.md).
 - [Agent instructions](../AGENTS.md)
 - [Architecture](ARCHITECTURE.md)
 - [Commands and advanced use](GUIDE.md)

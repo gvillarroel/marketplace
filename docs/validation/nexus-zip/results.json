@@ -1,0 +1,196 @@
+{
+  "testedAt": "2026-10-28T23:51:25.992Z",
+  "baselineCommit": "217bbfe1d2e81cd1b155a176054586ce1a71d4f0",
+  "scope": "CLI tests on Windows; direct archive URLs fail; external ZIP extraction followed by native local registration succeeds",
+  "nexus": {
+    "image": "sonatype/nexus3:3.96.0",
+    "server": "Nexus/3.96.0-09 (COMMUNITY)",
+    "baseUrl": "http://127.0.0.1:32768",
+    "repository": "codex-plugin-zips",
+    "artifacts": [
+      {
+        "name": "SHA256SUMS",
+        "url": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/SHA256SUMS",
+        "sha256": "6399bddcbb7c12c79387feaba22d9e5c10ae0ac3b8daf82d0ab161bf804ecbee",
+        "bytes": 345,
+        "uploadedStatus": 201,
+        "downloadStatus": 200,
+        "server": "Nexus/3.96.0-09 (COMMUNITY)"
+      },
+      {
+        "name": "marketplace-bundle.zip",
+        "url": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/marketplace-bundle.zip",
+        "sha256": "0e40bd9e312815af637cf2747a31adedf232068b4e0c99e59bc5dd14f0eae0b5",
+        "bytes": 6056,
+        "uploadedStatus": 201,
+        "downloadStatus": 200,
+        "server": "Nexus/3.96.0-09 (COMMUNITY)"
+      },
+      {
+        "name": "marketplace.zip",
+        "url": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/marketplace.zip",
+        "sha256": "d8c6d99637bf1d10879ad622b5b80629736d65d3928e2c18c043ebb5df30457c",
+        "bytes": 1205,
+        "uploadedStatus": 201,
+        "downloadStatus": 200,
+        "server": "Nexus/3.96.0-09 (COMMUNITY)"
+      },
+      {
+        "name": "shared-example-a.zip",
+        "url": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/shared-example-a.zip",
+        "sha256": "67ae650cea4493f7ee3abdb2e0fa6a216a19a4728ceddb3cd121469edd6cb11a",
+        "bytes": 2310,
+        "uploadedStatus": 201,
+        "downloadStatus": 200,
+        "server": "Nexus/3.96.0-09 (COMMUNITY)"
+      },
+      {
+        "name": "shared-example-b.zip",
+        "url": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/shared-example-b.zip",
+        "sha256": "83843ae7c97f63a87bf4f44463701ce5ed4e9e6e26a4bbd6df11b0667a1bb852",
+        "bytes": 2231,
+        "uploadedStatus": 201,
+        "downloadStatus": 200,
+        "server": "Nexus/3.96.0-09 (COMMUNITY)"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "client": "codex",
+      "version": "codex-cli 0.145.0",
+      "source": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/marketplace.zip",
+      "archiveSha256": "d8c6d99637bf1d10879ad622b5b80629736d65d3928e2c18c043ebb5df30457c",
+      "verifiedInvocations": 4,
+      "membershipPassed": true,
+      "bIndependent": true,
+      "reverseOrderPassed": true,
+      "nativeSkillUsePassed": true
+    },
+    {
+      "client": "copilot",
+      "version": "GitHub Copilot CLI 1.0.103.\nRun 'copilot version' to check for updates.",
+      "source": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/marketplace.zip",
+      "archiveSha256": "d8c6d99637bf1d10879ad622b5b80629736d65d3928e2c18c043ebb5df30457c",
+      "verifiedInvocations": 4,
+      "membershipPassed": true,
+      "bIndependent": true,
+      "reverseOrderPassed": true,
+      "nativeSkillUsePassed": true
+    }
+  ],
+  "bundle": [
+    {
+      "client": "codex",
+      "source": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/marketplace-bundle.zip",
+      "sha256": "0e40bd9e312815af637cf2747a31adedf232068b4e0c99e59bc5dd14f0eae0b5",
+      "skills": [
+        {
+          "name": "shared-example-a:shared-example-1",
+          "description": "Verify shared plugin example skill 1 by reading its bundled proof file.",
+          "path": "<USER_HOME>\\.cx-test\\3sg2nB\\bmvsrgeczc\\plugins\\cache\\shared-skills-nexus\\shared-example-a\\1.0.0\\library\\shared-example-1\\SKILL.md",
+          "scope": "user",
+          "enabled": true
+        },
+        {
+          "name": "shared-example-a:shared-example-2",
+          "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+          "path": "<USER_HOME>\\.cx-test\\3sg2nB\\bmvsrgeczc\\plugins\\cache\\shared-skills-nexus\\shared-example-a\\1.0.0\\library\\shared-example-2\\SKILL.md",
+          "scope": "user",
+          "enabled": true
+        },
+        {
+          "name": "shared-example-b:shared-example-2",
+          "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+          "path": "<USER_HOME>\\.cx-test\\3sg2nB\\bmvsrgeczc\\plugins\\cache\\shared-skills-nexus\\shared-example-b\\1.0.0\\shared-example-2\\SKILL.md",
+          "scope": "user",
+          "enabled": true
+        },
+        {
+          "name": "shared-example-b:shared-example-3",
+          "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+          "path": "<USER_HOME>\\.cx-test\\3sg2nB\\bmvsrgeczc\\plugins\\cache\\shared-skills-nexus\\shared-example-b\\1.0.0\\shared-example-3\\SKILL.md",
+          "scope": "user",
+          "enabled": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "client": "copilot",
+      "source": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/marketplace-bundle.zip",
+      "sha256": "0e40bd9e312815af637cf2747a31adedf232068b4e0c99e59bc5dd14f0eae0b5",
+      "skills": [
+        {
+          "name": "shared-example-1",
+          "description": "Verify shared plugin example skill 1 by reading its bundled proof file.",
+          "source": "plugin",
+          "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-bundle\\plugins\\shared-example-a\\library\\shared-example-1",
+          "enabled": true
+        },
+        {
+          "name": "shared-example-a:shared-example-2",
+          "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+          "source": "plugin",
+          "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-bundle\\plugins\\shared-example-a\\library\\shared-example-2",
+          "enabled": true
+        },
+        {
+          "name": "shared-example-b:shared-example-2",
+          "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+          "source": "plugin",
+          "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-bundle\\plugins\\shared-example-b\\shared-example-2",
+          "enabled": true
+        },
+        {
+          "name": "shared-example-3",
+          "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+          "source": "plugin",
+          "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-bundle\\plugins\\shared-example-b\\shared-example-3",
+          "enabled": true
+        }
+      ],
+      "passed": true
+    }
+  ],
+  "authentication": {
+    "server": "Actual Nexus/3.96.0-09",
+    "source": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/marketplace.zip",
+    "anonymousStatus": 401,
+    "basicAuthenticatedExtractorStatus": 0,
+    "downloaded": {
+      "downloadedFrom": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/marketplace.zip",
+      "sha256": "d8c6d99637bf1d10879ad622b5b80629736d65d3928e2c18c043ebb5df30457c",
+      "directory": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-authenticated",
+      "marketplace": "shared-skills-nexus"
+    },
+    "passed": true
+  },
+  "sharedPathCollision": {
+    "expectedPlugin": "nexus-example-b",
+    "actualPlugin": "nexus-example-a",
+    "skill": "shared-example-2",
+    "exactToken": true,
+    "correctPluginLoaded": false
+  },
+  "repeatableFixtureTests": {
+    "command": "py -3 -m unittest discover -s tests -p test_nexus_zip.py -v",
+    "passed": 9,
+    "failed": 0,
+    "transport": "Loopback HTTP fixture; separate from the live Nexus proof"
+  },
+  "sourceFiles": [
+    {
+      "file": "scripts/shared-skills/pack-nexus.ps1",
+      "sha256": "87cfadc9c445609cdb63dabcd1936054cb80c7fdcbe207cdff8dc1661d77d292"
+    },
+    {
+      "file": "scripts/shared-skills/expand-nexus.ps1",
+      "sha256": "bbebae029a64ef0fbba9a18916ebe40aeb5e571c3ec6640ab087843c324e491d"
+    },
+    {
+      "file": "tests/test_nexus_zip.py",
+      "sha256": "b3744a0628382ebdd658f8e46b67c9adcc912ea0d87a8712cdb868f412e32a91"
+    }
+  ]
+}

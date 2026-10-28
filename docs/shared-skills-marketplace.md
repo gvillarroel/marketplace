@@ -55,6 +55,13 @@ The plugin roots are nested. Sibling roots referencing `../../skills/...` did no
 
 Manifest directories contain JSON only. Root directory names can be organized to suit the package, while the recognized manifest basename stays `plugin.json`. Native installation copies each selected root's tree into a client cache; the manifest selects which skills are registered and shown, rather than physically filtering every downloaded file. The single-copy guarantee applies to the example's Git sources.
 
+## Nexus ZIP distribution
+
+The [Nexus ZIP guide](nexus-zip-marketplace.md) describes the verified archive
+workflow. It requires download/extraction before native local registration and
+materializes each plugin's selected files in the generated release artifacts.
+Direct Git installation above continues to use the three canonical sources.
+
 ## Validation
 
 The native test harness requires Windows, Git, Node.js, installed Copilot/Codex CLIs, and existing signed-in accounts. It uses isolated client profiles and invokes models. It adds no npm dependencies. `CODEX_EXAMPLE_BIN` can select a native Codex binary outside the Windows npm installation; Copilot uses its latest already-cached Windows package.

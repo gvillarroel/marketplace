@@ -1,0 +1,840 @@
+{
+  "client": "copilot",
+  "testedAt": "2026-10-28T23:38:17.164Z",
+  "transport": "Actual Nexus Raw ZIP downloads, SHA-256 verification, extraction, native local marketplace registration",
+  "source": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/marketplace.zip",
+  "archiveSha256": "d8c6d99637bf1d10879ad622b5b80629736d65d3928e2c18c043ebb5df30457c",
+  "artifacts": [
+    {
+      "name": "SHA256SUMS",
+      "url": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/SHA256SUMS",
+      "sha256": "6399bddcbb7c12c79387feaba22d9e5c10ae0ac3b8daf82d0ab161bf804ecbee",
+      "bytes": 345,
+      "uploadedStatus": 201,
+      "downloadStatus": 200,
+      "server": "Nexus/3.96.0-09 (COMMUNITY)"
+    },
+    {
+      "name": "marketplace-bundle.zip",
+      "url": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/marketplace-bundle.zip",
+      "sha256": "0e40bd9e312815af637cf2747a31adedf232068b4e0c99e59bc5dd14f0eae0b5",
+      "bytes": 6056,
+      "uploadedStatus": 201,
+      "downloadStatus": 200,
+      "server": "Nexus/3.96.0-09 (COMMUNITY)"
+    },
+    {
+      "name": "marketplace.zip",
+      "url": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/marketplace.zip",
+      "sha256": "d8c6d99637bf1d10879ad622b5b80629736d65d3928e2c18c043ebb5df30457c",
+      "bytes": 1205,
+      "uploadedStatus": 201,
+      "downloadStatus": 200,
+      "server": "Nexus/3.96.0-09 (COMMUNITY)"
+    },
+    {
+      "name": "shared-example-a.zip",
+      "url": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/shared-example-a.zip",
+      "sha256": "67ae650cea4493f7ee3abdb2e0fa6a216a19a4728ceddb3cd121469edd6cb11a",
+      "bytes": 2310,
+      "uploadedStatus": 201,
+      "downloadStatus": 200,
+      "server": "Nexus/3.96.0-09 (COMMUNITY)"
+    },
+    {
+      "name": "shared-example-b.zip",
+      "url": "http://127.0.0.1:32768/repository/codex-plugin-zips/v1/shared-example-b.zip",
+      "sha256": "83843ae7c97f63a87bf4f44463701ce5ed4e9e6e26a4bbd6df11b0667a1bb852",
+      "bytes": 2231,
+      "uploadedStatus": 201,
+      "downloadStatus": 200,
+      "server": "Nexus/3.96.0-09 (COMMUNITY)"
+    }
+  ],
+  "profile": "dmvsr99e4c",
+  "invocations": [
+    {
+      "plugin": "shared-example-a",
+      "skill": "shared-example-1",
+      "status": 0,
+      "final": "SHARED_SKILL_1_2f34b03820bf18_5ae33051262b3",
+      "trace": [
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01MaWJFoqa7Fxiwf6GWVzs9F",
+            "toolName": "skill",
+            "arguments": {
+              "skill": "shared-example-1"
+            },
+            "turnId": "0",
+            "model": "claude-sonnet-5.5"
+          },
+          "id": "2fd108a5-da36-42a1-a117-7ddae9789425",
+          "timestamp": "2026-10-28T23:38:24.151Z",
+          "parentId": "fef34144-9b90-420a-91b7-d2c8922c914a"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01MaWJFoqa7Fxiwf6GWVzs9F",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "3a94eb73-e4d4-4f1a-bcbc-b684c73b3650",
+            "turnId": "0",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "Skill \"shared-example-1\" loaded successfully. Follow the instructions in the skill context.",
+              "detailedContent": "Skill \"shared-example-1\" loaded successfully. Follow the instructions in the skill context."
+            },
+            "toolTelemetry": {
+              "properties": {
+                "skillNameHash": "8b031981984f52d9fbf4ebc2fa171f36b9a4c13b77991b8cb6b13bfae8b3e12d",
+                "skillSource": "plugin",
+                "found": "true"
+              },
+              "restrictedProperties": {
+                "skillName": "shared-example-1",
+                "pluginName": "shared-example-a",
+                "pluginVersion": "1.0.0"
+              },
+              "metrics": {
+                "skillContentLength": 193,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4239,
+                "large_output_threshold_bytes": 20480,
+                "result_token_count": 22
+              }
+            }
+          },
+          "id": "eb4f2ac6-4387-4233-a2e5-b0c5b0f3ed42",
+          "timestamp": "2026-10-28T23:38:24.153Z",
+          "parentId": "2fd108a5-da36-42a1-a117-7ddae9789425"
+        },
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01BsR2FCjG4voMQP81x3z69A",
+            "toolName": "view",
+            "arguments": {
+              "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-a\\library\\shared-example-1\\references\\proof.txt"
+            },
+            "turnId": "1",
+            "model": "claude-sonnet-5.5",
+            "toolTitle": "Viewing file"
+          },
+          "id": "3768de1c-cbdf-4498-9246-b4b23b7a94ea",
+          "timestamp": "2026-10-28T23:38:25.238Z",
+          "parentId": "cebe5672-f80b-407d-8acf-c340713b8db0"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01BsR2FCjG4voMQP81x3z69A",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "3a94eb73-e4d4-4f1a-bcbc-b684c73b3650",
+            "turnId": "1",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "SHARED_SKILL_1_2f34b03820bf18_5ae33051262b3\n",
+              "detailedContent": "\ndiff --git a/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-a/library/shared-example-1/references/proof.txt b/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-a/library/shared-example-1/references/proof.txt\nindex 0000000..0000000 100644\n--- a/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-a/library/shared-example-1/references/proof.txt\n+++ b/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-a/library/shared-example-1/references/proof.txt\n@@ -1,2 +1,2 @@\n SHARED_SKILL_1_2f34b03820bf18_5ae33051262b3\n \n"
+            },
+            "toolTelemetry": {
+              "properties": {
+                "command": "view",
+                "options": "{\"truncateBasedOn\":\"tokenCount\",\"truncateStyle\":\"middle\"}",
+                "inputs": "[\"path\",\"command\"]",
+                "resolvedPathAgainstCwd": "false",
+                "fileExtension": "[\".txt\"]",
+                "viewType": "file"
+              },
+              "restrictedProperties": {},
+              "metrics": {
+                "resultLength": 44,
+                "resultForLlmLength": 44,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4632,
+                "result_token_count": 29
+              }
+            }
+          },
+          "id": "695a9ac0-7a6a-4fdf-b868-2a8cf6287f3d",
+          "timestamp": "2026-10-28T23:38:25.241Z",
+          "parentId": "3768de1c-cbdf-4498-9246-b4b23b7a94ea"
+        }
+      ],
+      "verification": {
+        "skillLoaded": true,
+        "referenceRead": true,
+        "exactToken": true,
+        "passed": true
+      }
+    },
+    {
+      "plugin": "shared-example-a",
+      "skill": "shared-example-2",
+      "status": 0,
+      "final": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9",
+      "trace": [
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01T9m5AvGbbTE7Rvx6pLCeVN",
+            "toolName": "skill",
+            "arguments": {
+              "skill": "shared-example-a:shared-example-2"
+            },
+            "turnId": "0",
+            "model": "claude-sonnet-5.5"
+          },
+          "id": "d0054b94-afda-4941-b1b1-80cbf567c128",
+          "timestamp": "2026-10-28T23:38:29.088Z",
+          "parentId": "561acc4d-5060-4f90-a15e-6afdb75a1961"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01T9m5AvGbbTE7Rvx6pLCeVN",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "48357096-3656-4522-875a-0888e5fbbe6e",
+            "turnId": "0",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "Skill \"shared-example-a:shared-example-2\" loaded successfully. Follow the instructions in the skill context.",
+              "detailedContent": "Skill \"shared-example-a:shared-example-2\" loaded successfully. Follow the instructions in the skill context."
+            },
+            "toolTelemetry": {
+              "properties": {
+                "skillNameHash": "c673cf4c0453ea27f876d96ef1fc9877f4cd71db97556c099b589c239f17a914",
+                "skillSource": "plugin",
+                "found": "true"
+              },
+              "restrictedProperties": {
+                "skillName": "shared-example-a:shared-example-2",
+                "pluginName": "shared-example-a",
+                "pluginVersion": "1.0.0"
+              },
+              "metrics": {
+                "skillContentLength": 193,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4234,
+                "large_output_threshold_bytes": 20480,
+                "result_token_count": 27
+              }
+            }
+          },
+          "id": "dc37705d-0b54-4761-a8be-54d6b2cb5aa1",
+          "timestamp": "2026-10-28T23:38:29.090Z",
+          "parentId": "d0054b94-afda-4941-b1b1-80cbf567c128"
+        },
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_014qFDxzu8R4wPru4PySgTQn",
+            "toolName": "view",
+            "arguments": {
+              "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-a\\library\\shared-example-2\\references\\proof.txt"
+            },
+            "turnId": "1",
+            "model": "claude-sonnet-5.5",
+            "toolTitle": "Viewing file"
+          },
+          "id": "eeb43bf8-b667-4de5-afde-e69ebec48429",
+          "timestamp": "2026-10-28T23:38:30.275Z",
+          "parentId": "06cd63ed-ce35-4d05-abe0-ffd149e188c5"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_014qFDxzu8R4wPru4PySgTQn",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "48357096-3656-4522-875a-0888e5fbbe6e",
+            "turnId": "1",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9\n",
+              "detailedContent": "\ndiff --git a/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-a/library/shared-example-2/references/proof.txt b/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-a/library/shared-example-2/references/proof.txt\nindex 0000000..0000000 100644\n--- a/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-a/library/shared-example-2/references/proof.txt\n+++ b/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-a/library/shared-example-2/references/proof.txt\n@@ -1,2 +1,2 @@\n SHARED_SKILL_2_479e9646d3947_1426753bcf1b9\n \n"
+            },
+            "toolTelemetry": {
+              "properties": {
+                "command": "view",
+                "options": "{\"truncateBasedOn\":\"tokenCount\",\"truncateStyle\":\"middle\"}",
+                "inputs": "[\"path\",\"command\"]",
+                "resolvedPathAgainstCwd": "false",
+                "fileExtension": "[\".txt\"]",
+                "viewType": "file"
+              },
+              "restrictedProperties": {},
+              "metrics": {
+                "resultLength": 43,
+                "resultForLlmLength": 43,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4557,
+                "result_token_count": 29
+              }
+            }
+          },
+          "id": "0a3ae85f-7549-4e8b-bc92-416a4fd6e1ab",
+          "timestamp": "2026-10-28T23:38:30.277Z",
+          "parentId": "eeb43bf8-b667-4de5-afde-e69ebec48429"
+        }
+      ],
+      "verification": {
+        "skillLoaded": true,
+        "referenceRead": true,
+        "exactToken": true,
+        "passed": true
+      }
+    },
+    {
+      "plugin": "shared-example-b",
+      "skill": "shared-example-2",
+      "status": 0,
+      "final": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9",
+      "trace": [
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01BoFyVJSWjpQyfHQydhxuEw",
+            "toolName": "skill",
+            "arguments": {
+              "skill": "shared-example-b:shared-example-2"
+            },
+            "turnId": "0",
+            "model": "claude-sonnet-5.5"
+          },
+          "id": "abd3450c-4ada-45c6-aadf-0c9dc5fcaf76",
+          "timestamp": "2026-10-28T23:38:34.171Z",
+          "parentId": "173c09e2-24b5-43c0-8be8-b887e1547f71"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01BoFyVJSWjpQyfHQydhxuEw",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "cb08a296-f2a6-4904-93b6-2ce6097683e0",
+            "turnId": "0",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "Skill \"shared-example-b:shared-example-2\" loaded successfully. Follow the instructions in the skill context.",
+              "detailedContent": "Skill \"shared-example-b:shared-example-2\" loaded successfully. Follow the instructions in the skill context."
+            },
+            "toolTelemetry": {
+              "properties": {
+                "skillNameHash": "f727fb8d73ef4567f99e742ad896067d7aca535a0bb400e59b49073be2019cc2",
+                "skillSource": "plugin",
+                "found": "true"
+              },
+              "restrictedProperties": {
+                "skillName": "shared-example-b:shared-example-2",
+                "pluginName": "shared-example-b",
+                "pluginVersion": "1.0.0"
+              },
+              "metrics": {
+                "skillContentLength": 193,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4233,
+                "large_output_threshold_bytes": 20480,
+                "result_token_count": 27
+              }
+            }
+          },
+          "id": "a87b02e6-cec9-432c-b257-675911d90b3e",
+          "timestamp": "2026-10-28T23:38:34.173Z",
+          "parentId": "abd3450c-4ada-45c6-aadf-0c9dc5fcaf76"
+        },
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_013iG1UghFrceZiLCZorCetZ",
+            "toolName": "view",
+            "arguments": {
+              "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-b\\shared-example-2\\references\\proof.txt"
+            },
+            "turnId": "1",
+            "model": "claude-sonnet-5.5",
+            "toolTitle": "Viewing file"
+          },
+          "id": "de9a17ac-1741-42a7-9989-ff330a6fc5a6",
+          "timestamp": "2026-10-28T23:38:35.327Z",
+          "parentId": "2e513845-6f5c-4eca-8168-5dc440553ede"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_013iG1UghFrceZiLCZorCetZ",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "cb08a296-f2a6-4904-93b6-2ce6097683e0",
+            "turnId": "1",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9\n",
+              "detailedContent": "\ndiff --git a/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-b/shared-example-2/references/proof.txt b/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-b/shared-example-2/references/proof.txt\nindex 0000000..0000000 100644\n--- a/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-b/shared-example-2/references/proof.txt\n+++ b/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-b/shared-example-2/references/proof.txt\n@@ -1,2 +1,2 @@\n SHARED_SKILL_2_479e9646d3947_1426753bcf1b9\n \n"
+            },
+            "toolTelemetry": {
+              "properties": {
+                "command": "view",
+                "options": "{\"truncateBasedOn\":\"tokenCount\",\"truncateStyle\":\"middle\"}",
+                "inputs": "[\"path\",\"command\"]",
+                "resolvedPathAgainstCwd": "false",
+                "fileExtension": "[\".txt\"]",
+                "viewType": "file"
+              },
+              "restrictedProperties": {},
+              "metrics": {
+                "resultLength": 43,
+                "resultForLlmLength": 43,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4549,
+                "result_token_count": 29
+              }
+            }
+          },
+          "id": "c9730a39-73bd-4e2a-bb4d-d1e2cb34a695",
+          "timestamp": "2026-10-28T23:38:35.329Z",
+          "parentId": "de9a17ac-1741-42a7-9989-ff330a6fc5a6"
+        }
+      ],
+      "verification": {
+        "skillLoaded": true,
+        "referenceRead": true,
+        "exactToken": true,
+        "passed": true
+      }
+    },
+    {
+      "plugin": "shared-example-b",
+      "skill": "shared-example-3",
+      "status": 0,
+      "final": "SHARED_SKILL_3_efa9e6fd1b1ff8_3d1be072a3d338",
+      "trace": [
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01Fd8HKcviwjRiMNJGSBHsTh",
+            "toolName": "skill",
+            "arguments": {
+              "skill": "shared-example-3"
+            },
+            "turnId": "0",
+            "model": "claude-sonnet-5.5"
+          },
+          "id": "257c2f3c-0f78-4847-a3e1-573c940c1479",
+          "timestamp": "2026-10-28T23:38:40.154Z",
+          "parentId": "0904fd10-0dd5-4e2e-b84d-a13490fcc3b3"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01Fd8HKcviwjRiMNJGSBHsTh",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "95e8cf47-da0b-4e37-98c0-79ab49df8621",
+            "turnId": "0",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "Skill \"shared-example-3\" loaded successfully. Follow the instructions in the skill context.",
+              "detailedContent": "Skill \"shared-example-3\" loaded successfully. Follow the instructions in the skill context."
+            },
+            "toolTelemetry": {
+              "properties": {
+                "skillNameHash": "4cfc4e7f4b7fd71b54130e383e17b0b7bcf0ab397da7a5d0db6e66b97162b15c",
+                "skillSource": "plugin",
+                "found": "true"
+              },
+              "restrictedProperties": {
+                "skillName": "shared-example-3",
+                "pluginName": "shared-example-b",
+                "pluginVersion": "1.0.0"
+              },
+              "metrics": {
+                "skillContentLength": 193,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4240,
+                "large_output_threshold_bytes": 20480,
+                "result_token_count": 22
+              }
+            }
+          },
+          "id": "b77ff5eb-4c00-4770-bafb-5dbf20648702",
+          "timestamp": "2026-10-28T23:38:40.156Z",
+          "parentId": "257c2f3c-0f78-4847-a3e1-573c940c1479"
+        },
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_012ydrEGv7hwRSyLBqRkMG8w",
+            "toolName": "view",
+            "arguments": {
+              "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-b\\shared-example-3\\references\\proof.txt"
+            },
+            "turnId": "1",
+            "model": "claude-sonnet-5.5",
+            "toolTitle": "Viewing file"
+          },
+          "id": "bd5a899f-badf-4017-8439-f173c5a7da3f",
+          "timestamp": "2026-10-28T23:38:41.157Z",
+          "parentId": "fdcb083c-5053-41ee-97a4-51dfa4de2ee7"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_012ydrEGv7hwRSyLBqRkMG8w",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "95e8cf47-da0b-4e37-98c0-79ab49df8621",
+            "turnId": "1",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "SHARED_SKILL_3_efa9e6fd1b1ff8_3d1be072a3d338\n",
+              "detailedContent": "\ndiff --git a/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-b/shared-example-3/references/proof.txt b/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-b/shared-example-3/references/proof.txt\nindex 0000000..0000000 100644\n--- a/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-b/shared-example-3/references/proof.txt\n+++ b/<REPOSITORY>/work/nexus-plugin-probe/download-v1/plugins/shared-example-b/shared-example-3/references/proof.txt\n@@ -1,2 +1,2 @@\n SHARED_SKILL_3_efa9e6fd1b1ff8_3d1be072a3d338\n \n"
+            },
+            "toolTelemetry": {
+              "properties": {
+                "command": "view",
+                "options": "{\"truncateBasedOn\":\"tokenCount\",\"truncateStyle\":\"middle\"}",
+                "inputs": "[\"path\",\"command\"]",
+                "resolvedPathAgainstCwd": "false",
+                "fileExtension": "[\".txt\"]",
+                "viewType": "file"
+              },
+              "restrictedProperties": {},
+              "metrics": {
+                "resultLength": 45,
+                "resultForLlmLength": 45,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4642,
+                "result_token_count": 34
+              }
+            }
+          },
+          "id": "98f91498-d18a-45a2-b4ac-b7532b02c54e",
+          "timestamp": "2026-10-28T23:38:41.160Z",
+          "parentId": "bd5a899f-badf-4017-8439-f173c5a7da3f"
+        }
+      ],
+      "verification": {
+        "skillLoaded": true,
+        "referenceRead": true,
+        "exactToken": true,
+        "passed": true
+      }
+    }
+  ],
+  "operations": [
+    {
+      "args": [
+        "--version"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "install",
+        "shared-example-a@shared-skills-nexus"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "skill",
+        "list",
+        "--json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "install",
+        "shared-example-b@shared-skills-nexus"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "skill",
+        "list",
+        "--json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "-p",
+        "/shared-example-a:shared-example-1",
+        "--add-dir",
+        "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1",
+        "--allow-tool",
+        "skill",
+        "--allow-tool",
+        "view",
+        "--available-tools",
+        "skill",
+        "view",
+        "--disable-builtin-mcps",
+        "--no-custom-instructions",
+        "--sync-session=off",
+        "--no-ask-user",
+        "--no-color",
+        "--output-format",
+        "json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "-p",
+        "/shared-example-a:shared-example-2",
+        "--add-dir",
+        "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1",
+        "--allow-tool",
+        "skill",
+        "--allow-tool",
+        "view",
+        "--available-tools",
+        "skill",
+        "view",
+        "--disable-builtin-mcps",
+        "--no-custom-instructions",
+        "--sync-session=off",
+        "--no-ask-user",
+        "--no-color",
+        "--output-format",
+        "json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "-p",
+        "/shared-example-b:shared-example-2",
+        "--add-dir",
+        "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1",
+        "--allow-tool",
+        "skill",
+        "--allow-tool",
+        "view",
+        "--available-tools",
+        "skill",
+        "view",
+        "--disable-builtin-mcps",
+        "--no-custom-instructions",
+        "--sync-session=off",
+        "--no-ask-user",
+        "--no-color",
+        "--output-format",
+        "json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "-p",
+        "/shared-example-b:shared-example-3",
+        "--add-dir",
+        "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1",
+        "--allow-tool",
+        "skill",
+        "--allow-tool",
+        "view",
+        "--available-tools",
+        "skill",
+        "view",
+        "--disable-builtin-mcps",
+        "--no-custom-instructions",
+        "--sync-session=off",
+        "--no-ask-user",
+        "--no-color",
+        "--output-format",
+        "json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "disable",
+        "shared-example-a@shared-skills-nexus"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "skill",
+        "list",
+        "--json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "install",
+        "shared-example-b@shared-skills-nexus"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "skill",
+        "list",
+        "--json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "install",
+        "shared-example-a@shared-skills-nexus"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "skill",
+        "list",
+        "--json"
+      ],
+      "status": 0
+    }
+  ],
+  "version": "GitHub Copilot CLI 1.0.103.\nRun 'copilot version' to check for updates.",
+  "skillsA": [
+    {
+      "name": "shared-example-1",
+      "description": "Verify shared plugin example skill 1 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-a\\library\\shared-example-1",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-a\\library\\shared-example-2",
+      "enabled": true
+    }
+  ],
+  "skillsBoth": [
+    {
+      "name": "shared-example-1",
+      "description": "Verify shared plugin example skill 1 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-a\\library\\shared-example-1",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-a:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-a\\library\\shared-example-2",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-b:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-b\\shared-example-2",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-3",
+      "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-b\\shared-example-3",
+      "enabled": true
+    }
+  ],
+  "skillsBOnly": [
+    {
+      "name": "shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-b\\shared-example-2",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-3",
+      "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-b\\shared-example-3",
+      "enabled": true
+    }
+  ],
+  "skillsBFirst": [
+    {
+      "name": "shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-b\\shared-example-2",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-3",
+      "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-b\\shared-example-3",
+      "enabled": true
+    }
+  ],
+  "skillsBothReverse": [
+    {
+      "name": "shared-example-1",
+      "description": "Verify shared plugin example skill 1 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-a\\library\\shared-example-1",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-a:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-a\\library\\shared-example-2",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-b:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-b\\shared-example-2",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-3",
+      "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<REPOSITORY>\\work\\nexus-plugin-probe\\download-v1\\plugins\\shared-example-b\\shared-example-3",
+      "enabled": true
+    }
+  ],
+  "membershipPassed": true,
+  "bIndependent": true,
+  "reverseOrderPassed": true,
+  "nativeSkillUsePassed": true
+}

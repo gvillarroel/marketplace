@@ -1,0 +1,376 @@
+{
+  "remoteNexus": [
+    {
+      "client": "codex",
+      "scenario": "marketplace-zip-url",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "http://127.0.0.1:32768/repository/codex-plugin-zips/marketplace-bundle.zip"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Error: git clone http://127.0.0.1:32768/repository/codex-plugin-zips/marketplace-bundle.zip <USER_HOME>\\.cx-test\\3sg2nB\\nmvsr4u7x0\\.tmp/marketplaces\\.staging\\marketplace-add-853PDz failed with status exit code: 128\nstdout:\n\nstderr:\nCloning into '<USER_HOME>\\.cx-test\\3sg2nB\\nmvsr4u7x0\\.tmp/marketplaces\\.staging\\marketplace-add-853PDz'...\nremote: /marketplace-bundle.zip/info/refs\nfatal: repository 'http://127.0.0.1:32768/repository/codex-plugin-zips/marketplace-bundle.zip/' not found\n",
+      "timedOut": false
+    },
+    {
+      "client": "codex",
+      "scenario": "marketplace-json-url",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "http://127.0.0.1:32768/repository/codex-plugin-zips/codex-marketplace.json"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Error: git clone http://127.0.0.1:32768/repository/codex-plugin-zips/codex-marketplace.json <USER_HOME>\\.cx-test\\3sg2nB\\nmvsr4ue11\\.tmp/marketplaces\\.staging\\marketplace-add-usnJqE failed with status exit code: 128\nstdout:\n\nstderr:\nCloning into '<USER_HOME>\\.cx-test\\3sg2nB\\nmvsr4ue11\\.tmp/marketplaces\\.staging\\marketplace-add-usnJqE'...\nremote: /codex-marketplace.json/info/refs\nfatal: repository 'http://127.0.0.1:32768/repository/codex-plugin-zips/codex-marketplace.json/' not found\n",
+      "timedOut": false
+    },
+    {
+      "client": "codex",
+      "scenario": "plugin-zip-url",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "add",
+        "http://127.0.0.1:32768/repository/codex-plugin-zips/plugin-a.zip"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Error: plugin requires --marketplace unless passed as <plugin>@<marketplace>\n",
+      "timedOut": false
+    },
+    {
+      "client": "codex",
+      "scenario": "catalog-url-register",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "<REPOSITORY>/work/nexus-plugin-probe/catalog-url"
+      ],
+      "status": 0,
+      "stdout": "Added marketplace `nexus-url-probe` from \\\\?\\<REPOSITORY>\\work\\nexus-plugin-probe\\catalog-url.\nInstalled marketplace root: <REPOSITORY>\\work\\nexus-plugin-probe\\catalog-url\n",
+      "stderr": "",
+      "timedOut": false
+    },
+    {
+      "client": "codex",
+      "scenario": "catalog-url-zip-install",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "add",
+        "nexus-example-a@nexus-url-probe",
+        "--json"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Error: git clone http://127.0.0.1:32768/repository/codex-plugin-zips/plugin-a.zip <USER_HOME>\\.cx-test\\3sg2nB\\nmvsr4ukb3\\plugins/.marketplace-plugin-source-staging\\marketplace-plugin-source-QpUJee failed with status exit code: 128\nstdout:\n\nstderr:\nCloning into '<USER_HOME>\\.cx-test\\3sg2nB\\nmvsr4ukb3\\plugins/.marketplace-plugin-source-staging\\marketplace-plugin-source-QpUJee'...\nremote: /plugin-a.zip/info/refs\nfatal: repository 'http://127.0.0.1:32768/repository/codex-plugin-zips/plugin-a.zip/' not found\n\nCaused by:\n    git clone http://127.0.0.1:32768/repository/codex-plugin-zips/plugin-a.zip <USER_HOME>\\.cx-test\\3sg2nB\\nmvsr4ukb3\\plugins/.marketplace-plugin-source-staging\\marketplace-plugin-source-QpUJee failed with status exit code: 128\n    stdout:\n    \n    stderr:\n    Cloning into '<USER_HOME>\\.cx-test\\3sg2nB\\nmvsr4ukb3\\plugins/.marketplace-plugin-source-staging\\marketplace-plugin-source-QpUJee'...\n    remote: /plugin-a.zip/info/refs\n    fatal: repository 'http://127.0.0.1:32768/repository/codex-plugin-zips/plugin-a.zip/' not found\n",
+      "timedOut": false
+    },
+    {
+      "client": "codex",
+      "scenario": "catalog-string-register",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "<REPOSITORY>/work/nexus-plugin-probe/catalog-string"
+      ],
+      "status": 0,
+      "stdout": "Added marketplace `nexus-string-probe` from \\\\?\\<REPOSITORY>\\work\\nexus-plugin-probe\\catalog-string.\nInstalled marketplace root: <REPOSITORY>\\work\\nexus-plugin-probe\\catalog-string\n",
+      "stderr": "",
+      "timedOut": false
+    },
+    {
+      "client": "codex",
+      "scenario": "catalog-string-zip-install",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "add",
+        "nexus-example-a@nexus-string-probe",
+        "--json"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Error: plugin `nexus-example-a` was not found in marketplace `nexus-string-probe`\n",
+      "timedOut": false
+    },
+    {
+      "client": "copilot",
+      "scenario": "marketplace-zip-url",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "http://127.0.0.1:32768/repository/codex-plugin-zips/marketplace-bundle.zip"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Failed to add marketplace: Error: Request plugins.marketplaces.add failed with message: Failed to fetch git marketplace from the provided URL. Please verify that the URL and reference are correct. Details: Command failed: git clone --depth 1 --progress http://127.0.0.1:32768/repository/codex-plugin-zips/marketplace-bundle.zip <USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\nmvsr4u890\\copilot\\cache\\marketplaces\\http---127-0-0-1-32768-repository-codex-plugin-zips-marketplace-bundle-zip\nCloning into '<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\nmvsr4u890\\copilot\\cache\\marketplaces\\http---127-0-0-1-32768-repository-codex-plugin-zips-marketplace-bundle-zip'...\nremote: /marketplace-bundle.zip/info/refs\nfatal: repository 'http://127.0.0.1:32768/repository/codex-plugin-zips/marketplace-bundle.zip/' not found\n\n",
+      "timedOut": false
+    },
+    {
+      "client": "copilot",
+      "scenario": "marketplace-json-url",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "http://127.0.0.1:32768/repository/codex-plugin-zips/copilot-marketplace.json"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Failed to add marketplace: Error: Request plugins.marketplaces.add failed with message: Failed to fetch git marketplace from the provided URL. Please verify that the URL and reference are correct. Details: Command failed: git clone --depth 1 --progress http://127.0.0.1:32768/repository/codex-plugin-zips/copilot-marketplace.json <USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\nmvsr4ve41\\copilot\\cache\\marketplaces\\http---127-0-0-1-32768-repository-codex-plugin-zips-copilot-marketplace-json\nCloning into '<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\nmvsr4ve41\\copilot\\cache\\marketplaces\\http---127-0-0-1-32768-repository-codex-plugin-zips-copilot-marketplace-json'...\nremote: /copilot-marketplace.json/info/refs\nfatal: repository 'http://127.0.0.1:32768/repository/codex-plugin-zips/copilot-marketplace.json/' not found\n\n",
+      "timedOut": false
+    },
+    {
+      "client": "copilot",
+      "scenario": "plugin-zip-url",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "install",
+        "http://127.0.0.1:32768/repository/codex-plugin-zips/plugin-a.zip"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Failed to install plugin: Error: Request plugins.install failed with message: Failed to fetch git plugin from the provided URL. Please verify that the URL and reference are correct. Details: Command failed: git clone --depth 1 --progress http://127.0.0.1:32768/repository/codex-plugin-zips/plugin-a.zip <USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\nmvsr4wev2\\copilot\\cache\\marketplaces\\http---127-0-0-1-32768-repository-codex-plugin-zips-plugin-a-zip\nCloning into '<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\nmvsr4wev2\\copilot\\cache\\marketplaces\\http---127-0-0-1-32768-repository-codex-plugin-zips-plugin-a-zip'...\nremote: /plugin-a.zip/info/refs\nfatal: repository 'http://127.0.0.1:32768/repository/codex-plugin-zips/plugin-a.zip/' not found\n\n",
+      "timedOut": false
+    },
+    {
+      "client": "copilot",
+      "scenario": "catalog-url-register",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "<REPOSITORY>/work/nexus-plugin-probe/catalog-url"
+      ],
+      "status": 0,
+      "stdout": "Marketplace \"nexus-url-probe\" added successfully.\n",
+      "stderr": "",
+      "timedOut": false
+    },
+    {
+      "client": "copilot",
+      "scenario": "catalog-url-zip-install",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "install",
+        "nexus-example-a@nexus-url-probe"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Failed to install plugin: Error: Request plugins.install failed with message: Failed to fetch git plugin from the provided URL. Please verify that the URL and reference are correct. Details: Command failed: git clone --depth 1 --progress http://127.0.0.1:32768/repository/codex-plugin-zips/plugin-a.zip <USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\nmvsr4xg13\\copilot\\cache\\marketplaces\\http---127-0-0-1-32768-repository-codex-plugin-zips-plugin-a-zip\nCloning into '<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\nmvsr4xg13\\copilot\\cache\\marketplaces\\http---127-0-0-1-32768-repository-codex-plugin-zips-plugin-a-zip'...\nremote: /plugin-a.zip/info/refs\nfatal: repository 'http://127.0.0.1:32768/repository/codex-plugin-zips/plugin-a.zip/' not found\n\n",
+      "timedOut": false
+    },
+    {
+      "client": "copilot",
+      "scenario": "catalog-string-register",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "<REPOSITORY>/work/nexus-plugin-probe/catalog-string"
+      ],
+      "status": 0,
+      "stdout": "Marketplace \"nexus-string-probe\" added successfully.\n",
+      "stderr": "",
+      "timedOut": false
+    },
+    {
+      "client": "copilot",
+      "scenario": "catalog-string-zip-install",
+      "source": "Actual Nexus Raw hosted repository",
+      "args": [
+        "plugin",
+        "install",
+        "nexus-example-a@nexus-string-probe"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Failed to install plugin: Error: Request plugins.install failed with message: Plugin source directory not found: <REPOSITORY>\\work\\nexus-plugin-probe\\catalog-string\\http:\\127.0.0.1:32768\\repository\\codex-plugin-zips\\plugin-a.zip\n",
+      "timedOut": false
+    }
+  ],
+  "localArchiveAndCatalogSchema": [
+    {
+      "client": "codex",
+      "scenario": "marketplace-zip",
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "<REPOSITORY>\\work\\nexus-plugin-probe\\artifacts\\marketplace-bundle.zip"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Error: local marketplace source must be a directory, not a file\n",
+      "timedOut": false
+    },
+    {
+      "client": "codex",
+      "scenario": "plugin-zip",
+      "args": [
+        "plugin",
+        "add",
+        "<REPOSITORY>\\work\\nexus-plugin-probe\\artifacts\\plugin-a.zip"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Error: plugin requires --marketplace unless passed as <plugin>@<marketplace>\n",
+      "timedOut": false
+    },
+    {
+      "client": "codex",
+      "scenario": "source-archive",
+      "registration": {
+        "args": [
+          "plugin",
+          "marketplace",
+          "add",
+          "<REPOSITORY>\\work\\nexus-plugin-probe\\catalog-archive"
+        ],
+        "status": 0,
+        "stdout": "Added marketplace `nexus-archive-probe` from \\\\?\\<REPOSITORY>\\work\\nexus-plugin-probe\\catalog-archive.\nInstalled marketplace root: <REPOSITORY>\\work\\nexus-plugin-probe\\catalog-archive\n",
+        "stderr": "",
+        "timedOut": false
+      },
+      "installed": {
+        "args": [
+          "plugin",
+          "add",
+          "nexus-example-a@nexus-archive-probe",
+          "--json"
+        ],
+        "status": 1,
+        "stdout": "",
+        "stderr": "Error: plugin `nexus-example-a` was not found in marketplace `nexus-archive-probe`\n",
+        "timedOut": false
+      }
+    },
+    {
+      "client": "codex",
+      "scenario": "source-zip",
+      "registration": {
+        "args": [
+          "plugin",
+          "marketplace",
+          "add",
+          "<REPOSITORY>\\work\\nexus-plugin-probe\\catalog-zip"
+        ],
+        "status": 0,
+        "stdout": "Added marketplace `nexus-zip-probe` from \\\\?\\<REPOSITORY>\\work\\nexus-plugin-probe\\catalog-zip.\nInstalled marketplace root: <REPOSITORY>\\work\\nexus-plugin-probe\\catalog-zip\n",
+        "stderr": "",
+        "timedOut": false
+      },
+      "installed": {
+        "args": [
+          "plugin",
+          "add",
+          "nexus-example-a@nexus-zip-probe",
+          "--json"
+        ],
+        "status": 1,
+        "stdout": "",
+        "stderr": "Error: plugin `nexus-example-a` was not found in marketplace `nexus-zip-probe`\n",
+        "timedOut": false
+      }
+    },
+    {
+      "client": "copilot",
+      "scenario": "marketplace-zip",
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "<REPOSITORY>\\work\\nexus-plugin-probe\\artifacts\\marketplace-bundle.zip"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Failed to add marketplace: Error: Request plugins.marketplaces.add failed with message: File not found: marketplace.json, .plugin/marketplace.json, .github/plugin/marketplace.json, .claude-plugin/marketplace.json (tried <REPOSITORY>\\work\\nexus-plugin-probe\\artifacts\\marketplace-bundle.zip\\marketplace.json, <REPOSITORY>\\work\\nexus-plugin-probe\\artifacts\\marketplace-bundle.zip\\.plugin\\marketplace.json, <REPOSITORY>\\work\\nexus-plugin-probe\\artifacts\\marketplace-bundle.zip\\.github\\plugin\\marketplace.json, <REPOSITORY>\\work\\nexus-plugin-probe\\artifacts\\marketplace-bundle.zip\\.claude-plugin\\marketplace.json)\n",
+      "timedOut": false
+    },
+    {
+      "client": "copilot",
+      "scenario": "plugin-zip",
+      "args": [
+        "plugin",
+        "install",
+        "<REPOSITORY>\\work\\nexus-plugin-probe\\artifacts\\plugin-a.zip"
+      ],
+      "status": 1,
+      "stdout": "",
+      "stderr": "Failed to install plugin: Error: Request plugins.install failed with message: No plugin.json found in repository. Tried: .plugin\\plugin.json, .\\plugin.json, .github/plugin\\plugin.json, .claude-plugin\\plugin.json\n",
+      "timedOut": false
+    },
+    {
+      "client": "copilot",
+      "scenario": "source-archive",
+      "registration": {
+        "args": [
+          "plugin",
+          "marketplace",
+          "add",
+          "<REPOSITORY>\\work\\nexus-plugin-probe\\catalog-archive"
+        ],
+        "status": 1,
+        "stdout": "",
+        "stderr": "Failed to add marketplace: Error: Request plugins.marketplaces.add failed with message: Invalid marketplace.json: plugins.0.source: Invalid input, plugins.1.source: Invalid input\n",
+        "timedOut": false
+      },
+      "installed": {
+        "args": [
+          "plugin",
+          "install",
+          "nexus-example-a@nexus-archive-probe"
+        ],
+        "status": 1,
+        "stdout": "",
+        "stderr": "Failed to install plugin: Error: Request plugins.install failed with message: Marketplace \"nexus-archive-probe\" not found\n",
+        "timedOut": false
+      }
+    },
+    {
+      "client": "copilot",
+      "scenario": "source-zip",
+      "registration": {
+        "args": [
+          "plugin",
+          "marketplace",
+          "add",
+          "<REPOSITORY>\\work\\nexus-plugin-probe\\catalog-zip"
+        ],
+        "status": 1,
+        "stdout": "",
+        "stderr": "Failed to add marketplace: Error: Request plugins.marketplaces.add failed with message: Invalid marketplace.json: plugins.0.source: Invalid input, plugins.1.source: Invalid input\n",
+        "timedOut": false
+      },
+      "installed": {
+        "args": [
+          "plugin",
+          "install",
+          "nexus-example-a@nexus-zip-probe"
+        ],
+        "status": 1,
+        "stdout": "",
+        "stderr": "Failed to install plugin: Error: Request plugins.install failed with message: Marketplace \"nexus-zip-probe\" not found\n",
+        "timedOut": false
+      }
+    }
+  ]
+}

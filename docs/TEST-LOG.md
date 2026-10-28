@@ -416,3 +416,34 @@ The first GitHub CI attempt failed in the unchanged concurrent roster-lock
 test with `ENOENT` while reading `.roster.lock`. The failed job was rerun on
 the same commit, without a runtime or test change, and
 [passed](https://github.com/gvillarroel/marketplace/actions/runs/40610041957/job/122560010530).
+
+## Nexus ZIP marketplace transport — 2026-10-28
+
+Validated the shared-skill example against a real local Nexus 3.96.0-09
+Community Raw hosted repository using Codex CLI 0.145.0, Copilot CLI 1.0.103,
+and PowerShell 7.6.9. The temporary instance's EULA was accepted only after
+explicit user authorization. Uploads returned HTTP 201; downloaded bytes and
+SHA-256 digests matched. No credentials or raw local profiles are published.
+
+| Command or check | Result |
+| --- | --- |
+| Direct Nexus ZIP/JSON URLs and ZIP catalog source variants | Both clients rejected installation; HTTP URL sources attempted Git clone |
+| Nexus metadata ZIP plus two plugin ZIPs, followed by native local registration | Passed in both clients: A={1,2}, B={2,3}, all four verified invocations each, B independent of A, fresh B→A order |
+| Complete ZIP downloaded from Nexus | Both clients installed/listed A+B; payload bytes match the component archives |
+| Nexus download with anonymous access disabled | HTTP 401 without credentials; extractor succeeded with Basic Authorization header |
+| `py -3 -m unittest discover -s tests -p test_nexus_zip.py -v` | Passed: 9 HTTP-fixture transport tests, including exact payloads and malformed archive rejection |
+| Repeat packaging | Identical archive checksums in the tested environment |
+| `npm run check:shared-skills` | Passed: still exactly three authored skills and unchanged Git catalogs |
+| `npm run typecheck` | Passed |
+| `npm test` with `NO_COLOR` unset and `TERM=xterm-256color` | Passed: 499 TypeScript tests and 73 capture tests |
+| `npm run quality` | Passed: whole-tree quality hooks |
+
+Copilot deduplicated skill 2 when both local plugin definitions pointed to
+the same extracted directory: a B:2 request loaded A:2. The successful release
+build therefore materializes each plugin's selected files in separate payloads.
+The repository retains three authored sources; the ZIPs contain generated
+copies of the shared skill. Direct native ZIP installation remains unsupported
+in the tested CLIs; an explicit download/extraction step is required.
+
+See the [Nexus guide](nexus-zip-marketplace.md) and
+[sanitized report, inventories, traces, hashes, and rejection records](validation/nexus-zip/report.md).
