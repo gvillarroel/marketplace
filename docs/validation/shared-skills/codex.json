@@ -1,0 +1,462 @@
+{
+  "client": "codex",
+  "version": "codex-cli 0.145.0",
+  "testedAt": "2026-10-28T00:38:52.635Z",
+  "source": "https://github.com/gvillarroel/marketplace.git",
+  "snapshotCommit": "babe975c7b917b062143ee23c2613e6432dc19e9",
+  "sourceSkillCount": 3,
+  "profile": "cmvrdzbts",
+  "invocations": [
+    {
+      "plugin": "shared-example-a",
+      "skill": "shared-example-1",
+      "status": 0,
+      "final": "SHARED_SKILL_1_2f34b03820bf18_5ae33051262b3",
+      "trace": [
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_0",
+            "type": "agent_message",
+            "text": "I’m using the requested `shared-example-a:shared-example-1` skill and will follow its bundled proof-file instructions exactly."
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_1",
+            "type": "command_execution",
+            "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command \"Get-Content -Raw '<USER_HOME>\\\\.cx-test\\\\3sg2nB\\\\cmvrdzbts\\\\plugins\\\\cache\\\\agent-harbor\\\\shared-example-a\\\\1.0.0\\\\library\\\\shared-example-1\\\\SKILL.md'\"",
+            "aggregated_output": "---\nname: shared-example-1\ndescription: Verify shared plugin example skill 1 by reading its bundled proof file.\n---\n\nRead `references/proof.txt` relative to this SKILL.md file. Return exactly the complete proof token from that file, with no additional text. Do not infer a token or read another skill's proof.\n\r\n[ERROR] - (starship::print): Under a 'dumb' terminal (TERM=dumb).\n\r\n",
+            "exit_code": 0,
+            "status": "completed"
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_2",
+            "type": "command_execution",
+            "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command \"Get-Content -Raw '<USER_HOME>\\\\.cx-test\\\\3sg2nB\\\\cmvrdzbts\\\\plugins\\\\cache\\\\agent-harbor\\\\shared-example-a\\\\1.0.0\\\\library\\\\shared-example-1\\\\references\\\\proof.txt'\"",
+            "aggregated_output": "SHARED_SKILL_1_2f34b03820bf18_5ae33051262b3\n\r\n[ERROR] - (starship::print): Under a 'dumb' terminal (TERM=dumb).\n\r\n",
+            "exit_code": 0,
+            "status": "completed"
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_3",
+            "type": "agent_message",
+            "text": "SHARED_SKILL_1_2f34b03820bf18_5ae33051262b3"
+          }
+        }
+      ],
+      "verification": {
+        "skillLoaded": true,
+        "referenceRead": true,
+        "exactToken": true,
+        "passed": true
+      },
+      "passed": true
+    },
+    {
+      "plugin": "shared-example-a",
+      "skill": "shared-example-2",
+      "status": 0,
+      "final": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9",
+      "trace": [
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_0",
+            "type": "agent_message",
+            "text": "I’m using the requested `shared-example-a:shared-example-2` skill and will follow its bundled proof-file instructions exactly."
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_1",
+            "type": "command_execution",
+            "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command \"Get-Content -Raw '<USER_HOME>\\\\.cx-test\\\\3sg2nB\\\\cmvrdzbts\\\\plugins\\\\cache\\\\agent-harbor\\\\shared-example-a\\\\1.0.0\\\\library\\\\shared-example-2\\\\SKILL.md'\"",
+            "aggregated_output": "---\nname: shared-example-2\ndescription: Verify shared plugin example skill 2 by reading its bundled proof file.\n---\n\nRead `references/proof.txt` relative to this SKILL.md file. Return exactly the complete proof token from that file, with no additional text. Do not infer a token or read another skill's proof.\n\r\n[ERROR] - (starship::print): Under a 'dumb' terminal (TERM=dumb).\n\r\n",
+            "exit_code": 0,
+            "status": "completed"
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_2",
+            "type": "command_execution",
+            "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command \"Get-Content -Raw '<USER_HOME>\\\\.cx-test\\\\3sg2nB\\\\cmvrdzbts\\\\plugins\\\\cache\\\\agent-harbor\\\\shared-example-a\\\\1.0.0\\\\library\\\\shared-example-2\\\\references\\\\proof.txt'\"",
+            "aggregated_output": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9\n\r\n[ERROR] - (starship::print): Under a 'dumb' terminal (TERM=dumb).\n\r\n",
+            "exit_code": 0,
+            "status": "completed"
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_3",
+            "type": "agent_message",
+            "text": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9"
+          }
+        }
+      ],
+      "verification": {
+        "skillLoaded": true,
+        "referenceRead": true,
+        "exactToken": true,
+        "passed": true
+      },
+      "passed": true
+    },
+    {
+      "plugin": "shared-example-b",
+      "skill": "shared-example-2",
+      "status": 0,
+      "final": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9",
+      "trace": [
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_0",
+            "type": "agent_message",
+            "text": "I’m using `shared-example-b:shared-example-2` exactly as requested and will follow its bundled instructions."
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_1",
+            "type": "command_execution",
+            "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command \"Get-Content -Raw '<USER_HOME>\\\\.cx-test\\\\3sg2nB\\\\cmvrdzbts\\\\plugins\\\\cache\\\\agent-harbor\\\\shared-example-b\\\\1.0.0\\\\shared-example-2\\\\SKILL.md'\"",
+            "aggregated_output": "---\nname: shared-example-2\ndescription: Verify shared plugin example skill 2 by reading its bundled proof file.\n---\n\nRead `references/proof.txt` relative to this SKILL.md file. Return exactly the complete proof token from that file, with no additional text. Do not infer a token or read another skill's proof.\n\r\n[ERROR] - (starship::print): Under a 'dumb' terminal (TERM=dumb).\n\r\n",
+            "exit_code": 0,
+            "status": "completed"
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_2",
+            "type": "command_execution",
+            "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command \"Get-Content -Raw '<USER_HOME>\\\\.cx-test\\\\3sg2nB\\\\cmvrdzbts\\\\plugins\\\\cache\\\\agent-harbor\\\\shared-example-b\\\\1.0.0\\\\shared-example-2\\\\references\\\\proof.txt'\"",
+            "aggregated_output": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9\n\r\n[ERROR] - (starship::print): Under a 'dumb' terminal (TERM=dumb).\n\r\n",
+            "exit_code": 0,
+            "status": "completed"
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_3",
+            "type": "agent_message",
+            "text": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9"
+          }
+        }
+      ],
+      "verification": {
+        "skillLoaded": true,
+        "referenceRead": true,
+        "exactToken": true,
+        "passed": true
+      },
+      "passed": true
+    },
+    {
+      "plugin": "shared-example-b",
+      "skill": "shared-example-3",
+      "status": 0,
+      "final": "SHARED_SKILL_3_efa9e6fd1b1ff8_3d1be072a3d338",
+      "trace": [
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_0",
+            "type": "agent_message",
+            "text": "I’m using `shared-example-b:shared-example-3` exactly as requested and will read only its instructions and bundled proof file."
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_1",
+            "type": "command_execution",
+            "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command \"Get-Content -Raw '<USER_HOME>\\\\.cx-test\\\\3sg2nB\\\\cmvrdzbts\\\\plugins\\\\cache\\\\agent-harbor\\\\shared-example-b\\\\1.0.0\\\\shared-example-3\\\\SKILL.md'\"",
+            "aggregated_output": "---\nname: shared-example-3\ndescription: Verify shared plugin example skill 3 by reading its bundled proof file.\n---\n\nRead `references/proof.txt` relative to this SKILL.md file. Return exactly the complete proof token from that file, with no additional text. Do not infer a token or read another skill's proof.\n\r\n[ERROR] - (starship::print): Under a 'dumb' terminal (TERM=dumb).\n\r\n",
+            "exit_code": 0,
+            "status": "completed"
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_2",
+            "type": "command_execution",
+            "command": "\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command \"Get-Content -Raw '<USER_HOME>\\\\.cx-test\\\\3sg2nB\\\\cmvrdzbts\\\\plugins\\\\cache\\\\agent-harbor\\\\shared-example-b\\\\1.0.0\\\\shared-example-3\\\\references\\\\proof.txt'\"",
+            "aggregated_output": "SHARED_SKILL_3_efa9e6fd1b1ff8_3d1be072a3d338\n\r\n[ERROR] - (starship::print): Under a 'dumb' terminal (TERM=dumb).\n\r\n",
+            "exit_code": 0,
+            "status": "completed"
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "item_3",
+            "type": "agent_message",
+            "text": "SHARED_SKILL_3_efa9e6fd1b1ff8_3d1be072a3d338"
+          }
+        }
+      ],
+      "verification": {
+        "skillLoaded": true,
+        "referenceRead": true,
+        "exactToken": true,
+        "passed": true
+      },
+      "passed": true
+    }
+  ],
+  "skillsA": [
+    {
+      "name": "shared-example-a:shared-example-1",
+      "description": "Verify shared plugin example skill 1 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbts\\plugins\\cache\\agent-harbor\\shared-example-a\\1.0.0\\library\\shared-example-1\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-a:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbts\\plugins\\cache\\agent-harbor\\shared-example-a\\1.0.0\\library\\shared-example-2\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    }
+  ],
+  "skillsBoth": [
+    {
+      "name": "shared-example-a:shared-example-1",
+      "description": "Verify shared plugin example skill 1 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbts\\plugins\\cache\\agent-harbor\\shared-example-a\\1.0.0\\library\\shared-example-1\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-a:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbts\\plugins\\cache\\agent-harbor\\shared-example-a\\1.0.0\\library\\shared-example-2\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-b:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbts\\plugins\\cache\\agent-harbor\\shared-example-b\\1.0.0\\shared-example-2\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-b:shared-example-3",
+      "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbts\\plugins\\cache\\agent-harbor\\shared-example-b\\1.0.0\\shared-example-3\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    }
+  ],
+  "operations": [
+    {
+      "args": [
+        "--version"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "https://github.com/gvillarroel/marketplace.git"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "add",
+        "shared-example-a@agent-harbor",
+        "--json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "add",
+        "shared-example-b@agent-harbor",
+        "--json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "-a",
+        "never",
+        "-s",
+        "read-only",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "Use the installed shared-example-a plugin's shared-example-1 skill. Follow its instructions, including reading its bundled proof file, and return exactly the proof token. Do not search for source repositories or other skills."
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "-a",
+        "never",
+        "-s",
+        "read-only",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "Use the installed shared-example-a plugin's shared-example-2 skill. Follow its instructions, including reading its bundled proof file, and return exactly the proof token. Do not search for source repositories or other skills."
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "-a",
+        "never",
+        "-s",
+        "read-only",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "Use the installed shared-example-b plugin's shared-example-2 skill. Follow its instructions, including reading its bundled proof file, and return exactly the proof token. Do not search for source repositories or other skills."
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "-a",
+        "never",
+        "-s",
+        "read-only",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "Use the installed shared-example-b plugin's shared-example-3 skill. Follow its instructions, including reading its bundled proof file, and return exactly the proof token. Do not search for source repositories or other skills."
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "remove",
+        "shared-example-a@agent-harbor",
+        "--json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "https://github.com/gvillarroel/marketplace.git"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "add",
+        "shared-example-b@agent-harbor",
+        "--json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "add",
+        "shared-example-a@agent-harbor",
+        "--json"
+      ],
+      "status": 0
+    }
+  ],
+  "skillsBOnly": [
+    {
+      "name": "shared-example-b:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbts\\plugins\\cache\\agent-harbor\\shared-example-b\\1.0.0\\shared-example-2\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-b:shared-example-3",
+      "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbts\\plugins\\cache\\agent-harbor\\shared-example-b\\1.0.0\\shared-example-3\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    }
+  ],
+  "skillsBFirst": [
+    {
+      "name": "shared-example-b:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbtsr\\plugins\\cache\\agent-harbor\\shared-example-b\\1.0.0\\shared-example-2\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-b:shared-example-3",
+      "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbtsr\\plugins\\cache\\agent-harbor\\shared-example-b\\1.0.0\\shared-example-3\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    }
+  ],
+  "skillsBothReverse": [
+    {
+      "name": "shared-example-a:shared-example-1",
+      "description": "Verify shared plugin example skill 1 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbtsr\\plugins\\cache\\agent-harbor\\shared-example-a\\1.0.0\\library\\shared-example-1\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-a:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbtsr\\plugins\\cache\\agent-harbor\\shared-example-a\\1.0.0\\library\\shared-example-2\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-b:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbtsr\\plugins\\cache\\agent-harbor\\shared-example-b\\1.0.0\\shared-example-2\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-b:shared-example-3",
+      "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+      "path": "<USER_HOME>\\.cx-test\\3sg2nB\\cmvrdzbtsr\\plugins\\cache\\agent-harbor\\shared-example-b\\1.0.0\\shared-example-3\\SKILL.md",
+      "scope": "user",
+      "enabled": true
+    }
+  ],
+  "membershipPassed": true,
+  "bIndependent": true,
+  "reverseOrderPassed": true,
+  "nativeSkillUsePassed": true
+}

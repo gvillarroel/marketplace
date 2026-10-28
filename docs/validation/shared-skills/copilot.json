@@ -1,0 +1,789 @@
+{
+  "client": "copilot",
+  "version": "GitHub Copilot CLI 1.0.103.\nRun 'copilot version' to check for updates.",
+  "testedAt": "2026-10-28T00:38:52.843Z",
+  "source": "https://github.com/gvillarroel/marketplace.git",
+  "snapshotCommit": "babe975c7b917b062143ee23c2613e6432dc19e9",
+  "sourceSkillCount": 3,
+  "profile": "cmvrdzbtj",
+  "invocations": [
+    {
+      "plugin": "shared-example-a",
+      "skill": "shared-example-1",
+      "status": 0,
+      "final": "SHARED_SKILL_1_2f34b03820bf18_5ae33051262b3",
+      "trace": [
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01S9GcUyVPgJGzhAjkGiiS4Q",
+            "toolName": "skill",
+            "arguments": {
+              "skill": "shared-example-1"
+            },
+            "turnId": "0",
+            "model": "claude-sonnet-5.5"
+          },
+          "id": "762a968f-1006-4a61-8867-f310db27d5a4",
+          "timestamp": "2026-10-28T00:39:11.051Z",
+          "parentId": "b46de936-b302-4999-98bf-f6f541652dfe"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01S9GcUyVPgJGzhAjkGiiS4Q",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "1e2e08bb-5ae2-424e-818a-4253a3e4bac5",
+            "turnId": "0",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "Skill \"shared-example-1\" loaded successfully. Follow the instructions in the skill context.",
+              "detailedContent": "Skill \"shared-example-1\" loaded successfully. Follow the instructions in the skill context."
+            },
+            "toolTelemetry": {
+              "properties": {
+                "skillNameHash": "8b031981984f52d9fbf4ebc2fa171f36b9a4c13b77991b8cb6b13bfae8b3e12d",
+                "skillSource": "plugin",
+                "found": "true"
+              },
+              "restrictedProperties": {
+                "skillName": "shared-example-1",
+                "pluginName": "shared-example-a",
+                "pluginVersion": "1.0.0"
+              },
+              "metrics": {
+                "skillContentLength": 193,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4175,
+                "large_output_threshold_bytes": 20480,
+                "result_token_count": 22
+              }
+            }
+          },
+          "id": "b490aae2-1406-4802-b940-d8d0c0e611d4",
+          "timestamp": "2026-10-28T00:39:11.054Z",
+          "parentId": "762a968f-1006-4a61-8867-f310db27d5a4"
+        },
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01VYUxchB5ALZKh6Qd6mNbTs",
+            "toolName": "view",
+            "arguments": {
+              "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtj\\copilot\\installed-plugins\\agent-harbor\\shared-example-a\\library\\shared-example-1\\references\\proof.txt"
+            },
+            "turnId": "1",
+            "model": "claude-sonnet-5.5",
+            "toolTitle": "Viewing file"
+          },
+          "id": "6e9bf13c-97da-4344-b4b4-91c109b40626",
+          "timestamp": "2026-10-28T00:39:12.534Z",
+          "parentId": "34893357-f13a-474d-b04d-355c85b878f4"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01VYUxchB5ALZKh6Qd6mNbTs",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "1e2e08bb-5ae2-424e-818a-4253a3e4bac5",
+            "turnId": "1",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "SHARED_SKILL_1_2f34b03820bf18_5ae33051262b3\n",
+              "detailedContent": "\ndiff --git a/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-a/library/shared-example-1/references/proof.txt b/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-a/library/shared-example-1/references/proof.txt\nindex 0000000..0000000 100644\n--- a/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-a/library/shared-example-1/references/proof.txt\n+++ b/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-a/library/shared-example-1/references/proof.txt\n@@ -1,2 +1,2 @@\n SHARED_SKILL_1_2f34b03820bf18_5ae33051262b3\n \n"
+            },
+            "toolTelemetry": {
+              "properties": {
+                "command": "view",
+                "options": "{\"truncateBasedOn\":\"tokenCount\",\"truncateStyle\":\"middle\"}",
+                "inputs": "[\"path\",\"command\"]",
+                "resolvedPathAgainstCwd": "false",
+                "fileExtension": "[\".txt\"]",
+                "viewType": "file"
+              },
+              "restrictedProperties": {},
+              "metrics": {
+                "resultLength": 44,
+                "resultForLlmLength": 44,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4502,
+                "result_token_count": 29
+              }
+            }
+          },
+          "id": "7a35b9a0-5d58-486d-afee-17cf7e862fe5",
+          "timestamp": "2026-10-28T00:39:12.538Z",
+          "parentId": "6e9bf13c-97da-4344-b4b4-91c109b40626"
+        }
+      ],
+      "verification": {
+        "skillLoaded": true,
+        "referenceRead": true,
+        "exactToken": true,
+        "passed": true
+      },
+      "passed": true
+    },
+    {
+      "plugin": "shared-example-a",
+      "skill": "shared-example-2",
+      "status": 0,
+      "final": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9",
+      "trace": [
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01UFzT8fDzxri3QxViztdTcJ",
+            "toolName": "skill",
+            "arguments": {
+              "skill": "shared-example-a:shared-example-2"
+            },
+            "turnId": "0",
+            "model": "claude-sonnet-5.5"
+          },
+          "id": "458ea1cd-c381-4411-9a34-1459c906f722",
+          "timestamp": "2026-10-28T00:39:18.067Z",
+          "parentId": "2d1c76c3-cfba-4bb6-88ae-c83e178ce28f"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01UFzT8fDzxri3QxViztdTcJ",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "748fc6ac-016b-47f6-b4c3-a9fa20013572",
+            "turnId": "0",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "Skill \"shared-example-a:shared-example-2\" loaded successfully. Follow the instructions in the skill context.",
+              "detailedContent": "Skill \"shared-example-a:shared-example-2\" loaded successfully. Follow the instructions in the skill context."
+            },
+            "toolTelemetry": {
+              "properties": {
+                "skillNameHash": "c673cf4c0453ea27f876d96ef1fc9877f4cd71db97556c099b589c239f17a914",
+                "skillSource": "plugin",
+                "found": "true"
+              },
+              "restrictedProperties": {
+                "skillName": "shared-example-a:shared-example-2",
+                "pluginName": "shared-example-a",
+                "pluginVersion": "1.0.0"
+              },
+              "metrics": {
+                "skillContentLength": 193,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4183,
+                "large_output_threshold_bytes": 20480,
+                "result_token_count": 27
+              }
+            }
+          },
+          "id": "a9c2a0ff-0de9-45b8-8d0d-943120419b98",
+          "timestamp": "2026-10-28T00:39:18.070Z",
+          "parentId": "458ea1cd-c381-4411-9a34-1459c906f722"
+        },
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01K2UaCtDpG1vBu1ncwQFvHT",
+            "toolName": "view",
+            "arguments": {
+              "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtj\\copilot\\installed-plugins\\agent-harbor\\shared-example-a\\library\\shared-example-2\\references\\proof.txt"
+            },
+            "turnId": "1",
+            "model": "claude-sonnet-5.5",
+            "toolTitle": "Viewing file"
+          },
+          "id": "a492bf95-d868-4a5e-8037-7acb7c369088",
+          "timestamp": "2026-10-28T00:39:19.565Z",
+          "parentId": "700c23ac-07cc-4f48-a623-a4b0ba68010e"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01K2UaCtDpG1vBu1ncwQFvHT",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "748fc6ac-016b-47f6-b4c3-a9fa20013572",
+            "turnId": "1",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9\n",
+              "detailedContent": "\ndiff --git a/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-a/library/shared-example-2/references/proof.txt b/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-a/library/shared-example-2/references/proof.txt\nindex 0000000..0000000 100644\n--- a/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-a/library/shared-example-2/references/proof.txt\n+++ b/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-a/library/shared-example-2/references/proof.txt\n@@ -1,2 +1,2 @@\n SHARED_SKILL_2_479e9646d3947_1426753bcf1b9\n \n"
+            },
+            "toolTelemetry": {
+              "properties": {
+                "command": "view",
+                "options": "{\"truncateBasedOn\":\"tokenCount\",\"truncateStyle\":\"middle\"}",
+                "inputs": "[\"path\",\"command\"]",
+                "resolvedPathAgainstCwd": "false",
+                "fileExtension": "[\".txt\"]",
+                "viewType": "file"
+              },
+              "restrictedProperties": {},
+              "metrics": {
+                "resultLength": 43,
+                "resultForLlmLength": 43,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4527,
+                "result_token_count": 29
+              }
+            }
+          },
+          "id": "3d7cac25-cf98-4f0d-97ca-ce75080b3e65",
+          "timestamp": "2026-10-28T00:39:19.569Z",
+          "parentId": "a492bf95-d868-4a5e-8037-7acb7c369088"
+        }
+      ],
+      "verification": {
+        "skillLoaded": true,
+        "referenceRead": true,
+        "exactToken": true,
+        "passed": true
+      },
+      "passed": true
+    },
+    {
+      "plugin": "shared-example-b",
+      "skill": "shared-example-2",
+      "status": 0,
+      "final": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9",
+      "trace": [
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01AHhBybjqRPDpDyofSMatUH",
+            "toolName": "skill",
+            "arguments": {
+              "skill": "shared-example-b:shared-example-2"
+            },
+            "turnId": "0",
+            "model": "claude-sonnet-5.5"
+          },
+          "id": "40dcd741-da76-4753-80ab-63521f4def14",
+          "timestamp": "2026-10-28T00:39:24.403Z",
+          "parentId": "d796d5bd-07ce-41df-807d-906f2defd940"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01AHhBybjqRPDpDyofSMatUH",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "8c1d45ce-2b75-47fd-993d-0d5a460f6f53",
+            "turnId": "0",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "Skill \"shared-example-b:shared-example-2\" loaded successfully. Follow the instructions in the skill context.",
+              "detailedContent": "Skill \"shared-example-b:shared-example-2\" loaded successfully. Follow the instructions in the skill context."
+            },
+            "toolTelemetry": {
+              "properties": {
+                "skillNameHash": "f727fb8d73ef4567f99e742ad896067d7aca535a0bb400e59b49073be2019cc2",
+                "skillSource": "plugin",
+                "found": "true"
+              },
+              "restrictedProperties": {
+                "skillName": "shared-example-b:shared-example-2",
+                "pluginName": "shared-example-b",
+                "pluginVersion": "1.0.0"
+              },
+              "metrics": {
+                "skillContentLength": 193,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4178,
+                "large_output_threshold_bytes": 20480,
+                "result_token_count": 27
+              }
+            }
+          },
+          "id": "f91e487f-d72a-42c2-8bbf-22f6aad8f7d8",
+          "timestamp": "2026-10-28T00:39:24.405Z",
+          "parentId": "40dcd741-da76-4753-80ab-63521f4def14"
+        },
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01VupP4sXkDcPmYnuxhTwMPv",
+            "toolName": "view",
+            "arguments": {
+              "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtj\\copilot\\installed-plugins\\agent-harbor\\shared-example-b\\shared-example-2\\references\\proof.txt"
+            },
+            "turnId": "1",
+            "model": "claude-sonnet-5.5",
+            "toolTitle": "Viewing file"
+          },
+          "id": "c6ce2d74-5b4e-4bd4-ae4a-ef29dc89281e",
+          "timestamp": "2026-10-28T00:39:25.746Z",
+          "parentId": "7e27bf74-a06a-4562-8cd9-806dddeecc64"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01VupP4sXkDcPmYnuxhTwMPv",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "8c1d45ce-2b75-47fd-993d-0d5a460f6f53",
+            "turnId": "1",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "SHARED_SKILL_2_479e9646d3947_1426753bcf1b9\n",
+              "detailedContent": "\ndiff --git a/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-b/shared-example-2/references/proof.txt b/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-b/shared-example-2/references/proof.txt\nindex 0000000..0000000 100644\n--- a/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-b/shared-example-2/references/proof.txt\n+++ b/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-b/shared-example-2/references/proof.txt\n@@ -1,2 +1,2 @@\n SHARED_SKILL_2_479e9646d3947_1426753bcf1b9\n \n"
+            },
+            "toolTelemetry": {
+              "properties": {
+                "command": "view",
+                "options": "{\"truncateBasedOn\":\"tokenCount\",\"truncateStyle\":\"middle\"}",
+                "inputs": "[\"path\",\"command\"]",
+                "resolvedPathAgainstCwd": "false",
+                "fileExtension": "[\".txt\"]",
+                "viewType": "file"
+              },
+              "restrictedProperties": {},
+              "metrics": {
+                "resultLength": 43,
+                "resultForLlmLength": 43,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4515,
+                "result_token_count": 29
+              }
+            }
+          },
+          "id": "3ad7e942-dced-44a5-bbfc-7d7d27e0a76b",
+          "timestamp": "2026-10-28T00:39:25.750Z",
+          "parentId": "c6ce2d74-5b4e-4bd4-ae4a-ef29dc89281e"
+        }
+      ],
+      "verification": {
+        "skillLoaded": true,
+        "referenceRead": true,
+        "exactToken": true,
+        "passed": true
+      },
+      "passed": true
+    },
+    {
+      "plugin": "shared-example-b",
+      "skill": "shared-example-3",
+      "status": 0,
+      "final": "SHARED_SKILL_3_efa9e6fd1b1ff8_3d1be072a3d338",
+      "trace": [
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01HxGSFSsDgh6pbwux9vQyn5",
+            "toolName": "skill",
+            "arguments": {
+              "skill": "shared-example-3"
+            },
+            "turnId": "0",
+            "model": "claude-sonnet-5.5"
+          },
+          "id": "b7663952-047b-4e29-81d9-126a54c02271",
+          "timestamp": "2026-10-28T00:39:30.582Z",
+          "parentId": "9336e715-d291-426c-ba7d-bc7bb675edc7"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01HxGSFSsDgh6pbwux9vQyn5",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "c9bce46a-3f9d-424d-b0bc-cf17a27a5111",
+            "turnId": "0",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "Skill \"shared-example-3\" loaded successfully. Follow the instructions in the skill context.",
+              "detailedContent": "Skill \"shared-example-3\" loaded successfully. Follow the instructions in the skill context."
+            },
+            "toolTelemetry": {
+              "properties": {
+                "skillNameHash": "4cfc4e7f4b7fd71b54130e383e17b0b7bcf0ab397da7a5d0db6e66b97162b15c",
+                "skillSource": "plugin",
+                "found": "true"
+              },
+              "restrictedProperties": {
+                "skillName": "shared-example-3",
+                "pluginName": "shared-example-b",
+                "pluginVersion": "1.0.0"
+              },
+              "metrics": {
+                "skillContentLength": 193,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4179,
+                "large_output_threshold_bytes": 20480,
+                "result_token_count": 22
+              }
+            }
+          },
+          "id": "12c18ccc-37e0-4b93-aa40-26f036c8908d",
+          "timestamp": "2026-10-28T00:39:30.585Z",
+          "parentId": "b7663952-047b-4e29-81d9-126a54c02271"
+        },
+        {
+          "type": "tool.execution_start",
+          "data": {
+            "toolCallId": "toolu_01MMVnPQVfJVmDPY4jkYBFEw",
+            "toolName": "view",
+            "arguments": {
+              "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtj\\copilot\\installed-plugins\\agent-harbor\\shared-example-b\\shared-example-3\\references\\proof.txt"
+            },
+            "turnId": "1",
+            "model": "claude-sonnet-5.5",
+            "toolTitle": "Viewing file"
+          },
+          "id": "a09646e0-2bab-4daf-9ee5-3c6afe1a9383",
+          "timestamp": "2026-10-28T00:39:31.817Z",
+          "parentId": "bcb01b97-b9ce-4120-87fa-34c4c6a5aa9a"
+        },
+        {
+          "type": "tool.execution_complete",
+          "data": {
+            "toolCallId": "toolu_01MMVnPQVfJVmDPY4jkYBFEw",
+            "model": "claude-sonnet-5.5",
+            "interactionId": "c9bce46a-3f9d-424d-b0bc-cf17a27a5111",
+            "turnId": "1",
+            "rte": true,
+            "success": true,
+            "result": {
+              "content": "SHARED_SKILL_3_efa9e6fd1b1ff8_3d1be072a3d338\n",
+              "detailedContent": "\ndiff --git a/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-b/shared-example-3/references/proof.txt b/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-b/shared-example-3/references/proof.txt\nindex 0000000..0000000 100644\n--- a/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-b/shared-example-3/references/proof.txt\n+++ b/<USER_HOME>/AppData/Local/Temp/shared-skill-plugin-3sg2nB/cmvrdzbtj/copilot/installed-plugins/agent-harbor/shared-example-b/shared-example-3/references/proof.txt\n@@ -1,2 +1,2 @@\n SHARED_SKILL_3_efa9e6fd1b1ff8_3d1be072a3d338\n \n"
+            },
+            "toolTelemetry": {
+              "properties": {
+                "command": "view",
+                "options": "{\"truncateBasedOn\":\"tokenCount\",\"truncateStyle\":\"middle\"}",
+                "inputs": "[\"path\",\"command\"]",
+                "resolvedPathAgainstCwd": "false",
+                "fileExtension": "[\".txt\"]",
+                "viewType": "file"
+              },
+              "restrictedProperties": {},
+              "metrics": {
+                "resultLength": 45,
+                "resultForLlmLength": 45,
+                "context_token_limit": 200000,
+                "context_current_tokens": 4501,
+                "result_token_count": 34
+              }
+            }
+          },
+          "id": "8aefc2a8-a99a-4237-b3d2-a6f4a0d3efcf",
+          "timestamp": "2026-10-28T00:39:31.820Z",
+          "parentId": "a09646e0-2bab-4daf-9ee5-3c6afe1a9383"
+        }
+      ],
+      "verification": {
+        "skillLoaded": true,
+        "referenceRead": true,
+        "exactToken": true,
+        "passed": true
+      },
+      "passed": true
+    }
+  ],
+  "skillsA": [
+    {
+      "name": "shared-example-1",
+      "description": "Verify shared plugin example skill 1 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtj\\copilot\\installed-plugins\\agent-harbor\\shared-example-a\\library\\shared-example-1",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtj\\copilot\\installed-plugins\\agent-harbor\\shared-example-a\\library\\shared-example-2",
+      "enabled": true
+    }
+  ],
+  "skillsBoth": [
+    {
+      "name": "shared-example-1",
+      "description": "Verify shared plugin example skill 1 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtj\\copilot\\installed-plugins\\agent-harbor\\shared-example-a\\library\\shared-example-1",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-a:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtj\\copilot\\installed-plugins\\agent-harbor\\shared-example-a\\library\\shared-example-2",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-b:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtj\\copilot\\installed-plugins\\agent-harbor\\shared-example-b\\shared-example-2",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-3",
+      "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtj\\copilot\\installed-plugins\\agent-harbor\\shared-example-b\\shared-example-3",
+      "enabled": true
+    }
+  ],
+  "operations": [
+    {
+      "args": [
+        "--version"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "https://github.com/gvillarroel/marketplace.git"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "install",
+        "shared-example-a@agent-harbor"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "skill",
+        "list",
+        "--json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "install",
+        "shared-example-b@agent-harbor"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "skill",
+        "list",
+        "--json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "-p",
+        "/shared-example-1",
+        "--allow-tool",
+        "skill",
+        "--allow-tool",
+        "view",
+        "--available-tools",
+        "skill",
+        "view",
+        "--disable-builtin-mcps",
+        "--no-custom-instructions",
+        "--sync-session=off",
+        "--no-ask-user",
+        "--no-color",
+        "--output-format",
+        "json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "-p",
+        "/shared-example-a:shared-example-2",
+        "--allow-tool",
+        "skill",
+        "--allow-tool",
+        "view",
+        "--available-tools",
+        "skill",
+        "view",
+        "--disable-builtin-mcps",
+        "--no-custom-instructions",
+        "--sync-session=off",
+        "--no-ask-user",
+        "--no-color",
+        "--output-format",
+        "json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "-p",
+        "/shared-example-b:shared-example-2",
+        "--allow-tool",
+        "skill",
+        "--allow-tool",
+        "view",
+        "--available-tools",
+        "skill",
+        "view",
+        "--disable-builtin-mcps",
+        "--no-custom-instructions",
+        "--sync-session=off",
+        "--no-ask-user",
+        "--no-color",
+        "--output-format",
+        "json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "-p",
+        "/shared-example-3",
+        "--allow-tool",
+        "skill",
+        "--allow-tool",
+        "view",
+        "--available-tools",
+        "skill",
+        "view",
+        "--disable-builtin-mcps",
+        "--no-custom-instructions",
+        "--sync-session=off",
+        "--no-ask-user",
+        "--no-color",
+        "--output-format",
+        "json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "disable",
+        "shared-example-a@agent-harbor"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "skill",
+        "list",
+        "--json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "marketplace",
+        "add",
+        "https://github.com/gvillarroel/marketplace.git"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "install",
+        "shared-example-b@agent-harbor"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "skill",
+        "list",
+        "--json"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "plugin",
+        "install",
+        "shared-example-a@agent-harbor"
+      ],
+      "status": 0
+    },
+    {
+      "args": [
+        "skill",
+        "list",
+        "--json"
+      ],
+      "status": 0
+    }
+  ],
+  "skillsBOnly": [
+    {
+      "name": "shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtj\\copilot\\installed-plugins\\agent-harbor\\shared-example-b\\shared-example-2",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-3",
+      "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtj\\copilot\\installed-plugins\\agent-harbor\\shared-example-b\\shared-example-3",
+      "enabled": true
+    }
+  ],
+  "skillsBFirst": [
+    {
+      "name": "shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtjr\\copilot\\installed-plugins\\agent-harbor\\shared-example-b\\shared-example-2",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-3",
+      "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtjr\\copilot\\installed-plugins\\agent-harbor\\shared-example-b\\shared-example-3",
+      "enabled": true
+    }
+  ],
+  "skillsBothReverse": [
+    {
+      "name": "shared-example-b:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtjr\\copilot\\installed-plugins\\agent-harbor\\shared-example-b\\shared-example-2",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-3",
+      "description": "Verify shared plugin example skill 3 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtjr\\copilot\\installed-plugins\\agent-harbor\\shared-example-b\\shared-example-3",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-1",
+      "description": "Verify shared plugin example skill 1 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtjr\\copilot\\installed-plugins\\agent-harbor\\shared-example-a\\library\\shared-example-1",
+      "enabled": true
+    },
+    {
+      "name": "shared-example-a:shared-example-2",
+      "description": "Verify shared plugin example skill 2 by reading its bundled proof file.",
+      "source": "plugin",
+      "path": "<USER_HOME>\\AppData\\Local\\Temp\\shared-skill-plugin-3sg2nB\\cmvrdzbtjr\\copilot\\installed-plugins\\agent-harbor\\shared-example-a\\library\\shared-example-2",
+      "enabled": true
+    }
+  ],
+  "membershipPassed": true,
+  "bIndependent": true,
+  "reverseOrderPassed": true,
+  "nativeSkillUsePassed": true
+}

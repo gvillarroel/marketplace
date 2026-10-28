@@ -404,3 +404,15 @@ The GitHub acceptance command is `npm run test:shared-skills`; it installs from
 `https://github.com/gvillarroel/marketplace.git` and records the tested commit,
 native registration operations, skill inventories and execution traces under
 `docs/validation/shared-skills/`.
+
+GitHub acceptance passed for commit
+`babe975c7b917b062143ee23c2613e6432dc19e9`: four exact-token native invocations
+per client, A alone, A+B, B after removing/disabling A, and a fresh B→A order.
+Both clients registered the marketplace using the GitHub URL directly; the
+remote HEAD stayed fixed throughout. See the
+[report and trace links](validation/shared-skills/report.md).
+
+The first GitHub CI attempt failed in the unchanged concurrent roster-lock
+test with `ENOENT` while reading `.roster.lock`. The failed job was rerun on
+the same commit, without a runtime or test change, and
+[passed](https://github.com/gvillarroel/marketplace/actions/runs/40610041957/job/122560010530).

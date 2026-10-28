@@ -69,7 +69,20 @@ The live command installs from the exact GitHub URL above. Use `npm run test:sha
 
 The suite checks A alone, A+B, all four native invocations, B after removing/disabling A, and a fresh B-to-A installation order. Each invocation must load the correct plugin's skill, successfully read its bundled proof, and return exactly the expected token. Raw local state is ignored; published evidence redacts home and repository paths.
 
-The repository's normal compatibility tests also check the three canonical sources and the two catalog selections without invoking models. Native acceptance results from GitHub are recorded under `docs/validation/shared-skills/` after the published snapshot is exercised.
+The repository's normal compatibility tests also check the three canonical sources and the two catalog selections without invoking models.
+
+## Verified GitHub acceptance — 2026-10-27
+
+Both clients installed the marketplace from the exact GitHub URL above in fresh isolated profiles. The tested source commit was [`babe975`](https://github.com/gvillarroel/marketplace/commit/babe975c7b917b062143ee23c2613e6432dc19e9).
+
+| Client | A alone | A+B | Native invocations | B without A | Fresh B→A order |
+| --- | --- | --- | --- | --- | --- |
+| Copilot CLI 1.0.103 | 1,2 | 1,A:2,B:2,3 | 4/4 | 2,3 | Passed |
+| Codex CLI 0.145.0 | 1,2 | 1,A:2,B:2,3 | 4/4 | 2,3 | Passed |
+
+Every invocation loaded the correct plugin's skill, successfully read its bundled proof file from the installation cache, and returned exactly the expected token. The records include successful `plugin marketplace add https://github.com/gvillarroel/marketplace.git` operations and both plugin installs. GitHub HEAD remained at the tested commit for the entire acceptance run.
+
+See the [native report](validation/shared-skills/report.md), [combined JSON results](validation/shared-skills/results.json), [Copilot trace](validation/shared-skills/copilot.json), and [Codex trace](validation/shared-skills/codex.json).
 
 These checks cover Copilot CLI and Codex CLI. They do not establish a manual test of the VS Code Copilot extension or the Codex desktop installation UI.
 
