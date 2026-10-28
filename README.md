@@ -27,6 +27,7 @@ Start with `/team`. See the [first-task guide](docs/getting-started.md) for spec
 
 - [Documentation index](docs/README.md)
 - [Usage and operations](docs/getting-started.md)
+- [Shared skills example for Codex and Copilot](docs/shared-skills-marketplace.md)
 - [Repository layout and validation](docs/repository-guide.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Commands and advanced use](docs/GUIDE.md)

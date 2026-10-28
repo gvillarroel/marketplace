@@ -1,0 +1,32 @@
+{
+  "name": "agent-harbor",
+  "owner": {
+    "name": "Gerardo Villarroel"
+  },
+  "plugins": [
+    {
+      "name": "shared-example-a",
+      "source": {
+        "source": "local",
+        "path": "./plugins/shared-skills-example"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "shared-example-b",
+      "source": {
+        "source": "local",
+        "path": "./plugins/shared-skills-example/library"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

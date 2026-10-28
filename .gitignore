@@ -11,3 +11,16 @@ __pycache__/
 !/.github/plugin/marketplace.json
 !/.github/workflows/
 !/.github/workflows/quality.yml
+
+# Installable compatibility manifests and the Codex marketplace catalog.
+!/.agents/
+!/.agents/plugins/
+!/.agents/plugins/marketplace.json
+!/plugins/shared-skills-example/.codex-plugin/
+!/plugins/shared-skills-example/.codex-plugin/plugin.json
+!/plugins/shared-skills-example/.claude-plugin/
+!/plugins/shared-skills-example/.claude-plugin/plugin.json
+!/plugins/shared-skills-example/library/.codex-plugin/
+!/plugins/shared-skills-example/library/.codex-plugin/plugin.json
+!/plugins/shared-skills-example/library/.claude-plugin/
+!/plugins/shared-skills-example/library/.claude-plugin/plugin.json

@@ -1,0 +1,8 @@
+{
+  "name": "shared-example-a",
+  "version": "1.0.0",
+  "skills": [
+    "./library/shared-example-1",
+    "./library/shared-example-2"
+  ]
+}

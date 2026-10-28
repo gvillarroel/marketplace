@@ -223,8 +223,14 @@ async function inspectCopilotEnvironment(launch: Launch, sandbox: string): Promi
 }
 
 async function pluginDirectories(): Promise<string[]> {
-  const entries = await readdir(plugins, { withFileTypes: true });
-  return entries.filter((entry) => entry.isDirectory()).map((entry) => join(plugins, entry.name));
+  const marketplace = JSON.parse(await readFile(join(root, ".github", "plugin", "marketplace.json"), "utf8"));
+  return marketplace.plugins.map((plugin: { source: string }) => {
+    assert.equal(typeof plugin.source, "string");
+    assert.ok(plugin.source.startsWith("./"));
+    const directory = resolve(root, plugin.source);
+    assert.ok(directory.startsWith(`${root}/`) || directory.startsWith(`${root}\\`));
+    return directory;
+  });
 }
 
 async function inspectCopilotDirectExtension(launch: Launch, sandbox: string, workingDirectory: string): Promise<{ events: string[]; commands: any[]; agents: any[] }> {
@@ -452,7 +458,9 @@ test("Copilot plugins expose canonical commands and extension-owned custom tools
   const skillNames = new Set<string>();
   const manifests: Array<{ name: string; version: string }> = [];
   for (const directory of directories) {
-    manifests.push(JSON.parse(await readFile(join(directory, "plugin.json"), "utf8")));
+    let manifestPath = join(directory, "plugin.json");
+    try { await access(manifestPath); } catch { manifestPath = join(directory, ".claude-plugin", "plugin.json"); }
+    manifests.push(JSON.parse(await readFile(manifestPath, "utf8")));
     const skillsDirectory = join(directory, "skills");
     let skills: import("node:fs").Dirent[] = [];
     const localSkills = new Set<string>();
@@ -465,7 +473,7 @@ test("Copilot plugins expose canonical commands and extension-owned custom tools
     if (directory.endsWith(join("plugins", "agent-foundry"))) assert.deepEqual(localSkills, new Set(["contract"]));
   }
   assert.deepEqual(skillNames, new Set(["contract"]));
-  assert.deepEqual(new Set(manifests.map((manifest) => manifest.name)), new Set(["agent-foundry"]));
+  assert.deepEqual(new Set(manifests.map((manifest) => manifest.name)), new Set(["agent-foundry", "shared-example-a", "shared-example-b"]));
   const marketplace = JSON.parse(await readFile(join(root, ".github", "plugin", "marketplace.json"), "utf8"));
   const marketplaceVersions = new Map<string, string>(marketplace.plugins.map((plugin: any) => [plugin.name, plugin.version]));
   for (const manifest of manifests) assert.equal(marketplaceVersions.get(manifest.name), manifest.version);
@@ -530,6 +538,13 @@ test("Copilot plugins expose canonical commands and extension-owned custom tools
   assert.match(scout, /^tools: \["harbor_team_roster", "harbor_filter_skills", "harbor_join_player"\]$/mu);
   assert.doesNotMatch(scout, /^tools: .*\b(?:read|search|edit|execute|task)\b/mu);
   assert.doesNotMatch(scout, /mcp|server|--scout/iu);
+});
+
+test("shared-skill plugins keep three canonical skills and contained overlapping selections", async () => {
+  const result = await run({ command: process.execPath, prefix: [] }, ["scripts/shared-skills/check.mjs"], { cwd: root });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /exactly three skills/);
+  assert.match(result.stdout, /A=\{1,2\}, B=\{2,3\}/);
 });
 
 test("Copilot runtimes contain exact physical byte copies of their shared build inputs", async () => {

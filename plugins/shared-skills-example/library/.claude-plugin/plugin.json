@@ -1,0 +1,8 @@
+{
+  "name": "shared-example-b",
+  "version": "1.0.0",
+  "skills": [
+    "./shared-example-2",
+    "./shared-example-3"
+  ]
+}

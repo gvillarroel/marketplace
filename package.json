@@ -50,6 +50,9 @@
     "test:live:codex": "node scripts/run-live-codex-leads.mjs all",
     "test:installed:copilot": "node scripts/verify-installed-copilot.mjs",
     "test:installed:copilot:smoke": "node scripts/verify-installed-copilot.mjs --smoke",
+    "check:shared-skills": "node scripts/shared-skills/check.mjs",
+    "test:shared-skills": "node scripts/shared-skills/test.mjs --source https://github.com/gvillarroel/marketplace.git",
+    "report:shared-skills": "node scripts/shared-skills/report.mjs",
     "demo:commands": "node scripts/asciinema-demo.mjs",
     "prepack": "npm run build"
   },

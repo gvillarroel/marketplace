@@ -13,6 +13,22 @@
       "source": "./plugins/agent-foundry",
       "category": "productivity",
       "tags": ["agents", "roster", "orchestration", "sdlc", "bench", "skills", "trust", "markdown"]
+    },
+    {
+      "name": "shared-example-a",
+      "description": "Overlapping shared skills example for Codex and Copilot.",
+      "version": "1.0.0",
+      "source": "./plugins/shared-skills-example",
+      "category": "productivity",
+      "tags": ["skills", "example", "codex", "copilot"]
+    },
+    {
+      "name": "shared-example-b",
+      "description": "Overlapping shared skills example for Codex and Copilot.",
+      "version": "1.0.0",
+      "source": "./plugins/shared-skills-example/library",
+      "category": "productivity",
+      "tags": ["skills", "example", "codex", "copilot"]
     }
   ]
 }
