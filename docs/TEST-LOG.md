@@ -371,3 +371,36 @@ The first concurrent full-suite attempt reported the three installed-CLI
 discovery subtests as failures. The focused compatibility file then passed all
 14 tests, and a subsequent complete clean-build run passed all 498 tests. No
 product change was needed for that transient local integration result.
+
+## Shared skill marketplace example — 2026-10-27
+
+Added the instruction-only `shared-example-a` and `shared-example-b` selections,
+with three canonical skills under `plugins/shared-skills-example/library/`.
+The existing `agent-foundry` catalog entry is byte-equivalent as parsed JSON.
+The Codex catalog registers only the two verified skill examples.
+
+| Command or check | Result |
+| --- | --- |
+| `npm run check:shared-skills` | Passed: three skills, contained paths, JSON-only manifest directories, A={1,2}, B={2,3} |
+| `npm run typecheck` | Passed |
+| `npm run quality` | Passed after the EOF hook normalized the six new skill/reference files |
+| `npm test` in an ANSI terminal environment | Passed: 499 TypeScript tests, 0 failed/skipped/cancelled; 73 capture tests passed |
+| `npm run test:ts -- test-ts/compatibility.test.ts` | Passed: 15 tests, including the new shared-skill check and installed CLI discovery |
+| `npm run test:capture` | Passed: 73 tests |
+| `node scripts/shared-skills/test.mjs` | Passed: local Git smart-HTTP preflight; 4/4 invocations each in Copilot CLI 1.0.103 and Codex CLI 0.145.0; A→B, B→A and B without A |
+| `npm pack --dry-run --json --silent` | Passed: 181 entries, including all four compatibility manifests |
+
+The initial full run inherited `NO_COLOR` and `TERM=dumb` from the automation
+terminal. One existing Pi test requires ANSI output; another failed a short
+provider-settlement timing assertion during that run and passed when isolated.
+Both focused tests and the complete suite passed with `NO_COLOR` unset and
+`TERM=xterm-256color`. No Pi runtime or test implementation was changed.
+
+`npm ci` installed 41 packages from the existing lockfile and reported four
+high-severity audit findings in that existing dependency set. This example adds
+no dependencies. Raw test logs and isolated profiles are excluded from Git.
+
+The GitHub acceptance command is `npm run test:shared-skills`; it installs from
+`https://github.com/gvillarroel/marketplace.git` and records the tested commit,
+native registration operations, skill inventories and execution traces under
+`docs/validation/shared-skills/`.

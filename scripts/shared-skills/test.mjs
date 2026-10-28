@@ -42,6 +42,7 @@ async function testClient(client) {
   const record={client,version,testedAt:new Date().toISOString(),source,snapshotCommit,sourceSkillCount:structure.skillCount,profile,invocations:[]};
   const save=()=>{
     write(path.join(root,'.test-state',`${client}-commands.json`),commands);
+    record.operations=commands.filter(command=>Array.isArray(command.args)).map(command=>({args:command.args,status:command.status}));
     write(path.join(outputDirectory,`${client}.json`),redactEvidence(record));
   };
   await register(profile);await install('shared-example-a');record.skillsA=await inventory();assert.deepEqual(names(record.skillsA),expected.a);console.log(`${client}: A exposes exactly skills 1 and 2.`);
@@ -64,6 +65,7 @@ async function testClient(client) {
   record.skillsBOnly=await inventory();assert.deepEqual(names(record.skillsBOnly),expected.b);
   await register(reverse);await install('shared-example-b',reverse);record.skillsBFirst=await inventory(reverse);assert.deepEqual(names(record.skillsBFirst),expected.b);
   await install('shared-example-a',reverse);record.skillsBothReverse=await inventory(reverse);assert.deepEqual(names(record.skillsBothReverse),expected.both);
+  if(remoteSource)assert.equal(git(['ls-remote',remoteSource,'HEAD']).split(/\s+/)[0],snapshotCommit,'GitHub HEAD changed during acceptance');
   record.membershipPassed=true;record.bIndependent=true;record.reverseOrderPassed=true;record.nativeSkillUsePassed=true;save();
   console.log(`PASS ${client}: direct Git install, exact skill selection, 4/4 invocations, B independent, reverse order.`);
 }
